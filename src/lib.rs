@@ -21,7 +21,7 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 use ui::{
     accent, accent_foreground, background, border, foreground, muted_foreground, popover, primary,
-    radius, success, surface, surface_foreground, warning,
+    radius, success, surface, warning,
 };
 
 const START_COLS: u16 = 100;
@@ -732,9 +732,9 @@ pub fn App() -> impl IntoElement {
     let bar_state = state.clone();
     let menu_state = state.clone();
     let status_state = state.clone();
-    let status_name = state.clone();
-    let status_dims = state.clone();
-    let status_settings = state.clone();
+    let palette_button_state = state.clone();
+    let dims_state = state.clone();
+    let settings_button_state = state.clone();
     let pane_state = state.clone();
     let area_w = signal(0.0_f32);
     let area_h = signal(0.0_f32);
@@ -765,12 +765,29 @@ pub fn App() -> impl IntoElement {
                 }))
                 .child(profile_menu(menu_state))
                 .child(view().flex_1())
+                // The palette is a real button, not a hint about a shortcut:
+                // a pointer user has to be able to find it too.
                 .child(
-                    text("Ctrl+Shift+P 命令面板")
-                        .text_xs()
-                        .text_color(muted_foreground())
-                        .px_2(),
-                ),
+                    text(move || {
+                        let Some(pane) = dims_state.active_pane() else {
+                            return String::new();
+                        };
+                        let (cols, rows) = pane.dims_view.get();
+                        format!("{cols}×{rows}")
+                    })
+                    .text_xs()
+                    .text_color(muted_foreground())
+                    .px_2(),
+                )
+                .child(ui::icon_button("⌘", "命令面板（Ctrl+Shift+P）", {
+                    let state = palette_button_state.clone();
+                    move || state.palette_open.set(true)
+                }))
+                .child(ui::icon_button("⚙", "设置（Ctrl+,）", {
+                    let state = settings_button_state.clone();
+                    move || state.settings_open.set(true)
+                }))
+                .px_2(),
         )
         .child(
             view()
@@ -798,45 +815,6 @@ pub fn App() -> impl IntoElement {
                         area_h.set(bounds.size.height.0);
                     }
                 }),
-        )
-        // The status bar: what the active pane is, how big it is, and the
-        // way into the settings.
-        .child(
-            view()
-                .h(px(26.0))
-                .w_full()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .px_3()
-                .border_t_1()
-                .border_color(border())
-                .bg(surface())
-                .child(
-                    text(move || {
-                        status_name
-                            .active_pane()
-                            .map(|pane| pane.profile.name.clone())
-                            .unwrap_or_default()
-                    })
-                    .text_xs()
-                    .text_color(surface_foreground()),
-                )
-                .child(view().flex_1())
-                .child(
-                    text(move || {
-                        let Some(pane) = status_dims.active_pane() else {
-                            return String::new();
-                        };
-                        let (cols, rows) = pane.dims_view.get();
-                        format!("{cols}×{rows}")
-                    })
-                    .text_xs()
-                    .text_color(muted_foreground()),
-                )
-                .child(ui::text_button("设置…", move || {
-                    status_settings.settings_open.set(true);
-                })),
         )
         // The palette and the settings dismiss themselves (a press outside,
         // Escape), so nothing here has to draw a backdrop for them.
@@ -1951,7 +1929,6 @@ fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
 /// The settings sheet: nsh/base's Sheet owns the placement, the backdrop,
 /// Escape and the dismissal, so the panel never spills past the window.
 fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
-    let current = state.settings.get();
     let close = {
         let state = state.clone();
         move || state.settings_open.set(false)
@@ -1982,7 +1959,11 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
     let mut family_rows = view().gap_1();
     for family in settings::FONT_FAMILIES {
         let state_row = state.clone();
-        let selected = current.font_family == family;
+        let state_check = state.clone();
+        let family_name = family.to_owned();
+        // Read the setting when the row draws, not once when the sheet is
+        // built: the tick has to move when the choice changes.
+        let selected = move || state_check.settings.get().font_family == family_name;
         family_rows = family_rows.child(ui::setting_row(family, selected, move || {
             let mut next = state_row.settings.get();
             next.font_family = family.to_owned();
@@ -1992,7 +1973,9 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
 
     let mut scheme_rows = view().gap_1();
     for candidate in settings::schemes() {
-        let selected = candidate.name == current.scheme;
+        let state_check = state.clone();
+        let scheme_name = candidate.name.clone();
+        let selected = move || state_check.settings.get().scheme == scheme_name;
         let swatch = ui::scheme_chip(
             candidate.background,
             [
@@ -2021,7 +2004,7 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .child(text(name).text_sm().text_color(foreground()))
                 .child(view().flex_1())
                 .child(
-                    text(if selected { "✓" } else { "" })
+                    text(move || SharedString::from(if selected() { "✓" } else { "" }))
                         .text_sm()
                         .text_color(primary()),
                 ),
@@ -2031,7 +2014,9 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
     let mut profile_rows = view().gap_1();
     for profile in state.profiles.iter() {
         let name = profile.name.clone();
-        let selected = state.settings.get().default_profile == name;
+        let state_check = state.clone();
+        let profile_name = profile.name.clone();
+        let selected = move || state_check.settings.get().default_profile == profile_name;
         profile_rows = profile_rows.child(
             view()
                 .flex_row()
@@ -2054,7 +2039,7 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .child(text(name).text_sm().text_color(foreground()))
                 .child(view().flex_1())
                 .child(
-                    text(if selected { "默认" } else { "" })
+                    text(move || SharedString::from(if selected() { "默认" } else { "" }))
                         .text_xs()
                         .text_color(primary()),
                 ),

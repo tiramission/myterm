@@ -176,7 +176,7 @@ pub fn badge(label: impl Into<SharedString>, tone: AdaptiveColor) -> impl IntoEl
 /// A settings row: a label, an optional value, and a selected mark.
 pub fn setting_row(
     label: impl Into<SharedString>,
-    selected: bool,
+    selected: impl IntoReactive<bool>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     let label = label.into();
@@ -193,9 +193,13 @@ pub fn setting_row(
         .child(text(label).text_sm().text_color(foreground()))
         .child(view().flex_1())
         .child(
-            text(if selected { "✓" } else { "" })
-                .text_sm()
-                .text_color(primary()),
+            text(
+                selected
+                    .into_reactive()
+                    .map(|on| SharedString::from(if on { "✓" } else { "" })),
+            )
+            .text_sm()
+            .text_color(primary()),
         )
 }
 
