@@ -43,6 +43,14 @@ pub struct Scheme {
     pub palette: [u32; 16],
 }
 
+/// The families the settings offer: monospaced fonts with a wide coverage of
+/// CJK, which the terminal needs for Chinese text.
+pub const FONT_FAMILIES: [&str; 3] = [
+    "Maple Mono NF CN",
+    "Cascadia Mono",
+    "JetBrains Maple Mono",
+];
+
 impl Scheme {
     /// The ANSI palette as the 256-entry table the terminal wants: the first
     /// sixteen come from the scheme, the rest from libghostty's generated

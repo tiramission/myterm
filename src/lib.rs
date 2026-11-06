@@ -375,8 +375,18 @@ fn new_pane(state: &Rc<AppState>, profile: &profiles::Profile) -> Rc<Pane> {
 }
 
 fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
+    // An explicit index wins, then the settings' default profile, then the
+    // first one that was found.
+    let preferred = state.settings.get().default_profile;
     let profile = profile
         .and_then(|index| state.profiles.get(index).cloned())
+        .or_else(|| {
+            state
+                .profiles
+                .iter()
+                .find(|profile| profile.name == preferred)
+                .cloned()
+        })
         .or_else(|| state.profiles.first().cloned())?;
 
     let pane = new_pane(state, &profile);
@@ -1853,6 +1863,37 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
         move || format!("{} pt", state.settings.get().font_size)
     };
 
+    let mut family_rows = view().gap_1();
+    for family in settings::FONT_FAMILIES {
+        let state_row = state.clone();
+        let selected = current.font_family == family;
+        family_rows = family_rows.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .on_press(move || {
+                    let mut next = state_row.settings.get();
+                    next.font_family = family.to_owned();
+                    save_settings(&state_row, next);
+                })
+                .child(
+                    text(family)
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xe6e8ec)),
+                )
+                .child(view().flex_1())
+                .child(
+                    text(if selected { "✓" } else { "" })
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x5b9dff)),
+                ),
+        );
+    }
+
     let mut scheme_rows = view().gap_1();
     for candidate in settings::schemes() {
         let name = candidate.name.clone();
@@ -1973,6 +2014,16 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                         )
                         .child(step_button("+", size_up)),
                 ),
+        )
+        .child(
+            view()
+                .gap_2()
+                .child(
+                    text("字体")
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x8b929e)),
+                )
+                .child(family_rows),
         )
         .child(
             view()
