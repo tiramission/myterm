@@ -88,7 +88,7 @@ pub fn radius() -> Points {
 pub fn menu_row(label: impl Into<SharedString>, on_press: impl Fn() + 'static) -> impl IntoElement {
     view()
         .px_3()
-        .py_2()
+        .py_1()
         .rounded(radius())
         .hover(|s| s.bg(accent()))
         .active(|s| s.bg(accent()))
@@ -185,7 +185,7 @@ pub fn setting_row(
         .items_center()
         .gap_2()
         .px_3()
-        .py_2()
+        .py_1()
         .rounded(radius())
         .hover(|s| s.bg(accent()))
         .active(|s| s.bg(accent()))
@@ -202,4 +202,59 @@ pub fn setting_row(
 /// A section label inside a panel.
 pub fn section_label(label: impl Into<SharedString>) -> impl IntoElement {
     text(label.into()).text_xs().text_color(muted_foreground())
+}
+
+/// The scrim behind a modal overlay: dims the content under it and closes it
+/// when pressed.
+pub fn backdrop(on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w_full()
+        .h_full()
+        .bg(nsh_core::color::black().opacity(0.45))
+        .on_press(on_press)
+}
+
+/// A keyboard shortcut, shown as a small chip beside the command it runs.
+pub fn shortcut_chip(keys: impl IntoReactive<SharedString>) -> impl IntoElement {
+    view()
+        .px_1()
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(border())
+        .child(text(keys).text_xs().text_color(muted_foreground()))
+}
+
+/// A title inside a panel, with an optional one-line description under it.
+pub fn panel_title(title: impl Into<SharedString>) -> impl IntoElement {
+    text(title.into())
+        .text_lg()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(foreground())
+}
+
+/// A description under a [`panel_title`].
+pub fn panel_subtitle(text_value: impl Into<SharedString>) -> impl IntoElement {
+    text(text_value.into())
+        .text_sm()
+        .text_color(muted_foreground())
+}
+
+/// A short cut of the terminal's own colors, used where a scheme is chosen:
+/// its background with three of its ANSI colors. These are data, not tokens.
+pub fn scheme_chip(background: u32, colors: [u32; 3]) -> impl IntoElement {
+    view()
+        .flex_row()
+        .size(px(28.0))
+        .rounded(px(4.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(border())
+        .bg(rgb(background))
+        .child(view().flex_1().h_full().bg(rgb(colors[0])))
+        .child(view().flex_1().h_full().bg(rgb(colors[1])))
+        .child(view().flex_1().h_full().bg(rgb(colors[2])))
 }

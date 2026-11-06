@@ -45,12 +45,51 @@ enum PaletteAction {
     Settings,
 }
 
+/// A palette command: what it says, and what it does.
 #[derive(Clone, PartialEq)]
 struct PaletteItem {
     title: String,
     hint: String,
     keywords: &'static str,
     action: PaletteAction,
+}
+
+impl PaletteItem {
+    /// The command's id for `nsh_base::Command`, which identifies an item by
+    /// the app's own key rather than by its label.
+    fn id(&self) -> String {
+        format!("{:?}", self.action)
+    }
+
+    fn to_command(&self, group: &str) -> nsh_base::CommandItem {
+        let mut item = nsh_base::CommandItem::new(self.id(), self.title.clone())
+            .keywords(
+                self.keywords
+                    .split_whitespace()
+                    .map(|word| word.to_owned())
+                    .collect::<Vec<String>>(),
+            )
+            .group(group.to_owned());
+        if !self.hint.is_empty() {
+            item = item.shortcut(shortcut_key(self.hint.as_str()));
+        }
+        item
+    }
+}
+
+/// The keystroke `hint` shows, as `keymap` names it (`ctrl+shift+p`).
+fn shortcut_key(hint: &str) -> String {
+    hint.split('+')
+        .map(|part| part.trim().to_lowercase())
+        .collect::<Vec<String>>()
+        .join("+")
+}
+
+/// The action an id names, from the palette's own list.
+fn action_of(all: &[PaletteItem], id: &str) -> Option<PaletteAction> {
+    all.iter()
+        .find(|item| item.id() == id)
+        .map(|item| item.action.clone())
 }
 
 #[derive(Clone, PartialEq)]
@@ -103,6 +142,12 @@ struct Pane {
     /// Where the terminal cursor is in points inside the pane: the IME
     /// anchors its composition and candidate windows there.
     ime_at: Signal<(f32, f32)>,
+    /// The invisible `Scroll` view that receives the wheel, and the offset
+    /// it is kept at (the middle spacer, with the pane's own height).
+    wheel: ElementRef,
+    wheel_anchor: Signal<f32>,
+    /// The offset of the last wheel report, so each notch counts once.
+    wheel_last: Signal<f32>,
 }
 
 impl Pane {
@@ -197,10 +242,7 @@ struct AppState {
     next_pane: Cell<u64>,
     profiles: Vec<profiles::Profile>,
     palette_open: Signal<bool>,
-    palette_query: Signal<String>,
-    palette_items: Signal<Vec<PaletteItem>>,
     palette_all: Vec<PaletteItem>,
-    palette_focus: ElementRef,
     settings: Signal<settings::Settings>,
     metrics: Signal<grid::Metrics>,
     scheme: Signal<settings::Scheme>,
@@ -379,6 +421,9 @@ fn new_pane(state: &Rc<AppState>, profile: &profiles::Profile) -> Rc<Pane> {
         dragging: Cell::new(false),
         bounds: Cell::new((0.0, 0.0)),
         ime_at: signal((0.0_f32, 0.0_f32)),
+        wheel: element_ref(),
+        wheel_anchor: signal(0.0_f32),
+        wheel_last: signal(0.0_f32),
     })
 }
 
@@ -547,7 +592,6 @@ pub fn App() -> impl IntoElement {
             action: PaletteAction::Settings,
         },
     ]);
-    let palette_items = palette_all.clone();
     let defaults = load_settings();
     let metrics = grid::Metrics::new(
         defaults.font_size,
@@ -564,10 +608,7 @@ pub fn App() -> impl IntoElement {
         next_pane: Cell::new(0),
         profiles: profile_list,
         palette_open: signal(false),
-        palette_query: signal(String::new()),
-        palette_items: signal(palette_items),
         palette_all,
-        palette_focus: element_ref(),
         settings: signal(defaults.clone()),
         metrics: signal(metrics),
         scheme: signal(settings::scheme(&defaults.scheme)),
@@ -785,37 +826,8 @@ pub fn App() -> impl IntoElement {
                     status_settings.settings_open.set(true);
                 })),
         )
-        // A press outside the overlay dismisses it, as Escape does. The
-        // backdrop comes first, so the overlay's own controls stay reachable.
-        .child(when(
-            {
-                let state = state.clone();
-                move || state.settings_open.get() || state.palette_open.get()
-            },
-            {
-                let press = state.clone();
-                move || {
-                    view()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .w_full()
-                        .h_full()
-                        .on_press({
-                            let state = press.clone();
-                            move || {
-                                if state.palette_open.get() {
-                                    state.palette_open.set(false);
-                                    state.palette_query.set(String::new());
-                                    state.palette_items.set(state.palette_all.clone());
-                                } else {
-                                    state.settings_open.set(false);
-                                }
-                            }
-                        })
-                }
-            },
-        ))
+        // The palette and the settings dismiss themselves (a press outside,
+        // Escape), so nothing here has to draw a backdrop for them.
         .child(when(
             {
                 let state = state.clone();
@@ -962,166 +974,224 @@ fn pane_container(
     let dismiss_pane = pane.clone();
     let ime_at = pane.ime_at;
 
-    view()
+    // A wheel reaches the app only through a Scroll view (NSH hands wheel
+    // deltas to no other view), so the pane is one. Its content is the pane
+    // between two spacers of the pane's own height: the wheel can then move
+    // either way, and each notch is read as the distance from the middle
+    // spacer, where the offset is put back afterwards.
+    let wheel_ref = pane.wheel;
+    let wheel_anchor = pane.wheel_anchor;
+    let wheel_pane = pane.clone();
+    let wheel_metrics = pane_metrics.clone();
+    let wheel_last = pane.wheel_last;
+
+    scroll()
         .absolute()
         .left(px(x))
         .top(px(y))
         .w(px(w))
         .h(px(h))
-        .overflow_hidden()
-        .border_1()
-        .border_color(move || {
-            if active.get() == pane_id {
-                primary()
-            } else {
-                background()
+        .scrollbar(false)
+        .bounces(false)
+        .element_ref(&wheel_ref)
+        .on_scroll(move |event: &ScrollEvent| {
+            let anchor = wheel_anchor.get();
+            if anchor <= 0.0 {
+                return;
+            }
+            // Each event reports the offset the view sits at. The step is how
+            // far it moved since the last report, so a notch in either
+            // direction counts once and rounding never accumulates.
+            let previous = wheel_last.get();
+            let previous = if previous <= 0.0 { anchor } else { previous };
+            let offset = event.offset.y.0;
+            let steps = ((offset - previous) / wheel_metrics.cell_h).round() as i32;
+            wheel_last.set(offset);
+            if steps != 0 {
+                if let Some(session) = wheel_pane.session.as_ref() {
+                    session.scroll(steps);
+                }
+            }
+            // Recentre once the view has travelled half a pane either way, so
+            // the next notch always has room.
+            if (offset - anchor).abs() > anchor * 0.4 {
+                wheel_last.set(anchor);
+                wheel_ref.scroll_to_offset(Points(anchor), false);
             }
         })
-        .label("终端窗格")
-        .on_press(move || {
-            activate_state.activate_pane(&activate_tab, pane_id);
-            focus_ref.focus();
+        .on_layout({
+            let wheel_ref = wheel_ref;
+            let wheel_anchor = wheel_anchor;
+            move |bounds: &Bounds<Points>| {
+                let height = bounds.size.height.0;
+                if height > 0.0 && (wheel_anchor.get() - height).abs() > 0.5 {
+                    wheel_anchor.set(height);
+                    wheel_ref.scroll_to_offset(Points(height), false);
+                }
+            }
         })
-        .child(when(
-            move || find_condition.find_open.get(),
-            move || find_bar(find_state.clone(), find_body.clone()),
-        ))
-        .child(when(
-            move || exit_condition.exit.get().is_some(),
-            move || exit_strip(exit_state.clone(), exit_body.clone()),
-        ))
-        .child(when(
-            move || error_condition.error.is_some(),
-            move || error_panel(error_body.clone(), error_state.clone()),
-        ))
-        .child(
-            nsh_base::input()
-                .element_ref(&pane.focus)
-                .value(move || String::new())
-                .caret(false)
-                .auto_focus(true)
-                .paste_behavior(PasteBehavior::Report)
-                // Typed text reaches the shell through the key press alone:
-                // NSH reports one per inserted character, and the IME
-                // reports its committed text the same way. `on_change`
-                // carries the field's whole accumulated text (including a
-                // composition in progress), so sending from it would push
-                // every pinyin letter into the shell.
-                .on_key_press(move |key: &str| {
-                    if key == "Backspace" || key == "Enter" {
-                        return;
-                    }
-                    if !key.is_empty() {
-                        if let Some(session) = key_pane.session.as_ref() {
-                            session.send_text(key);
-                        }
-                    }
-                })
-                .on_composition_change(move |event: &Composition| {
-                    composition.set(event.composing);
-                })
-                // The IME places its composition and candidate windows at
-                // this input's caret, so the field sits on the terminal's
-                // own cursor instead of the pane's corner: Chinese input
-                // then appears where the text will go.
-                .absolute()
-                .left(move || px(ime_at.get().0))
-                .top(move || px(ime_at.get().1))
-                .size(px(1.0))
-                .opacity(0.0),
-        )
+        .child(view().w(px(w)).h(px(h)).pointer_events(PointerEvents::None))
         .child(
             view()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .w_full()
-                .h_full()
-                .on_context_menu(move |event: &ContextMenuEvent| {
-                    menu_pane
-                        .menu_at
-                        .set((event.position.x.0, event.position.y.0));
-                    menu_pane.menu_open.set(true);
+                .w(px(w))
+                .h(px(h))
+                .overflow_hidden()
+                .border_1()
+                .border_color(move || {
+                    if active.get() == pane_id {
+                        primary()
+                    } else {
+                        background()
+                    }
                 })
-                .on_press({
-                    let pane = dismiss_pane.clone();
-                    move || pane.menu_open.set(false)
+                .label("终端窗格")
+                .on_press(move || {
+                    activate_state.activate_pane(&activate_tab, pane_id);
+                    focus_ref.focus();
                 })
-                .on_touch({
-                    let pane = pane.clone();
-                    let metrics = pane_metrics.clone();
-                    move |event: &TouchEvent| {
-                        let Some(point) = event.points.iter().find(|point| point.changed) else {
-                            return;
-                        };
-                        let col = ((point.location.x.0 - metrics.pad) / metrics.cell_w)
-                            .floor()
-                            .max(0.0) as u16;
-                        let row = ((point.location.y.0 - metrics.pad) / metrics.cell_h)
-                            .floor()
-                            .max(0.0) as u16;
-                        let (cols, rows) = pane.grid.get();
-                        let cell = (
-                            col.min(cols.saturating_sub(1)),
-                            u32::from(row.min(rows.saturating_sub(1))),
-                        );
-                        match event.phase {
-                            TouchPhase::Start => {
-                                pane.anchor.set(Some(cell));
-                                pane.dragging.set(false);
-                                if let Some(session) = pane.session.as_ref() {
-                                    session.clear_selection();
+                .child(when(
+                    move || find_condition.find_open.get(),
+                    move || find_bar(find_state.clone(), find_body.clone()),
+                ))
+                .child(when(
+                    move || exit_condition.exit.get().is_some(),
+                    move || exit_strip(exit_state.clone(), exit_body.clone()),
+                ))
+                .child(when(
+                    move || error_condition.error.is_some(),
+                    move || error_panel(error_body.clone(), error_state.clone()),
+                ))
+                .child(
+                    nsh_base::input()
+                        .element_ref(&pane.focus)
+                        .value(move || String::new())
+                        .caret(false)
+                        .auto_focus(true)
+                        .paste_behavior(PasteBehavior::Report)
+                        // Typed text reaches the shell through the key press alone:
+                        // NSH reports one per inserted character, and the IME
+                        // reports its committed text the same way. on_change
+                        // carries the field's whole accumulated text (including a
+                        // composition in progress), so sending from it would push
+                        // every pinyin letter into the shell.
+                        .on_key_press(move |key: &str| {
+                            if key == "Backspace" || key == "Enter" {
+                                return;
+                            }
+                            if !key.is_empty() {
+                                if let Some(session) = key_pane.session.as_ref() {
+                                    session.send_text(key);
                                 }
                             }
-                            TouchPhase::Move => {
-                                if let Some(anchor) = pane.anchor.get() {
-                                    if anchor != cell || pane.dragging.get() {
-                                        pane.dragging.set(true);
+                        })
+                        .on_composition_change(move |event: &Composition| {
+                            composition.set(event.composing);
+                        })
+                        // The IME places its composition and candidate windows at
+                        // this input's caret, so the field sits just below the
+                        // terminal's own cursor instead of the pane's corner.
+                        .absolute()
+                        .left(move || px(ime_at.get().0))
+                        .top(move || px(ime_at.get().1))
+                        .size(px(1.0))
+                        .opacity(0.0),
+                )
+                .child(
+                    view()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .w_full()
+                        .h_full()
+                        .on_context_menu(move |event: &ContextMenuEvent| {
+                            menu_pane
+                                .menu_at
+                                .set((event.position.x.0, event.position.y.0));
+                            menu_pane.menu_open.set(true);
+                        })
+                        .on_press({
+                            let pane = dismiss_pane.clone();
+                            move || pane.menu_open.set(false)
+                        })
+                        .on_touch({
+                            let pane = pane.clone();
+                            let metrics = pane_metrics.clone();
+                            move |event: &TouchEvent| {
+                                let Some(point) = event.points.iter().find(|point| point.changed)
+                                else {
+                                    return;
+                                };
+                                let col = ((point.location.x.0 - metrics.pad) / metrics.cell_w)
+                                    .floor()
+                                    .max(0.0) as u16;
+                                let row = ((point.location.y.0 - metrics.pad) / metrics.cell_h)
+                                    .floor()
+                                    .max(0.0) as u16;
+                                let (cols, rows) = pane.grid.get();
+                                let cell = (
+                                    col.min(cols.saturating_sub(1)),
+                                    u32::from(row.min(rows.saturating_sub(1))),
+                                );
+                                match event.phase {
+                                    TouchPhase::Start => {
+                                        pane.anchor.set(Some(cell));
+                                        pane.dragging.set(false);
                                         if let Some(session) = pane.session.as_ref() {
-                                            session.select(anchor, cell);
+                                            session.clear_selection();
                                         }
+                                    }
+                                    TouchPhase::Move => {
+                                        if let Some(anchor) = pane.anchor.get() {
+                                            if anchor != cell || pane.dragging.get() {
+                                                pane.dragging.set(true);
+                                                if let Some(session) = pane.session.as_ref() {
+                                                    session.select(anchor, cell);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    TouchPhase::End | TouchPhase::Cancel => {
+                                        pane.anchor.set(None);
                                     }
                                 }
                             }
-                            TouchPhase::End | TouchPhase::Cancel => {
-                                pane.anchor.set(None);
+                        })
+                        .on_layout({
+                            let pane = pane.clone();
+                            let metrics = pane_metrics.clone();
+                            move |bounds: &Bounds<Points>| {
+                                pane.bounds.set((bounds.size.width.0, bounds.size.height.0));
+                                let cols = metrics.cols(bounds.size.width.0);
+                                let rows = metrics.rows(bounds.size.height.0);
+                                if cols == 0 || rows == 0 {
+                                    return;
+                                }
+                                if pane.grid.get() != (cols, rows) {
+                                    pane.grid.set((cols, rows));
+                                    if pane.dims.get() != (cols, rows) {
+                                        pane.dims.set((cols, rows));
+                                    }
+                                    if let Some(session) = pane.session.as_ref() {
+                                        session.resize(
+                                            cols,
+                                            rows,
+                                            metrics.cell_w as u32,
+                                            metrics.cell_h as u32,
+                                        );
+                                    }
+                                }
                             }
-                        }
-                    }
-                })
-                .on_layout({
-                    let pane = pane.clone();
-                    let metrics = pane_metrics.clone();
-                    move |bounds: &Bounds<Points>| {
-                        pane.bounds.set((bounds.size.width.0, bounds.size.height.0));
-                        let cols = metrics.cols(bounds.size.width.0);
-                        let rows = metrics.rows(bounds.size.height.0);
-                        if cols == 0 || rows == 0 {
-                            return;
-                        }
-                        if pane.grid.get() != (cols, rows) {
-                            pane.grid.set((cols, rows));
-                            if pane.dims.get() != (cols, rows) {
-                                pane.dims.set((cols, rows));
-                            }
-                            if let Some(session) = pane.session.as_ref() {
-                                session.resize(
-                                    cols,
-                                    rows,
-                                    metrics.cell_w as u32,
-                                    metrics.cell_h as u32,
-                                );
-                            }
-                        }
-                    }
-                }),
+                        }),
+                )
+                // The menu is the last child, so it sits above the full-size
+                // touch layer: otherwise that layer takes the clicks meant for
+                // its rows.
+                .child(when(
+                    move || menu_condition.menu_open.get(),
+                    move || context_menu_view(menu_state.clone(), menu_body.clone()),
+                )),
         )
-        // The menu is the last child, so it sits above the full-size touch
-        // layer: otherwise that layer takes the clicks meant for its rows.
-        .child(when(
-            move || menu_condition.menu_open.get(),
-            move || context_menu_view(menu_state.clone(), menu_body.clone()),
-        ))
+        .child(view().w(px(w)).h(px(h)).pointer_events(PointerEvents::None))
         .into_element()
 }
 
@@ -1414,13 +1484,6 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
         Box::new(move || {
             let open = !state.palette_open.get();
             state.palette_open.set(open);
-            if open {
-                let focus = state.palette_focus;
-                set_timeout(Duration::from_millis(0), move || focus.focus());
-            } else {
-                state.palette_query.set(String::new());
-                state.palette_items.set(state.palette_all.clone());
-            }
         })
     });
     bind("ctrl+shift+u", {
@@ -1485,13 +1548,12 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
             },
             move |_| {
                 let active = state.active_pane();
+                // The palette's own Command owns Return and Escape, so they
+                // are not handled here while it is open.
+                if state.palette_open.get() {
+                    return;
+                }
                 if keystroke == &"enter" {
-                    if state.palette_open.get() {
-                        if let Some(item) = state.palette_items.get().first() {
-                            run_palette(&state, item.action.clone());
-                        }
-                        return;
-                    }
                     if let Some(pane) = active.as_ref() {
                         if pane.find_open.get() {
                             let skip = pane.find_skip.get() + 1;
@@ -1512,8 +1574,6 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
                     }
                     if state.palette_open.get() {
                         state.palette_open.set(false);
-                        state.palette_query.set(String::new());
-                        state.palette_items.set(state.palette_all.clone());
                         state.focus_active_pane();
                         return;
                     }
@@ -1756,18 +1816,6 @@ fn profile_menu(state: Rc<AppState>) -> impl IntoElement {
     menu_view
 }
 
-fn filter_palette(all: &[PaletteItem], query: &str) -> Vec<PaletteItem> {
-    let needle = query.trim().to_lowercase();
-    all.iter()
-        .filter(|item| {
-            needle.is_empty()
-                || item.title.to_lowercase().contains(&needle)
-                || item.keywords.contains(&needle)
-        })
-        .cloned()
-        .collect()
-}
-
 fn run_palette(state: &Rc<AppState>, action: PaletteAction) {
     match action {
         PaletteAction::NewTab => {
@@ -1802,80 +1850,88 @@ fn run_palette(state: &Rc<AppState>, action: PaletteAction) {
         PaletteAction::Settings => state.settings_open.set(true),
     }
     state.palette_open.set(false);
-    state.palette_query.set(String::new());
-    state.palette_items.set(state.palette_all.clone());
 }
 
+/// The command palette: nsh/base's Command in an overlay, so the list
+/// virtualizes, the keyboard drives it, the query filters it and the
+/// shortcuts show beside their rows.
 fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
-    let query_state = state.clone();
-    let change_state = state.clone();
-    let row_state = state.clone();
+    let run_state = state.clone();
     let all = Rc::new(state.palette_all.clone());
+    let close_state = state.clone();
 
-    view()
-        .absolute()
-        .top(px(64.0))
-        .left(px(140.0))
-        .w(px(520.0))
-        .p_2()
-        .gap_2()
-        .rounded(radius())
-        .border_1()
-        .border_color(border())
-        .bg(popover())
-        .shadow_lg()
+    let mut items = Vec::new();
+    for item in state.palette_all.iter() {
+        let group = if item.keywords.contains("new tab") {
+            "会话"
+        } else if item.keywords.contains("split") {
+            "窗格"
+        } else if item.keywords.contains("scroll") {
+            "视图"
+        } else {
+            "编辑"
+        };
+        items.push(item.to_command(group));
+    }
+
+    overlay()
+        .top(px(72.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .items_center()
+        .on_press_outside({
+            let state = close_state.clone();
+            move |_: &Point<Points>| state.palette_open.set(false)
+        })
+        .on_cancel({
+            let state = close_state.clone();
+            move || state.palette_open.set(false)
+        })
         .child(
-            nsh_base::input()
-                .element_ref(&state.palette_focus)
-                .value(move || query_state.palette_query.get())
-                .placeholder("输入命令…")
-                .auto_focus(true)
-                .on_change(move |text: &str| {
-                    let items = filter_palette(&all, text);
-                    change_state.palette_query.set(text.to_owned());
-                    change_state.palette_items.set(items);
-                })
-                .h(px(30.0))
-                .w_full()
-                .px_2()
-                .text_sm()
-                .text_color(foreground())
-                .bg(background())
-                .rounded(px(4.0)),
+            view()
+                .w(px(540.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(border())
+                .bg(popover())
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    nsh_base::command()
+                        .items(items)
+                        .placeholder("输入命令…")
+                        .auto_focus(true)
+                        .accessibility_label("命令")
+                        .search_accessibility_label("搜索命令")
+                        .search_bar_style(|s| {
+                            s.h(px(44.0)).px_3().border_b_1().border_color(border())
+                        })
+                        .search_style(|s| s.text_sm().text_color(foreground()))
+                        .list_class("p-1 max-h-96")
+                        .item_class(
+                            "px-3 py-1.5 rounded-md text-sm text-foreground focus:bg-accent",
+                        )
+                        .group_class("px-3 pt-2 pb-1 text-xs text-muted-foreground")
+                        .separator_class("h-px bg-border")
+                        .on_select({
+                            let state = run_state.clone();
+                            let all = all.clone();
+                            move |id: &SharedString| {
+                                if let Some(action) = action_of(&all, id) {
+                                    run_palette(&state, action);
+                                }
+                            }
+                        })
+                        .on_cancel({
+                            let state = close_state.clone();
+                            move || state.palette_open.set(false)
+                        }),
+                ),
         )
-        .child(view().gap_1().child(each(
-            state.palette_items,
-            |item| item.title.clone(),
-            move |item, _| {
-                let row_state = row_state.clone();
-                let action = item.get().action.clone();
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(radius())
-                    .hover(|s| s.bg(accent()))
-                    .active(|s| s.bg(accent()))
-                    .on_press(move || {
-                        run_palette(&row_state, action.clone());
-                    })
-                    .child(
-                        text(move || item.get().title.clone())
-                            .text_sm()
-                            .text_color(foreground()),
-                    )
-                    .child(view().flex_1())
-                    .child(
-                        text(move || item.get().hint.clone())
-                            .text_xs()
-                            .text_color(muted_foreground()),
-                    )
-            },
-        )))
 }
 
+/// The settings sheet: nsh/base's Sheet owns the placement, the backdrop,
+/// Escape and the dismissal, so the panel never spills past the window.
 fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
     let current = state.settings.get();
     let close = {
@@ -1883,6 +1939,14 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
         move || state.settings_open.set(false)
     };
     let close_btn = close.clone();
+    let on_open_change = {
+        let state = state.clone();
+        move |open: bool| {
+            if !open {
+                state.settings_open.set(false);
+            }
+        }
+    };
 
     let size_up = {
         let state = state.clone();
@@ -1911,16 +1975,23 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
     let mut scheme_rows = view().gap_1();
     for candidate in settings::schemes() {
         let selected = candidate.name == current.scheme;
-        let swatch = scheme_swatch(&candidate);
+        let swatch = ui::scheme_chip(
+            candidate.background,
+            [
+                candidate.palette[1],
+                candidate.palette[2],
+                candidate.palette[4],
+            ],
+        );
         let name = candidate.name.clone();
         scheme_rows = scheme_rows.child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_3()
                 .px_3()
-                .py_2()
-                .rounded(radius())
+                .py_1()
+                .rounded(px(6.0))
                 .hover(|s| s.bg(accent()))
                 .active(|s| s.bg(accent()))
                 .on_press({
@@ -1949,8 +2020,8 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .py_2()
-                .rounded(radius())
+                .py_1()
+                .rounded(px(6.0))
                 .hover(|s| s.bg(accent()))
                 .active(|s| s.bg(accent()))
                 .on_press({
@@ -1972,78 +2043,77 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
         );
     }
 
-    view()
-        .absolute()
-        .left(px(120.0))
-        .top(px(56.0))
-        .w(px(560.0))
-        .p_4()
-        .gap_4()
-        .rounded(radius())
-        .border_1()
-        .border_color(border())
-        .bg(popover())
-        .shadow_lg()
+    nsh_base::sheet()
+        .open(true)
+        .side(nsh_core::overlay::Placement::Right)
+        .popup_style(|s| {
+            s.w(px(380.0))
+                .h_full()
+                .bg(popover())
+                .border_l_1()
+                .border_color(border())
+        })
+        .backdrop_style(|s| s.bg(nsh_core::color::black().opacity(0.4)))
+        .on_open_change(move |event: &nsh_base::SheetEvent| {
+            if let nsh_base::SheetEvent::OpenChange(open, _) = event {
+                on_open_change(*open);
+            }
+        })
         .child(
             view()
-                .flex_row()
-                .items_center()
-                .child(text("设置").text_base().text_color(foreground()))
-                .child(view().flex_1())
-                .child(ui::text_button("关闭", move || close_btn())),
-        )
-        .child(
-            view().gap_2().child(ui::section_label("字号")).child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(step_button("−", "减小字号", size_down))
-                    .child(
-                        text(size_text)
-                            .text_sm()
-                            .text_color(foreground())
-                            .w(px(60.0)),
-                    )
-                    .child(step_button("+", "增大字号", size_up)),
-            ),
-        )
-        .child(
-            view()
-                .gap_2()
-                .child(ui::section_label("字体"))
-                .child(family_rows),
-        )
-        .child(
-            view()
-                .gap_2()
-                .child(ui::section_label("配色方案"))
-                .child(scheme_rows),
-        )
-        .child(
-            view()
-                .gap_2()
-                .child(ui::section_label("默认配置文件"))
-                .child(profile_rows),
+                .w_full()
+                .h_full()
+                .gap_4()
+                .p_4()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(ui::panel_title("设置"))
+                        .child(view().flex_1())
+                        .child(ui::text_button("关闭", move || close_btn())),
+                )
+                .child(view().h(px(1.0)).w_full().bg(border()))
+                .child(
+                    scroll().flex_1().child(
+                        view()
+                            .w_full()
+                            .gap_5()
+                            .pb_4()
+                            .child(section(
+                                "字号",
+                                "终端网格的字体大小",
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(step_button("−", "减小字号", size_down))
+                                    .child(
+                                        text(size_text)
+                                            .text_sm()
+                                            .text_color(foreground())
+                                            .w(px(56.0)),
+                                    )
+                                    .child(step_button("+", "增大字号", size_up)),
+                            ))
+                            .child(section("字体", "等宽且覆盖中文", family_rows))
+                            .child(section(
+                                "配色方案",
+                                "只影响终端画布，不影响外壳",
+                                scheme_rows,
+                            ))
+                            .child(section(
+                                "默认配置文件",
+                                "新建标签时启动的程序",
+                                profile_rows,
+                            )),
+                    ),
+                ),
         )
 }
 
-/// A scheme's own colours, as the sample that identifies it: its background
-/// and three ANSI colours, which are data rather than theme tokens.
-fn scheme_swatch(scheme: &settings::Scheme) -> impl IntoElement {
-    view()
-        .flex_row()
-        .size(px(28.0))
-        .rounded(px(4.0))
-        .overflow_hidden()
-        .border_1()
-        .border_color(border())
-        .bg(rgb(scheme.background))
-        .child(view().flex_1().h_full().bg(rgb(scheme.palette[1])))
-        .child(view().flex_1().h_full().bg(rgb(scheme.palette[2])))
-        .child(view().flex_1().h_full().bg(rgb(scheme.palette[4])))
-}
-
+/// A step control for a value that has a small range: − and +.
 fn step_button(
     label: &'static str,
     accessible: &'static str,
@@ -2051,16 +2121,38 @@ fn step_button(
 ) -> impl IntoElement {
     view()
         .label(accessible)
-        .size(px(26.0))
+        .size(px(28.0))
         .items_center()
         .justify_center()
-        .rounded(radius())
+        .rounded(px(6.0))
         .border_1()
         .border_color(border())
         .hover(|s| s.bg(accent()))
         .active(|s| s.bg(accent()))
         .on_press(on_press)
-        .child(text(label).text_sm().text_color(foreground()))
+        .child(text(label).text_base().text_color(foreground()))
+}
+
+/// A settings section: its title, a one-line description, then the rows.
+fn section(
+    title: &'static str,
+    description: &'static str,
+    rows: impl IntoElement,
+) -> impl IntoElement {
+    view()
+        .gap_2()
+        .child(
+            view()
+                .gap_1()
+                .child(
+                    text(title)
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(foreground()),
+                )
+                .child(text(description).text_xs().text_color(muted_foreground())),
+        )
+        .child(rows)
 }
 
 fn change_font_size(state: &Rc<AppState>, delta: f32) {
