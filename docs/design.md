@@ -216,6 +216,16 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 
 既有 token（`muted`、`muted-foreground`、`border`、`popover`、`accent`、`card`）继续用于浮层与控件。
 
+**落地方式（M2.5 已完成）**：以上角色写在仓库根的 `theme.json`（shadcn `cssVars` 结构，`light` / `dark` 两套），`nsh.json` 用 `"theme": "theme.json"` + `"appearance": "dark"` 加载。表现层**不出现任何色值字面量**，全部经 `src/ui.rs` 的语义取色函数读取（`background()`、`foreground()`、`muted_foreground()`、`surface()`、`popover()`、`accent()`、`primary()`、`border()`、`success()`、`warning()` 等）。`theme()` 在 NSH 里订阅式读取，所以宿主注入的 token 或切换外观会自动贯穿全界面。
+
+`src/ui.rs` 同时是**应用自有控件层**（对应规范里的 `gpui-component` 位置）：`menu_row`、`icon_button`、`text_button`、`primary_button`、`popup_surface`、`badge`、`setting_row`、`section_label`。页面（标签栏、状态条、查找栏、退出条、右键菜单、命令面板、设置页）只组合这些控件，不各自重写间距与状态；`radius` 与 `font-mono` 也来自 token，因此改主题即改全局。
+
+当前 token 中的 `tab-active` / `tab-inactive-foreground` / `pane-border-active` 尚未单独取用（标签与焦点窗格复用 `accent` / `primary`），保留以便后续给标签栏更细的层次。
+
+### 5.2.1 尺寸与密度
+
+控件高度统一为 26（图标按钮、步进按钮）、28（标签、退出条）、32（查找栏）；间距按语义取 4 / 8 / 12 / 16（`gap_1` / `gap_2` / `gap_3` / `gap_4`）；字号取 12（次要，`text_xs`）与 13–14（正文，`text_sm`）。终端网格字体与字号独立于 UI（见 §5.4），改字号只重排画布与 PTY，不动外壳。
+
 ### 5.3 配色方案（数据）
 
 `schemes.rs` 定义，每套包含 `background`、`foreground`、`cursor`、`cursor_text`、`selection_background`、`selection_foreground`、ANSI 16 色 + bright 16 色。v1 内置：
@@ -555,8 +565,8 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 | --- | --- | --- |
 | **M0 Spike（已完成 2026-05-20）** | Zig + libghostty-vt 在 Windows 构建；ConPTY 起 `pwsh` 并回显；Canvas 画网格；隐藏 input + keymap 打通输入；测帧耗 | ✅ 200×51 绘制 0.16–0.42 ms；见 `m0-report.md` |
 | **M1 可用（已完成 2026-05-20）** | 标签 + 配置发现 + 选择/复制粘贴 + 查找 + 退出/失败/空状态 + 键位表 | ✅ 多标签、粘贴、拖选/全选复制、查找与计数、退出条、命令面板、右键菜单、打包均人工验证 |
-| **M2 完整（部分完成）** | 分屏 + 命令面板 + 设置 + 配色方案 + 选择/链接/拖放 + 无障碍模式 | ✅ 命令面板（`Ctrl+Shift+P`）与右键菜单完成；分屏、设置、配色方案、链接检测未做 |
-| **M3 打磨** | 滚轮/平滑滚动、kitty graphics、通知、标签溢出、会话恢复 | 性能预算全部达标 |
+| **M2 完整（已完成 2026-11-06）** | 分屏 + 命令面板 + 设置 + 配色方案 + 选择/链接/拖放 + 无障碍模式 | ✅ 分屏（`Ctrl+Shift+D` / `Ctrl+Shift+E`，`Alt+方向` 切窗格，焦点窗格用 `primary` 描边）；设置页（字号 / 字体族 / 配色方案 / 默认配置文件，`Ctrl+,` 与状态栏入口，Storage 持久化，Escape 与点外部关闭）；三套配色方案经 libghostty 默认色 + ANSI 调色板真实生效；命令面板与右键菜单可用；全部 UI 走 `theme.json` token |
+| **M3 打磨（部分完成）** | 滚轮/平滑滚动、kitty graphics、通知、标签溢出、会话恢复 | 滚轮受 NSH 0.3 限制未做（见 R2）；其余未做 |
 | **M4 发布（打包完成）** | 图标、安装包（`nsh package --target windows`）、签名、更新说明 | ✅ 图标 + `.nsh/out/myterm/` 与 `myterm.zip`，启动验证通过；未签名 |
 
 ---
@@ -566,21 +576,21 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 | # | 风险 | 影响 | 处置 |
 | --- | --- | --- | --- |
 | R1 | NSH 无原始按键事件 API，输入靠「隐藏 input + 全局 keymap」拼装 | AltGr、部分 IME、某些组合键可能无法送达 | **M0 已验基本可行**（文本/Enter/方向键/Ctrl+C）；需增量去重、`When::Always`、过滤保留键；中文 IME 仍需实测；不行则切子 HWND（§4.5） |
-| R2 | 通用视图无滚轮事件 | 回滚只能键盘，体验降级 | v1 键盘 + 可拖拽滚动条；v1.1 `Scroll` 或原生组件 |
+| R2 | 通用视图无滚轮事件（已实测确认：NSH 0.3 只把 wheel 投给 `Scroll` 视图） | 回滚只能键盘，体验降级 | 已试「隐形 `Scroll` + 偏移量换算行数」：事件确实到达（`on_scroll` 有 offset），但滚动会把窗格内容移出画面且吞掉键盘输入，**已回退**。当前为 `Shift+PageUp/Down` 与命令面板「滚动到顶部/底部」；等 NSH 暴露通用 wheel 事件或改原生组件 |
 | R3 | libghostty-vt 的构建依赖随 Ghostty commit 变化（0.2.2→Zig 0.15.2，git→Zig 0.17.x），且 pre-1.0 | 新人上手成本、升级破坏 | 锁 git commit + Zig 版本写明；`GHOSTTY_SOURCE_DIR` 离线构建 + 回归测试 |
 | R4 | Canvas 文本性能与字形质量（CJK/emoji/框线） | 大输出卡顿或显示错位 | **M0 实测 200×51 绘制 0.16–0.42 ms，余量约 10×**；仍按「合并背景段 + 后续脏行重绘」优化，超预算切 B 方案 |
 | R5 | 连字与等宽网格冲突 | 高级字体观感差 | v1 关闭连字并说明；v2 整行渲染可选开启 |
 | R6 | 选择/搜索跨回滚缓冲的定位 | 大缓冲下卡顿 | 使用 `Snapshot` 的 selection 区间 + 增量搜索（只搜视口附近，向两侧扩展） |
 | R7 | 窗口 resize 频繁触发 VT reflow | 拖动窗口时掉帧 | resize 去抖 60 ms；拖动期间只拉伸背景，松手才重排 |
-| R8 | NSH 0.3 在 Windows 上不绘制 Canvas 之下／窗口下半部的同级视图；`justify_between` 的末项与 `absolute().right()` 也不绘制 | 底部状态条、右侧对齐控件不可用 | M0 已记录最小复现（`m0-report.md` §2.3），待反馈 NSH；当前把 chrome 放在画布上方，浮层限制在上半部或改用 `Overlay` 验证 |
+| R8 | ~~NSH 0.3 在 Windows 上不绘制 Canvas 之下／窗口下半部的同级视图~~ **已澄清为假象** | — | M0 与 M2 期间的「下半部不绘制／右侧不绘制」全部源于**截图工具未声明 DPI 感知**（本机 150%，NSH 按 1.5× 绘制，非感知截图只抓到左上 2/3）。改用 `SetProcessDPIAware()` + `GetWindowRect` 后，底部状态条、右侧对齐控件、分屏布局均正确。真实约束只剩一条：**嵌套 `canvas` 不遵守父视图偏移**，因此每个标签用一个全窗口 `canvas` 按各窗格矩形绘制并裁剪（`grid::draw_into`） |
 | R9 | PowerShell 写 ConPTY 吞吐低（≈11 KB/s） | 大输出观感慢 | 非本程序瓶颈；文档说明；后续可提供“原生 cmd/WSL 配置”与输出节流开关 |
 
 **待确认的产品决策**（请评审时给出方向）：
 
-1. `Ctrl+Shift+1..9` 映射配置文件，还是 `Alt+1..9` 切标签？（当前设计：`Ctrl+1..9` 切标签，`Ctrl+Shift+数字` 开配置文件）
-2. 默认是否显示情境状态条，还是首次开启时提示一次？
-3. 是否需要「以管理员身份运行」入口（涉及 UAC 与子进程提权实现成本）？
-4. v1 是否要导入 Windows Terminal 的 `settings.json`（配置文件 + 配色）？
+1. `Ctrl+Shift+1..9` 映射配置文件，还是 `Alt+1..9` 切标签？（当前实现：`Ctrl+1..9` 切标签；按配置文件开标签走「+」旁的 `⌄` 菜单与命令面板）
+2. 是否需要「以管理员身份运行」入口（涉及 UAC 与子进程提权实现成本）？
+3. v1 是否要导入 Windows Terminal 的 `settings.json`（配置文件 + 配色）？
+4. 状态条要不要显示退出码与当前工作目录（现在只显示配置文件与网格尺寸）？
 
 ---
 
