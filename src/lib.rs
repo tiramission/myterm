@@ -7,6 +7,7 @@ pub mod profiles;
 mod session;
 pub mod settings;
 mod term;
+pub mod ui;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,11 +19,14 @@ use nsh_core::TouchPhase;
 use nsh_core::element::TouchEvent;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
+use ui::{
+    accent, accent_foreground, background, border, foreground, muted_foreground, popover, primary,
+    radius, success, surface, surface_foreground, warning,
+};
 
 const START_COLS: u16 = 100;
 const START_ROWS: u16 = 28;
 const TAB_HEIGHT: f32 = 34.0;
-const ACCENT: u32 = 0x2563eb;
 const SEPARATOR: f32 = 1.0;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -654,13 +658,17 @@ pub fn App() -> impl IntoElement {
     let bar_state = state.clone();
     let menu_state = state.clone();
     let status_state = state.clone();
+    let status_name = state.clone();
+    let status_dims = state.clone();
+    let status_settings = state.clone();
     let pane_state = state.clone();
     let area_w = signal(0.0_f32);
     let area_h = signal(0.0_f32);
 
     view()
         .flex_1()
-        .bg(rgb(0x101216))
+        .bg(background())
+        // The tab strip is window chrome: it stays put while panes change.
         .child(
             view()
                 .h(px(TAB_HEIGHT))
@@ -669,30 +677,25 @@ pub fn App() -> impl IntoElement {
                 .items_center()
                 .gap_1()
                 .px_2()
-                .bg(rgb(0x15181d))
+                .bg(surface())
                 .child(each(
                     state.tabs,
                     |info| info.id,
                     move |info, _| tab_button(bar_state.clone(), info),
                 ))
-                .child(icon_button("+", {
+                .child(ui::icon_button("+", "新建标签", {
                     let state = state.clone();
                     move || {
                         spawn_tab(&state, None);
                     }
                 }))
                 .child(profile_menu(menu_state))
+                .child(view().flex_1())
                 .child(
-                    text(move || {
-                        let Some(pane) = status_state.active_pane() else {
-                            return String::new();
-                        };
-                        let (cols, rows) = pane.dims.get();
-                        format!("{cols}×{rows}")
-                    })
-                    .text_size(px(11.0))
-                    .text_color(rgb(0x6b7280))
-                    .px_2(),
+                    text("Ctrl+Shift+P 命令面板")
+                        .text_xs()
+                        .text_color(muted_foreground())
+                        .px_2(),
                 ),
         )
         .child(
@@ -722,6 +725,76 @@ pub fn App() -> impl IntoElement {
                     }
                 }),
         )
+        // The status bar: what the active pane is, how big it is, and the
+        // way into the settings.
+        .child(
+            view()
+                .h(px(26.0))
+                .w_full()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .border_t_1()
+                .border_color(border())
+                .bg(surface())
+                .child(
+                    text(move || {
+                        status_name
+                            .active_pane()
+                            .map(|pane| pane.profile.name.clone())
+                            .unwrap_or_default()
+                    })
+                    .text_xs()
+                    .text_color(surface_foreground()),
+                )
+                .child(view().flex_1())
+                .child(
+                    text(move || {
+                        let Some(pane) = status_dims.active_pane() else {
+                            return String::new();
+                        };
+                        let (cols, rows) = pane.dims.get();
+                        format!("{cols}×{rows}")
+                    })
+                    .text_xs()
+                    .text_color(muted_foreground()),
+                )
+                .child(ui::text_button("设置…", move || {
+                    status_settings.settings_open.set(true);
+                })),
+        )
+        // A press outside the overlay dismisses it, as Escape does. The
+        // backdrop comes first, so the overlay's own controls stay reachable.
+        .child(when(
+            {
+                let state = state.clone();
+                move || state.settings_open.get() || state.palette_open.get()
+            },
+            {
+                let press = state.clone();
+                move || {
+                    view()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .w_full()
+                        .h_full()
+                        .on_press({
+                            let state = press.clone();
+                            move || {
+                                if state.palette_open.get() {
+                                    state.palette_open.set(false);
+                                    state.palette_query.set(String::new());
+                                    state.palette_items.set(state.palette_all.clone());
+                                } else {
+                                    state.settings_open.set(false);
+                                }
+                            }
+                        })
+                }
+            },
+        ))
         .child(when(
             {
                 let state = state.clone();
@@ -880,11 +953,12 @@ fn pane_container(
         .border_1()
         .border_color(move || {
             if active.get() == pane_id {
-                rgb(ACCENT)
+                primary()
             } else {
-                rgb(0x101216)
+                background()
             }
         })
+        .label("终端窗格")
         .on_press(move || {
             activate_state.activate_pane(&activate_tab, pane_id);
             focus_ref.focus();
@@ -1033,44 +1107,50 @@ fn error_panel(pane: Rc<Pane>, state: Rc<AppState>) -> impl IntoElement {
     let message = pane.error.clone().unwrap_or_default();
     let name = pane.profile.name.clone();
     let close_state = state.clone();
+    let retry_state = state.clone();
+    let retry_profile = pane.profile.clone();
     let id = pane.id;
     let command = format!("{} {}", pane.profile.program, pane.profile.args.join(" "));
 
     view()
         .flex_1()
-        .bg(rgb(0x101216))
+        .bg(background())
         .items_center()
         .justify_center()
         .child(
             view()
                 .w(px(520.0))
-                .gap_3()
+                .gap_4()
+                .p_4()
+                .rounded(radius())
+                .border_1()
+                .border_color(border())
                 .child(
                     text(format!("无法启动 {name}"))
-                        .text_size(px(15.0))
-                        .text_color(rgb(0xf2f4f8)),
+                        .text_base()
+                        .text_color(foreground()),
                 )
-                .child(text(message).text_size(px(12.0)).text_color(rgb(0xf2b544)))
-                .child(text(command).text_size(px(11.0)).text_color(rgb(0x8b929e)))
+                .child(text(message).text_sm().text_color(warning()))
+                .child(text(command).text_xs().text_color(muted_foreground()))
                 .child(
-                    view().flex_row().gap_2().child(
-                        view()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(6.0))
-                            .bg(rgb(ACCENT))
-                            .on_press(move || {
-                                close_state.close_pane(
-                                    &close_state.active_tab().unwrap_or_else(|| unreachable!()),
-                                    id,
-                                )
-                            })
-                            .child(
-                                text("关闭窗格")
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(0xffffff)),
-                            ),
-                    ),
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .child(ui::primary_button("重试", move || {
+                            let index = retry_state
+                                .profiles
+                                .iter()
+                                .position(|p| p.name == retry_profile.name);
+                            spawn_tab(&retry_state, index);
+                            if let Some(tab) = retry_state.active_tab() {
+                                retry_state.close_pane(&tab, id);
+                            }
+                        }))
+                        .child(ui::text_button("关闭窗格", move || {
+                            if let Some(tab) = close_state.active_tab() {
+                                close_state.close_pane(&tab, id);
+                            }
+                        })),
                 ),
         )
 }
@@ -1090,7 +1170,9 @@ fn exit_strip(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
         .items_center()
         .gap_3()
         .px_3()
-        .bg(rgb(0x1b1f26))
+        .border_t_1()
+        .border_color(border())
+        .bg(popover())
         .child(
             text(move || {
                 let code = text_pane.exit.get().unwrap_or(-1);
@@ -1100,67 +1182,44 @@ fn exit_strip(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
                     format!("进程已退出，代码 {code}")
                 }
             })
-            .text_size(px(11.0))
+            .text_xs()
             .text_color(move || {
                 if color_pane.exit.get() == Some(0) {
-                    rgb(0x3fb950)
+                    success()
                 } else {
-                    rgb(0xf2b544)
+                    warning()
                 }
             }),
         )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let profile = restart_pane.profile.name.clone();
-                    let index = restart_state
-                        .profiles
-                        .iter()
-                        .position(|p| p.name == profile);
-                    spawn_tab(&restart_state, index);
-                    let tab = restart_state
-                        .runtimes
-                        .borrow()
-                        .iter()
-                        .find(|tab| tab.pane(restart_pane.id).is_some())
-                        .cloned();
-                    if let Some(tab) = tab {
-                        restart_state.close_pane(&tab, restart_pane.id);
-                    }
-                })
-                .child(
-                    text("重新启动")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0xe6e8ec)),
-                ),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    if let Some(tab) = close_state
-                        .runtimes
-                        .borrow()
-                        .iter()
-                        .find(|tab| tab.pane(close_target.id).is_some())
-                        .cloned()
-                    {
-                        close_state.close_pane(&tab, close_target.id);
-                    }
-                })
-                .child(
-                    text("关闭窗格")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0xc3c8d1)),
-                ),
-        )
+        .child(view().flex_1())
+        .child(ui::text_button("重新启动", move || {
+            let profile = restart_pane.profile.name.clone();
+            let index = restart_state
+                .profiles
+                .iter()
+                .position(|p| p.name == profile);
+            spawn_tab(&restart_state, index);
+            let tab = restart_state
+                .runtimes
+                .borrow()
+                .iter()
+                .find(|tab| tab.pane(restart_pane.id).is_some())
+                .cloned();
+            if let Some(tab) = tab {
+                restart_state.close_pane(&tab, restart_pane.id);
+            }
+        }))
+        .child(ui::text_button("关闭窗格", move || {
+            if let Some(tab) = close_state
+                .runtimes
+                .borrow()
+                .iter()
+                .find(|tab| tab.pane(close_target.id).is_some())
+                .cloned()
+            {
+                close_state.close_pane(&tab, close_target.id);
+            }
+        }))
 }
 
 fn find_bar(_state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
@@ -1179,7 +1238,9 @@ fn find_bar(_state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
         .items_center()
         .gap_2()
         .px_3()
-        .bg(rgb(0x1b1f26))
+        .border_b_1()
+        .border_color(border())
+        .bg(popover())
         .child(
             nsh_base::input()
                 .element_ref(&pane.find_focus)
@@ -1198,9 +1259,9 @@ fn find_bar(_state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
                 .w(px(300.0))
                 .h(px(24.0))
                 .px_2()
-                .text_size(px(12.0))
-                .text_color(rgb(0xe6e8ec))
-                .bg(rgb(0x101216))
+                .text_sm()
+                .text_color(foreground())
+                .bg(background())
                 .rounded(px(4.0)),
         )
         .child(
@@ -1209,90 +1270,51 @@ fn find_bar(_state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
                 Some((total, selected)) => format!("{selected}/{total}"),
                 None => "…".to_owned(),
             })
-            .text_size(px(11.0))
-            .text_color(rgb(0x8b929e))
+            .text_xs()
+            .text_color(muted_foreground())
             .w(px(70.0)),
         )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let skip = prev_pane.find_skip.get();
-                    let query = prev_pane.find_query.get();
-                    if let Some(session) = prev_pane.session.as_ref() {
-                        session.find(&query, -1, skip);
-                    }
-                })
-                .child(text("↑").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let skip = next_pane.find_skip.get() + 1;
-                    next_pane.find_skip.set(skip);
-                    let query = next_pane.find_query.get();
-                    if let Some(session) = next_pane.session.as_ref() {
-                        session.find(&query, 1, skip);
-                    }
-                })
-                .child(text("↓").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    close_pane.find_open.set(false);
-                    if let Some(session) = close_pane.session.as_ref() {
-                        session.clear_selection();
-                    }
-                    let focus = focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
-                })
-                .child(text("×").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
+        .child(ui::text_button("↑", move || {
+            let skip = prev_pane.find_skip.get();
+            let query = prev_pane.find_query.get();
+            if let Some(session) = prev_pane.session.as_ref() {
+                session.find(&query, -1, skip);
+            }
+        }))
+        .child(ui::text_button("↓", move || {
+            let skip = next_pane.find_skip.get() + 1;
+            next_pane.find_skip.set(skip);
+            let query = next_pane.find_query.get();
+            if let Some(session) = next_pane.session.as_ref() {
+                session.find(&query, 1, skip);
+            }
+        }))
+        .child(ui::text_button("×", move || {
+            close_pane.find_open.set(false);
+            if let Some(session) = close_pane.session.as_ref() {
+                session.clear_selection();
+            }
+            let focus = focus;
+            set_timeout(Duration::from_millis(0), move || focus.focus());
+        }))
 }
 
 fn empty_state(state: Rc<AppState>) -> impl IntoElement {
     view()
         .flex_1()
+        .bg(background())
         .items_center()
         .justify_center()
         .gap_3()
-        .child(
-            text("没有打开的会话")
-                .text_size(px(15.0))
-                .text_color(rgb(0xe6e8ec)),
-        )
+        .child(text("没有打开的会话").text_base().text_color(foreground()))
         .child(
             text("按 Ctrl+Shift+T 新建一个标签")
-                .text_size(px(12.0))
-                .text_color(rgb(0x8b929e)),
+                .text_sm()
+                .text_color(muted_foreground()),
         )
-        .child(
-            view()
-                .px_4()
-                .py_2()
-                .rounded(px(6.0))
-                .bg(rgb(ACCENT))
-                .on_press(move || {
-                    spawn_tab(&state, None);
-                })
-                .child(
-                    text("新建标签")
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xffffff)),
-                ),
-        )
+        .child(ui::primary_button("新建标签", move || {
+            spawn_tab(&state, None);
+        }))
 }
 
 fn register_app_shortcuts(state: &Rc<AppState>) {
@@ -1461,6 +1483,11 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
                     }
                 }
                 if keystroke == &"escape" {
+                    if state.settings_open.get() {
+                        state.settings_open.set(false);
+                        state.focus_active_pane();
+                        return;
+                    }
                     if state.palette_open.get() {
                         state.palette_open.set(false);
                         state.palette_query.set(String::new());
@@ -1570,20 +1597,20 @@ fn context_menu_view(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
         .top(px(y))
         .w(px(184.0))
         .p_1()
-        .rounded(px(8.0))
+        .rounded(radius())
         .border_1()
-        .border_color(rgb(0x2a3038))
-        .bg(rgb(0x1b1f26))
+        .border_color(border())
+        .bg(popover())
         .shadow_lg()
-        .child(menu_row("复制", move || {
+        .child(ui::menu_row("复制", move || {
             copy_selection(&state_copy);
             close_copy();
         }))
-        .child(menu_row("粘贴", move || {
+        .child(ui::menu_row("粘贴", move || {
             paste_clipboard(&state_paste);
             close_paste();
         }))
-        .child(menu_row("全选", move || {
+        .child(ui::menu_row("全选", move || {
             if let Some(pane) = state_all.active_pane() {
                 if let Some(session) = pane.session.as_ref() {
                     session.select_all();
@@ -1591,12 +1618,12 @@ fn context_menu_view(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
             }
             close_all();
         }))
-        .child(menu_row("查找…", move || {
+        .child(ui::menu_row("查找…", move || {
             open_find(&state_find);
             close_find();
         }))
-        .child(view().h(px(1.0)).my_1().bg(rgb(0x2a3038)))
-        .child(menu_row("关闭窗格", move || {
+        .child(view().h(px(1.0)).my_1().bg(border()))
+        .child(ui::menu_row("关闭窗格", move || {
             if let Some(tab) = state_close
                 .runtimes
                 .borrow()
@@ -1608,27 +1635,6 @@ fn context_menu_view(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
             }
             close_close();
         }))
-}
-
-fn menu_row(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .px_3()
-        .py(px(6.0))
-        .rounded(px(6.0))
-        .active(|s| s.bg(rgb(0x2a3038)))
-        .on_press(on_press)
-        .child(text(label).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
-}
-
-fn icon_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .size(px(26.0))
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .active(|s| s.bg(rgb(0x2a3038)))
-        .on_press(on_press)
-        .child(text(label).text_size(px(15.0)).text_color(rgb(0xaab2be)))
 }
 
 fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElement {
@@ -1648,11 +1654,12 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
         .rounded(px(6.0))
         .bg(move || {
             if bg_state.active.get() == id {
-                rgb(0x1e232b)
+                accent()
             } else {
-                rgb(0x15181d)
+                surface()
             }
         })
+        .transition_colors()
         .child(
             view()
                 .flex_1()
@@ -1664,13 +1671,13 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
                 .on_press(move || activate_state.activate(id))
                 .child(
                     text(title)
-                        .text_size(px(12.0))
+                        .text_sm()
                         .number_of_lines(1)
                         .text_color(move || {
                             if fg_state.active.get() == id {
-                                rgb(0xf2f4f8)
+                                accent_foreground()
                             } else {
-                                rgb(0x9aa2ae)
+                                muted_foreground()
                             }
                         }),
                 ),
@@ -1681,12 +1688,14 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
                 .h_full()
                 .items_center()
                 .justify_center()
+                .label("关闭标签")
+                .hover(|s| s.bg(accent()))
                 .on_press(move || close_state.close(id))
                 .child(
                     text("×")
-                        .text_size(px(13.0))
-                        .text_color(rgb(0x9aa2ae))
-                        .hover(|s| s.text_color(rgb(0xf2f4f8))),
+                        .text_sm()
+                        .text_color(muted_foreground())
+                        .hover(|s| s.text_color(accent_foreground())),
                 ),
         )
 }
@@ -1694,23 +1703,17 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
 fn profile_menu(state: Rc<AppState>) -> impl IntoElement {
     let mut menu_view = menu()
         .offset(px(4.0))
-        .popup_style(|s| {
-            s.min_w(px(180.0))
-                .p_1()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(rgb(0x2a3038))
-                .bg(rgb(0x1b1f26))
-                .shadow_lg()
-        })
+        .popup_style(|s| ui::popup_surface(s).min_w(px(180.0)))
         .trigger(
             view()
+                .label("新建标签（选择配置文件）")
                 .size(px(22.0))
                 .items_center()
                 .justify_center()
                 .rounded(px(6.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .child(text("⌄").text_size(px(11.0)).text_color(rgb(0xaab2be))),
+                .hover(|s| s.bg(accent()))
+                .active(|s| s.bg(accent()))
+                .child(text("⌄").text_xs().text_color(muted_foreground())),
         );
 
     for (index, profile) in state.profiles.iter().enumerate() {
@@ -1722,10 +1725,10 @@ fn profile_menu(state: Rc<AppState>) -> impl IntoElement {
                     spawn_tab(&state, Some(index));
                 })
                 .px_3()
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .hover(|s| s.bg(rgb(0x2a3038)))
-                .child(text(name).text_size(px(12.0)).text_color(rgb(0xe6e8ec))),
+                .py_2()
+                .rounded(radius())
+                .hover(|s| s.bg(accent()))
+                .child(text(name).text_sm().text_color(foreground())),
         );
     }
     menu_view
@@ -1794,10 +1797,10 @@ fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
         .w(px(520.0))
         .p_2()
         .gap_2()
-        .rounded(px(10.0))
+        .rounded(radius())
         .border_1()
-        .border_color(rgb(0x2a3038))
-        .bg(rgb(0x1b1f26))
+        .border_color(border())
+        .bg(popover())
         .shadow_lg()
         .child(
             nsh_base::input()
@@ -1813,10 +1816,10 @@ fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .h(px(30.0))
                 .w_full()
                 .px_2()
-                .text_size(px(13.0))
-                .text_color(rgb(0xe6e8ec))
-                .bg(rgb(0x101216))
-                .rounded(px(6.0)),
+                .text_sm()
+                .text_color(foreground())
+                .bg(background())
+                .rounded(px(4.0)),
         )
         .child(view().gap_1().child(each(
             state.palette_items,
@@ -1829,21 +1832,23 @@ fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
                     .items_center()
                     .gap_2()
                     .px_3()
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .active(|s| s.bg(rgb(0x2a3038)))
+                    .py_2()
+                    .rounded(radius())
+                    .hover(|s| s.bg(accent()))
+                    .active(|s| s.bg(accent()))
                     .on_press(move || {
                         run_palette(&row_state, action.clone());
                     })
                     .child(
                         text(move || item.get().title.clone())
-                            .text_size(px(12.0))
-                            .text_color(rgb(0xe6e8ec)),
+                            .text_sm()
+                            .text_color(foreground()),
                     )
+                    .child(view().flex_1())
                     .child(
                         text(move || item.get().hint.clone())
-                            .text_size(px(11.0))
-                            .text_color(rgb(0x6b7280)),
+                            .text_xs()
+                            .text_color(muted_foreground()),
                     )
             },
         )))
@@ -1874,64 +1879,40 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
     for family in settings::FONT_FAMILIES {
         let state_row = state.clone();
         let selected = current.font_family == family;
-        family_rows = family_rows.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .on_press(move || {
-                    let mut next = state_row.settings.get();
-                    next.font_family = family.to_owned();
-                    save_settings(&state_row, next);
-                })
-                .child(text(family).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
-                .child(view().flex_1())
-                .child(
-                    text(if selected { "✓" } else { "" })
-                        .text_size(px(12.0))
-                        .text_color(rgb(0x5b9dff)),
-                ),
-        );
+        family_rows = family_rows.child(ui::setting_row(family, selected, move || {
+            let mut next = state_row.settings.get();
+            next.font_family = family.to_owned();
+            save_settings(&state_row, next);
+        }));
     }
 
     let mut scheme_rows = view().gap_1();
     for candidate in settings::schemes() {
-        let name = candidate.name.clone();
-        let state_row = state.clone();
         let selected = candidate.name == current.scheme;
+        let swatch = scheme_swatch(&candidate);
+        let name = candidate.name.clone();
         scheme_rows = scheme_rows.child(
             view()
                 .flex_row()
                 .items_center()
                 .gap_2()
                 .px_3()
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .bg(move || {
-                    if state_row.settings.get().scheme == name {
-                        rgb(0x2a3038)
-                    } else {
-                        rgb(0x1b1f26)
-                    }
-                })
+                .py_2()
+                .rounded(radius())
+                .hover(|s| s.bg(accent()))
+                .active(|s| s.bg(accent()))
                 .on_press({
                     let state = state.clone();
                     let name = candidate.name.clone();
                     move || apply_scheme(&state, &name)
                 })
-                .child(
-                    text(candidate.name.clone())
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xe6e8ec)),
-                )
+                .child(swatch)
+                .child(text(name).text_sm().text_color(foreground()))
                 .child(view().flex_1())
                 .child(
                     text(if selected { "✓" } else { "" })
-                        .text_size(px(12.0))
-                        .text_color(rgb(0x5b9dff)),
+                        .text_sm()
+                        .text_color(primary()),
                 ),
         );
     }
@@ -1946,8 +1927,10 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .py(px(6.0))
-                .rounded(px(6.0))
+                .py_2()
+                .rounded(radius())
+                .hover(|s| s.bg(accent()))
+                .active(|s| s.bg(accent()))
                 .on_press({
                     let state = state.clone();
                     let name = profile.name.clone();
@@ -1957,16 +1940,12 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                         save_settings(&state, next);
                     }
                 })
-                .child(
-                    text(profile.name.clone())
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xe6e8ec)),
-                )
+                .child(text(name).text_sm().text_color(foreground()))
                 .child(view().flex_1())
                 .child(
                     text(if selected { "默认" } else { "" })
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x5b9dff)),
+                        .text_xs()
+                        .text_color(primary()),
                 ),
         );
     }
@@ -1978,89 +1957,91 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
         .w(px(560.0))
         .p_4()
         .gap_4()
-        .rounded(px(10.0))
+        .rounded(radius())
         .border_1()
-        .border_color(rgb(0x2a3038))
-        .bg(rgb(0x1b1f26))
+        .border_color(border())
+        .bg(popover())
         .shadow_lg()
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .child(text("设置").text_size(px(15.0)).text_color(rgb(0xf2f4f8)))
+                .child(text("设置").text_base().text_color(foreground()))
                 .child(view().flex_1())
-                .child(
-                    view()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(4.0))
-                        .active(|s| s.bg(rgb(0x2a3038)))
-                        .on_press(move || close_btn())
-                        .child(text("关闭").text_size(px(11.0)).text_color(rgb(0xc3c8d1))),
-                ),
+                .child(ui::text_button("关闭", move || close_btn())),
+        )
+        .child(
+            view().gap_2().child(ui::section_label("字号")).child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(step_button("−", "减小字号", size_down))
+                    .child(
+                        text(size_text)
+                            .text_sm()
+                            .text_color(foreground())
+                            .w(px(60.0)),
+                    )
+                    .child(step_button("+", "增大字号", size_up)),
+            ),
         )
         .child(
             view()
                 .gap_2()
-                .child(text("字号").text_size(px(11.0)).text_color(rgb(0x8b929e)))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(step_button("−", size_down))
-                        .child(
-                            text(size_text)
-                                .text_size(px(12.0))
-                                .text_color(rgb(0xe6e8ec))
-                                .w(px(60.0)),
-                        )
-                        .child(step_button("+", size_up)),
-                ),
-        )
-        .child(
-            view()
-                .gap_2()
-                .child(text("字体").text_size(px(11.0)).text_color(rgb(0x8b929e)))
+                .child(ui::section_label("字体"))
                 .child(family_rows),
         )
         .child(
             view()
                 .gap_2()
-                .child(
-                    text("配色方案")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x8b929e)),
-                )
+                .child(ui::section_label("配色方案"))
                 .child(scheme_rows),
         )
         .child(
             view()
                 .gap_2()
-                .child(
-                    text("默认配置文件")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x8b929e)),
-                )
+                .child(ui::section_label("默认配置文件"))
                 .child(profile_rows),
         )
 }
 
-fn step_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+/// A scheme's own colours, as the sample that identifies it: its background
+/// and three ANSI colours, which are data rather than theme tokens.
+fn scheme_swatch(scheme: &settings::Scheme) -> impl IntoElement {
     view()
+        .flex_row()
+        .size(px(28.0))
+        .rounded(px(4.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(border())
+        .bg(rgb(scheme.background))
+        .child(view().flex_1().h_full().bg(rgb(scheme.palette[1])))
+        .child(view().flex_1().h_full().bg(rgb(scheme.palette[2])))
+        .child(view().flex_1().h_full().bg(rgb(scheme.palette[4])))
+}
+
+fn step_button(
+    label: &'static str,
+    accessible: &'static str,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .label(accessible)
         .size(px(26.0))
         .items_center()
         .justify_center()
-        .rounded(px(6.0))
+        .rounded(radius())
         .border_1()
-        .border_color(rgb(0x2a3038))
-        .active(|s| s.bg(rgb(0x2a3038)))
+        .border_color(border())
+        .hover(|s| s.bg(accent()))
+        .active(|s| s.bg(accent()))
         .on_press(on_press)
-        .child(text(label).text_size(px(13.0)).text_color(rgb(0xe6e8ec)))
+        .child(text(label).text_sm().text_color(foreground()))
 }
 
 fn change_font_size(state: &Rc<AppState>, delta: f32) {
-    log::info!("font size delta {delta}");
     let mut next = state.settings.get();
     let size = (next.font_size + delta).clamp(9.0, 32.0);
     if (size - next.font_size).abs() < f32::EPSILON {
@@ -2071,7 +2052,6 @@ fn change_font_size(state: &Rc<AppState>, delta: f32) {
 }
 
 fn apply_scheme(state: &Rc<AppState>, name: &str) {
-    log::info!("scheme {name}");
     let mut next = state.settings.get();
     next.scheme = name.to_owned();
     save_settings(state, next);
