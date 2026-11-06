@@ -594,10 +594,14 @@ pub fn App() -> impl IntoElement {
                     // The IME anchors to the terminal's cursor, so its cell
                     // is kept where the pane can read it.
                     let metrics = poll.metrics.get();
+                    // The IME puts its composition window at the field's
+                    // caret top and its candidates below that caret, so the
+                    // field sits at the cursor cell's bottom edge: both
+                    // appear under the line being typed on.
                     let at = match frame.cursor {
                         Some((col, row)) => (
                             metrics.pad + f32::from(col) * metrics.cell_w,
-                            metrics.pad + f32::from(row) * metrics.cell_h,
+                            metrics.pad + f32::from(row + 1) * metrics.cell_h,
                         ),
                         None => (0.0, 0.0),
                     };
@@ -950,10 +954,7 @@ fn pane_container(
     let menu_body = pane.clone();
     let menu_state = state.clone();
     let key_pane = pane.clone();
-    let change_pane = pane.clone();
     let composing = Rc::new(Cell::new(false));
-    let key_composing = composing.clone();
-    let change_composing = composing.clone();
     let composition = composing.clone();
     let error_condition = pane.clone();
     let error_body = pane.clone();
@@ -1000,20 +1001,19 @@ fn pane_container(
                 .caret(false)
                 .auto_focus(true)
                 .paste_behavior(PasteBehavior::Report)
+                // Typed text reaches the shell through the key press alone:
+                // NSH reports one per inserted character, and the IME
+                // reports its committed text the same way. `on_change`
+                // carries the field's whole accumulated text (including a
+                // composition in progress), so sending from it would push
+                // every pinyin letter into the shell.
                 .on_key_press(move |key: &str| {
-                    if key_composing.get() || key == "Backspace" || key == "Enter" {
+                    if key == "Backspace" || key == "Enter" {
                         return;
                     }
                     if !key.is_empty() {
                         if let Some(session) = key_pane.session.as_ref() {
                             session.send_text(key);
-                        }
-                    }
-                })
-                .on_change(move |text: &str| {
-                    if change_composing.get() && !text.is_empty() {
-                        if let Some(session) = change_pane.session.as_ref() {
-                            session.send_text(text);
                         }
                     }
                 })
