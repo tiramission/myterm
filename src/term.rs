@@ -216,11 +216,20 @@ fn run(
 
     let mut out: Vec<u8> = Vec::with_capacity(64);
     let mut first = true;
+    // Set when something changed but the 60 Hz throttle held the capture
+    // back; without it a change that lands inside the window and is
+    // followed by silence (one typed character, an IME commit) would never
+    // reach the UI.
+    let mut pending = false;
     let mut last_capture = Instant::now() - Duration::from_millis(100);
     let mut last_beat = Instant::now();
     let mut bytes_total = 0_u64;
     let mut frames_total = 0_u64;
     let mut first_frame = true;
+    // Bytes parsed since the last capture. A flood keeps the 60 Hz throttle
+    // honest; a small amount (a typed character, an IME commit) is shown at
+    // once, so typing never waits for the next tick of the throttle.
+    let mut fresh = 0_usize;
 
     loop {
         let mut dirty = first;
@@ -231,6 +240,7 @@ fn run(
             match pty_rx.try_recv() {
                 Ok(chunk) => {
                     bytes_total += chunk.len() as u64;
+                    fresh += chunk.len();
                     let t = Instant::now();
                     term.vt_write(&chunk);
                     let ms = t.elapsed().as_secs_f32() * 1000.0;
@@ -355,9 +365,17 @@ fn run(
         }
 
         // Frames go to the UI at about 60 Hz: a flood of output parses at full
-        // speed while the UI only ever sees the newest screen.
-        if dirty && (first_frame || last_capture.elapsed() >= Duration::from_millis(16)) {
+        // speed while the UI only ever sees the newest screen. A held-back
+        // change stays pending, so the next tick that leaves the window
+        // captures it even when no more output arrives.
+        pending |= dirty;
+        // A burst shows at 60 Hz; a trickle (interactive typing) shows now.
+        let prompt = fresh < SMALL_OUTPUT;
+        if pending && (first_frame || prompt || last_capture.elapsed() >= Duration::from_millis(16))
+        {
             first_frame = false;
+            pending = false;
+            fresh = 0;
             last_capture = Instant::now();
             let started = Instant::now();
             let cap = capture(&term, &mut state, &mut row_it, &mut cell_it);
@@ -396,6 +414,11 @@ fn run(
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+/// Output up to this many bytes is drawn at once instead of waiting for the
+/// frame throttle: a typed character or an IME commit must appear as soon as
+/// it is parsed, while a flood of output still goes through the throttle.
+const SMALL_OUTPUT: usize = 512;
 
 fn capture<'a>(
     term: &Terminal<'a, 'a>,
