@@ -86,6 +86,13 @@ pub enum Cmd {
         direction: i8,
         skip: usize,
     },
+    /// Apply a colour scheme (background, foreground, cursor, ANSI 0..16).
+    Palette {
+        background: u32,
+        foreground: u32,
+        cursor: u32,
+        colors: Vec<(usize, u32)>,
+    },
 }
 
 /// What the UI reads between frames.
@@ -328,6 +335,15 @@ fn run(
                     }
                     dirty = true;
                 }
+                Ok(Cmd::Palette {
+                    background,
+                    foreground,
+                    cursor,
+                    colors,
+                }) => {
+                    apply_palette(&mut term, background, foreground, cursor, &colors);
+                    dirty = true;
+                }
                 Ok(Cmd::Scroll(delta)) => {
                     term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
                         delta as isize,
@@ -391,8 +407,16 @@ fn capture<'a>(
     let colors = snapshot.colors()?;
     let cols = snapshot.cols()?;
     let rows = snapshot.rows()?;
-    let background = [colors.background.r, colors.background.g, colors.background.b];
-    let foreground = [colors.foreground.r, colors.foreground.g, colors.foreground.b];
+    let background = [
+        colors.background.r,
+        colors.background.g,
+        colors.background.b,
+    ];
+    let foreground = [
+        colors.foreground.r,
+        colors.foreground.g,
+        colors.foreground.b,
+    ];
 
     let mut cells = Vec::with_capacity(usize::from(cols) * usize::from(rows));
     let mut text = String::with_capacity(16);
@@ -553,8 +577,7 @@ fn find(
             Some(selection) => {
                 use libghostty_vt::terminal::PointSpace;
                 let screen = snapshot.terminal();
-                let start =
-                    screen.point_from_grid_ref(&selection.start(), PointSpace::Viewport)?;
+                let start = screen.point_from_grid_ref(&selection.start(), PointSpace::Viewport)?;
                 let end = screen.point_from_grid_ref(&selection.end(), PointSpace::Viewport)?;
                 start.zip(end)
             }
@@ -571,4 +594,32 @@ fn find(
     }
     let selected = search.selected_index()?.map_or(1, |index| index + 1);
     Ok((total, selected))
+}
+
+/// Applies a colour scheme to the terminal: its base colours and the sixteen
+/// ANSI colours, leaving the rest of the palette to libghostty.
+fn apply_palette(
+    term: &mut Terminal<'_, '_>,
+    background: u32,
+    foreground: u32,
+    cursor: u32,
+    colors: &[(usize, u32)],
+) {
+    use libghostty_vt::style::{Palette, PaletteIndex, RgbColor};
+
+    let to_rgb = |packed: u32| RgbColor {
+        r: ((packed >> 16) & 0xff) as u8,
+        g: ((packed >> 8) & 0xff) as u8,
+        b: (packed & 0xff) as u8,
+    };
+
+    let _ = term.set_default_bg_color(Some(to_rgb(background)));
+    let _ = term.set_default_fg_color(Some(to_rgb(foreground)));
+    let _ = term.set_default_cursor_color(Some(to_rgb(cursor)));
+
+    let mut palette = Palette::default();
+    for (index, packed) in colors {
+        palette.set(PaletteIndex(*index as u8), to_rgb(*packed));
+    }
+    let _ = term.set_default_color_palette(Some(palette));
 }

@@ -14,13 +14,13 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(font_size: f32) -> Self {
-        let font = format!("{font_size}px \"Cascadia Mono\"");
+    pub fn new(font_size: f32, line_height: f32, padding: f32, family: &str) -> Self {
+        let font = format!("{font_size}px \"{family}\"");
         let measured = text_metrics(&font, "M");
         Self {
             cell_w: measured.width.0.max(1.0),
-            cell_h: (font_size * 1.25).round().max(1.0),
-            pad: 8.0,
+            cell_h: (font_size * line_height).round().max(1.0),
+            pad: padding,
             font,
         }
     }
@@ -43,19 +43,37 @@ fn cell_at(frame: &Frame, row: usize, col: usize) -> &CellData {
     &frame.cells[row * usize::from(frame.cols) + col]
 }
 
-/// Draws one viewport: background runs, then text, then the cursor.
-pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
-    let mut painter = Painter::new()
+/// Appends one viewport, drawn at (`origin_x`, `origin_y`) in the canvas and
+/// clipped to `clip` (its pane's rectangle), to `painter`.
+pub fn draw_into(
+    painter: Painter,
+    frame: &Frame,
+    metrics: &Metrics,
+    origin_x: f32,
+    origin_y: f32,
+    clip: (f32, f32),
+) -> Painter {
+    let ox = origin_x;
+    let oy = origin_y;
+    let (clip_w, clip_h) = clip;
+    let max_cols = ((clip_w - metrics.pad) / metrics.cell_w).floor().max(0.0) as u16;
+    let max_rows = ((clip_h - metrics.pad) / metrics.cell_h).floor().max(0.0) as u16;
+    let cols = frame.cols.min(max_cols);
+    let rows = frame.rows.min(max_rows);
+    let mut painter = painter
         .font(&metrics.font)
         .text_baseline(CanvasTextBaseline::Top)
-        .text_align(nsh_core::canvas::CanvasTextAlign::Left);
+        .text_align(nsh_core::canvas::CanvasTextAlign::Left)
+        // The pane`s own background, so a colour scheme reaches the whole grid.
+        .fill_color(hsla(frame.background))
+        .fill_rect(ox, oy, clip_w, clip_h);
 
     // Background: merge equal neighbours into one rectangle per run.
-    for row in 0..usize::from(frame.rows) {
-        let y = metrics.pad + row as f32 * metrics.cell_h;
+    for row in 0..usize::from(rows) {
+        let y = oy + metrics.pad + row as f32 * metrics.cell_h;
         let mut run: Option<([u8; 3], usize)> = None;
-        for col in 0..=usize::from(frame.cols) {
-            let current = (col < usize::from(frame.cols))
+        for col in 0..=usize::from(cols) {
+            let current = (col < usize::from(cols))
                 .then(|| cell_at(frame, row, col))
                 .filter(|cell| cell.has_bg)
                 .map(|cell| cell.bg);
@@ -66,7 +84,7 @@ pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
                 (Some((color, start)), _) => {
                     let width = (col - start) as f32 * metrics.cell_w;
                     painter = painter.fill_color(hsla(color)).fill_rect(
-                        metrics.pad + start as f32 * metrics.cell_w,
+                        ox + metrics.pad + start as f32 * metrics.cell_w,
                         y,
                         width,
                         metrics.cell_h,
@@ -80,17 +98,17 @@ pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
     }
 
     // Selection: one rectangle per run of selected cells.
-    for row in 0..usize::from(frame.rows) {
-        let y = metrics.pad + row as f32 * metrics.cell_h;
+    for row in 0..usize::from(rows) {
+        let y = oy + metrics.pad + row as f32 * metrics.cell_h;
         let mut run: Option<usize> = None;
-        for col in 0..=usize::from(frame.cols) {
-            let selected = col < usize::from(frame.cols) && cell_at(frame, row, col).selected;
+        for col in 0..=usize::from(cols) {
+            let selected = col < usize::from(cols) && cell_at(frame, row, col).selected;
             match (run, selected) {
                 (Some(start), true) => run = Some(start),
                 (Some(start), false) => {
                     let width = (col - start) as f32 * metrics.cell_w;
                     painter = painter.fill_color(hsla([0x2b, 0x4a, 0x7a])).fill_rect(
-                        metrics.pad + start as f32 * metrics.cell_w,
+                        ox + metrics.pad + start as f32 * metrics.cell_w,
                         y,
                         width,
                         metrics.cell_h,
@@ -104,14 +122,14 @@ pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
     }
 
     // Text and its decorations.
-    for row in 0..usize::from(frame.rows) {
-        let y = metrics.pad + row as f32 * metrics.cell_h;
-        for col in 0..usize::from(frame.cols) {
+    for row in 0..usize::from(rows) {
+        let y = oy + metrics.pad + row as f32 * metrics.cell_h;
+        for col in 0..usize::from(cols) {
             let cell = cell_at(frame, row, col);
             if cell.text.is_empty() {
                 continue;
             }
-            let x = metrics.pad + col as f32 * metrics.cell_w;
+            let x = ox + metrics.pad + col as f32 * metrics.cell_w;
             painter = painter
                 .fill_color(hsla(cell.fg))
                 .fill_text(&cell.text, x, y);
@@ -129,9 +147,9 @@ pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
     // Cursor: a block over its cell, its glyph drawn in the background color.
     if frame.cursor_visible {
         if let Some((cx, cy)) = frame.cursor {
-            if cx < frame.cols && cy < frame.rows {
-                let x = metrics.pad + f32::from(cx) * metrics.cell_w;
-                let y = metrics.pad + f32::from(cy) * metrics.cell_h;
+            if cx < cols && cy < rows {
+                let x = ox + metrics.pad + f32::from(cx) * metrics.cell_w;
+                let y = oy + metrics.pad + f32::from(cy) * metrics.cell_h;
                 let cell = cell_at(frame, usize::from(cy), usize::from(cx));
                 painter = painter.fill_color(hsla(frame.foreground)).fill_rect(
                     x,

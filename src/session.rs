@@ -3,11 +3,11 @@
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::sync::mpsc::channel;
 use std::sync::Arc;
+use std::sync::mpsc::channel;
 
 use libghostty_vt::key;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::profiles::Profile;
 use crate::term::{self, Cmd, Frame, Shared};
@@ -53,7 +53,10 @@ impl Session {
             .master
             .try_clone_reader()
             .map_err(|e| format!("reader: {e}"))?;
-        let mut writer = pair.master.take_writer().map_err(|e| format!("writer: {e}"))?;
+        let mut writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| format!("writer: {e}"))?;
 
         let (pty_tx, pty_write_rx) = channel::<Vec<u8>>();
         let (pty_read_tx, pty_rx) = channel::<Vec<u8>>();
@@ -160,6 +163,16 @@ impl Session {
     /// (matches, selected 1-based) of the last find.
     pub fn find_result(&self) -> Option<(usize, usize)> {
         self.shared.find.lock().ok()?.clone()
+    }
+
+    /// Applies a colour scheme to this terminal.
+    pub fn set_scheme(&self, scheme: &crate::settings::Scheme) {
+        let _ = self.cmd.send(Cmd::Palette {
+            background: scheme.background,
+            foreground: scheme.foreground,
+            cursor: scheme.cursor,
+            colors: scheme.palette_entries(),
+        });
     }
 
     /// The selected text as of the last selection change (`""`: none).

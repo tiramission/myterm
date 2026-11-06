@@ -1,9 +1,11 @@
-//! myterm — M1: tabs, profiles, selection and copy/paste, exit states.
+//! myterm — a Windows terminal: tabs with split panes, profiles, find,
+//! selection and copy/paste, command palette, context menu.
 
 mod grid;
 mod keys;
 pub mod profiles;
 mod session;
+pub mod settings;
 mod term;
 
 use std::cell::{Cell, RefCell};
@@ -12,20 +14,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nsh_base::{menu, menu_item};
+use nsh_core::TouchPhase;
 use nsh_core::element::TouchEvent;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
-use nsh_core::TouchPhase;
 
-const FONT_SIZE: f32 = 13.0;
 const START_COLS: u16 = 100;
 const START_ROWS: u16 = 28;
 const TAB_HEIGHT: f32 = 34.0;
+const ACCENT: u32 = 0x2563eb;
+const SEPARATOR: f32 = 1.0;
 
 #[derive(Clone, PartialEq, Debug)]
 enum PaletteAction {
     NewTab,
     NewTabProfile(usize),
+    SplitRight,
+    SplitDown,
     Find,
     Copy,
     Paste,
@@ -33,6 +38,7 @@ enum PaletteAction {
     CloseTab,
     ScrollTop,
     ScrollBottom,
+    Settings,
 }
 
 #[derive(Clone, PartialEq)]
@@ -50,7 +56,25 @@ struct TabInfo {
     exited: Option<i32>,
 }
 
-struct Tab {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SplitAxis {
+    Row,
+    Column,
+}
+
+/// How a tab's panes are arranged.
+#[derive(Clone, PartialEq, Debug)]
+enum Layout {
+    Leaf(u64),
+    Split {
+        axis: SplitAxis,
+        first: Box<Layout>,
+        second: Box<Layout>,
+    },
+}
+
+/// One terminal: a session, its frame and its per-view state.
+struct Pane {
     id: u64,
     profile: profiles::Profile,
     session: Option<Rc<session::Session>>,
@@ -68,11 +92,93 @@ struct Tab {
     find_focus: ElementRef,
     menu_open: Signal<bool>,
     menu_at: Signal<(f32, f32)>,
+    focus: ElementRef,
+    anchor: Cell<Option<(u16, u32)>>,
+    dragging: Cell<bool>,
+    bounds: Cell<(f32, f32)>,
+}
+
+impl Pane {
+    fn session(&self) -> Option<Rc<session::Session>> {
+        self.session.clone()
+    }
+}
+
+/// A tab: one or more panes and how they are arranged.
+struct Tab {
+    id: u64,
+    panes: RefCell<Vec<Rc<Pane>>>,
+    layout: Signal<Layout>,
+    active: Signal<u64>,
+    title: Signal<String>,
+    exited: Signal<Option<i32>>,
 }
 
 impl Tab {
-    fn session(&self) -> Option<Rc<session::Session>> {
-        self.session.clone()
+    fn pane(&self, id: u64) -> Option<Rc<Pane>> {
+        self.panes
+            .borrow()
+            .iter()
+            .find(|pane| pane.id == id)
+            .cloned()
+    }
+
+    fn active_pane(&self) -> Option<Rc<Pane>> {
+        self.pane(self.active.get())
+    }
+
+    fn panes_in_order(&self) -> Vec<Rc<Pane>> {
+        let mut order = Vec::new();
+        flatten(&self.layout.get(), &mut order);
+        order.into_iter().filter_map(|id| self.pane(id)).collect()
+    }
+}
+
+fn flatten(layout: &Layout, out: &mut Vec<u64>) {
+    match layout {
+        Layout::Leaf(id) => out.push(*id),
+        Layout::Split { first, second, .. } => {
+            flatten(first, out);
+            flatten(second, out);
+        }
+    }
+}
+
+/// The layout with `target`'s leaf replaced by `replacement`.
+fn replace_leaf(layout: &Layout, target: u64, replacement: &Layout) -> Layout {
+    match layout {
+        Layout::Leaf(id) if *id == target => replacement.clone(),
+        Layout::Leaf(id) => Layout::Leaf(*id),
+        Layout::Split {
+            axis,
+            first,
+            second,
+        } => Layout::Split {
+            axis: *axis,
+            first: Box::new(replace_leaf(first, target, replacement)),
+            second: Box::new(replace_leaf(second, target, replacement)),
+        },
+    }
+}
+
+/// The layout without `target`; `None` when nothing is left.
+fn remove_leaf(layout: &Layout, target: u64) -> Option<Layout> {
+    match layout {
+        Layout::Leaf(id) => (*id != target).then_some(layout.clone()),
+        Layout::Split {
+            axis,
+            first,
+            second,
+        } => match (remove_leaf(first, target), remove_leaf(second, target)) {
+            (None, None) => None,
+            (None, Some(survivor)) => Some(survivor),
+            (Some(survivor), None) => Some(survivor),
+            (Some(a), Some(b)) => Some(Layout::Split {
+                axis: *axis,
+                first: Box::new(a),
+                second: Box::new(b),
+            }),
+        },
     }
 }
 
@@ -80,16 +186,18 @@ struct AppState {
     tabs: Signal<Vec<TabInfo>>,
     active: Signal<u64>,
     runtimes: RefCell<Vec<Rc<Tab>>>,
-    next_id: Cell<u64>,
+    next_tab: Cell<u64>,
+    next_pane: Cell<u64>,
     profiles: Vec<profiles::Profile>,
-    focus: ElementRef,
-    anchor: Cell<Option<(u16, u32)>>,
-    dragging: Cell<bool>,
     palette_open: Signal<bool>,
     palette_query: Signal<String>,
     palette_items: Signal<Vec<PaletteItem>>,
     palette_all: Vec<PaletteItem>,
     palette_focus: ElementRef,
+    settings: Signal<settings::Settings>,
+    metrics: Signal<grid::Metrics>,
+    scheme: Signal<settings::Scheme>,
+    settings_open: Signal<bool>,
 }
 
 impl AppState {
@@ -105,22 +213,52 @@ impl AppState {
         self.tab(self.active.get())
     }
 
+    fn active_pane(&self) -> Option<Rc<Pane>> {
+        self.active_tab().and_then(|tab| tab.active_pane())
+    }
+
     fn activate(&self, id: u64) {
         if self.active.get() != id {
             log::info!("activate tab {id}");
             self.active.set(id);
-            let focus = self.focus;
+            self.focus_active_pane();
+        }
+    }
+
+    fn focus_active_pane(&self) {
+        if let Some(pane) = self.active_pane() {
+            let focus = pane.focus;
             set_timeout(Duration::from_millis(0), move || focus.focus());
         }
     }
 
+    fn activate_pane(&self, tab: &Rc<Tab>, pane_id: u64) {
+        if tab.active.get() != pane_id {
+            tab.active.set(pane_id);
+            self.focus_active_pane();
+        }
+    }
+
+    fn cycle_pane(&self, offset: isize) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let panes = tab.panes_in_order();
+        if panes.len() < 2 {
+            return;
+        }
+        let current = panes
+            .iter()
+            .position(|pane| pane.id == tab.active.get())
+            .unwrap_or(0) as isize;
+        let len = panes.len() as isize;
+        let next = ((current + offset) % len + len) % len;
+        self.activate_pane(&tab, panes[next as usize].id);
+    }
+
     fn close(&self, id: u64) {
         log::info!("close tab {id}");
-        let index = self
-            .runtimes
-            .borrow()
-            .iter()
-            .position(|tab| tab.id == id);
+        let index = self.runtimes.borrow().iter().position(|tab| tab.id == id);
         let Some(index) = index else {
             return;
         };
@@ -140,12 +278,39 @@ impl AppState {
             match next {
                 Some(info) => {
                     self.active.set(info.id);
-                    let focus = self.focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                    self.focus_active_pane();
                 }
                 None => self.active.set(0),
             }
         }
+    }
+
+    fn close_active_pane(&self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let pane_id = tab.active.get();
+        self.close_pane(&tab, pane_id);
+    }
+
+    fn close_pane(&self, tab: &Rc<Tab>, pane_id: u64) {
+        if tab.panes.borrow().len() <= 1 {
+            self.close(tab.id);
+            return;
+        }
+        let Some(layout) = remove_leaf(&tab.layout.get(), pane_id) else {
+            self.close(tab.id);
+            return;
+        };
+        log::info!("close pane {pane_id} of tab {}", tab.id);
+        tab.panes.borrow_mut().retain(|pane| pane.id != pane_id);
+        tab.layout.set(layout);
+        if tab.active.get() == pane_id {
+            if let Some(next) = tab.panes_in_order().first() {
+                tab.active.set(next.id);
+            }
+        }
+        self.focus_active_pane();
     }
 
     fn activate_offset(&self, offset: isize) {
@@ -163,32 +328,32 @@ impl AppState {
     }
 }
 
-fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
-    let profile = profile
-        .and_then(|index| state.profiles.get(index).cloned())
-        .or_else(|| state.profiles.first().cloned())?;
-    let id = state.next_id.get() + 1;
-    state.next_id.set(id);
-
-    let metrics = grid::Metrics::new(FONT_SIZE);
+fn new_pane(state: &Rc<AppState>, profile: &profiles::Profile) -> Rc<Pane> {
+    let id = state.next_pane.get() + 1;
+    state.next_pane.set(id);
+    let metrics = state.metrics.get();
     let spawned = session::Session::spawn(
-        &profile,
+        profile,
         START_COLS,
         START_ROWS,
         metrics.cell_w as u32,
         metrics.cell_h as u32,
     );
     let (session, error) = match spawned {
-        Ok(session) => (Some(Rc::new(session)), None),
+        Ok(session) => {
+            let session = Rc::new(session);
+            // The scheme is applied before the first frame, so the grid never
+            // flashes libghostty's default black.
+            session.set_scheme(&state.scheme.get());
+            (Some(session), None)
+        }
         Err(error) => (None, Some(error)),
     };
-    log::info!("tab {id}: {}{}", profile.name, if error.is_some() { " (failed)" } else { "" });
-
-    let tab = Rc::new(Tab {
+    Rc::new(Pane {
         id,
         profile: profile.clone(),
         session,
-        error: error.clone(),
+        error,
         frame: RefCell::new(None),
         epoch: signal(0_u64),
         grid: Cell::new((START_COLS, START_ROWS)),
@@ -202,14 +367,43 @@ fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
         find_focus: element_ref(),
         menu_open: signal(false),
         menu_at: signal((0.0_f32, 0.0_f32)),
+        focus: element_ref(),
+        anchor: Cell::new(None),
+        dragging: Cell::new(false),
+        bounds: Cell::new((0.0, 0.0)),
+    })
+}
+
+fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
+    let profile = profile
+        .and_then(|index| state.profiles.get(index).cloned())
+        .or_else(|| state.profiles.first().cloned())?;
+
+    let pane = new_pane(state, &profile);
+    if pane.error.is_some() {
+        log::warn!("{} failed to start: {:?}", profile.name, pane.error);
+    } else {
+        log::info!("new pane {} ({})", pane.id, profile.name);
+    }
+    let pane_id = pane.id;
+
+    let id = state.next_tab.get() + 1;
+    state.next_tab.set(id);
+    let title = if pane.error.is_some() {
+        format!("{} · 启动失败", profile.name)
+    } else {
+        profile.name.clone()
+    };
+    let tab = Rc::new(Tab {
+        id,
+        panes: RefCell::new(vec![pane]),
+        layout: signal(Layout::Leaf(pane_id)),
+        active: signal(pane_id),
+        title: signal(title.clone()),
+        exited: signal(None::<i32>),
     });
     state.runtimes.borrow_mut().push(tab);
 
-    let title = if error.is_some() {
-        format!("{} · 启动失败", profile.name)
-    } else {
-        profile.name
-    };
     let mut tabs = state.tabs.get();
     tabs.push(TabInfo {
         id,
@@ -218,9 +412,34 @@ fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
     });
     state.tabs.set(tabs);
     state.active.set(id);
-    let focus = state.focus;
-    set_timeout(Duration::from_millis(0), move || focus.focus());
+    state.focus_active_pane();
     Some(id)
+}
+
+fn split_active(state: &Rc<AppState>, axis: SplitAxis) {
+    let Some(tab) = state.active_tab() else {
+        return;
+    };
+    let Some(current) = tab.active_pane() else {
+        return;
+    };
+    let pane = new_pane(state, &current.profile);
+    let pane_id = pane.id;
+    let target = current.id;
+    let layout = replace_leaf(
+        &tab.layout.get(),
+        target,
+        &Layout::Split {
+            axis,
+            first: Box::new(Layout::Leaf(target)),
+            second: Box::new(Layout::Leaf(pane_id)),
+        },
+    );
+    tab.panes.borrow_mut().push(pane);
+    tab.layout.set(layout);
+    tab.active.set(pane_id);
+    log::info!("split pane {target} -> {pane_id}");
+    state.focus_active_pane();
 }
 
 /// The app's UI set (`nsh.json` `"rust"`).
@@ -238,6 +457,18 @@ pub fn App() -> impl IntoElement {
             hint: "Ctrl+Shift+T".to_owned(),
             keywords: "new tab",
             action: PaletteAction::NewTab,
+        },
+        PaletteItem {
+            title: "向右分屏".to_owned(),
+            hint: "Ctrl+Shift+D".to_owned(),
+            keywords: "split right pane",
+            action: PaletteAction::SplitRight,
+        },
+        PaletteItem {
+            title: "向下分屏".to_owned(),
+            hint: "Ctrl+Shift+E".to_owned(),
+            keywords: "split down pane",
+            action: PaletteAction::SplitDown,
         },
     ];
     for (index, profile) in profile_list.iter().enumerate() {
@@ -274,9 +505,9 @@ pub fn App() -> impl IntoElement {
             action: PaletteAction::SelectAll,
         },
         PaletteItem {
-            title: "关闭标签".to_owned(),
+            title: "关闭窗格".to_owned(),
             hint: "Ctrl+Shift+W".to_owned(),
-            keywords: "close tab",
+            keywords: "close pane tab",
             action: PaletteAction::CloseTab,
         },
         PaletteItem {
@@ -291,54 +522,98 @@ pub fn App() -> impl IntoElement {
             keywords: "scroll bottom",
             action: PaletteAction::ScrollBottom,
         },
+        PaletteItem {
+            title: "打开设置".to_owned(),
+            hint: "Ctrl+,".to_owned(),
+            keywords: "settings preferences options config",
+            action: PaletteAction::Settings,
+        },
     ]);
     let palette_items = palette_all.clone();
+    let defaults = load_settings();
+    let metrics = grid::Metrics::new(
+        defaults.font_size,
+        defaults.line_height,
+        defaults.padding,
+        &defaults.font_family,
+    );
 
     let state = Rc::new(AppState {
         tabs: signal(Vec::<TabInfo>::new()),
         active: signal(0_u64),
         runtimes: RefCell::new(Vec::new()),
-        next_id: Cell::new(0),
+        next_tab: Cell::new(0),
+        next_pane: Cell::new(0),
         profiles: profile_list,
-        focus: element_ref(),
-        anchor: Cell::new(None),
-        dragging: Cell::new(false),
         palette_open: signal(false),
         palette_query: signal(String::new()),
         palette_items: signal(palette_items),
         palette_all,
         palette_focus: element_ref(),
+        settings: signal(defaults.clone()),
+        metrics: signal(metrics),
+        scheme: signal(settings::scheme(&defaults.scheme)),
+        settings_open: signal(false),
     });
 
     spawn_tab(&state, None);
+    {
+        let state = state.clone();
+        set_timeout(Duration::from_millis(250), move || {
+            state.focus_active_pane()
+        });
+    }
 
-    // Poll every tab: newest frame, title, exit status.
+    // Poll every pane: newest frame, title, exit status, find result.
     let poll = state.clone();
     set_interval(Duration::from_millis(8), move || {
         for tab in poll.runtimes.borrow().iter() {
-            if let Some(session) = tab.session.as_ref() {
+            for pane in tab.panes.borrow().iter() {
+                let Some(session) = pane.session.as_ref() else {
+                    continue;
+                };
                 if let Some(frame) = session.take_frame() {
-                    *tab.frame.borrow_mut() = Some(frame);
-                    tab.epoch.update(|value| *value += 1);
+                    *pane.frame.borrow_mut() = Some(frame);
+                    pane.epoch.update(|value| *value += 1);
                 }
                 if let Some(title) = session.title() {
                     let usable = !title.is_empty()
                         && title.chars().count() <= 40
                         && !title.contains(".exe")
                         && !title.contains('/');
-                    if usable && tab.title.get() != title {
-                        tab.title.set(title);
+                    if usable && pane.title.get() != title {
+                        pane.title.set(title);
                     }
                 }
-                if tab.exit.get().is_none() {
+                if pane.exit.get().is_none() {
                     if let Some(code) = session.poll_exit() {
-                        tab.exit.set(Some(code));
+                        pane.exit.set(Some(code));
                     }
                 }
                 let found = session.find_result();
-                if tab.find_count.get() != found {
-                    tab.find_count.set(found);
+                if pane.find_count.get() != found {
+                    pane.find_count.set(found);
                 }
+            }
+
+            let title = tab
+                .active_pane()
+                .map(|pane| pane.title.get())
+                .unwrap_or_default();
+            if tab.title.get() != title {
+                tab.title.set(title.clone());
+            }
+            let mut all_exited = true;
+            let mut code = Some(0);
+            for pane in tab.panes.borrow().iter() {
+                match pane.exit.get() {
+                    Some(status) => code = Some(status),
+                    None => all_exited = false,
+                }
+            }
+            let exited = all_exited.then_some(code.unwrap_or(-1));
+            if tab.exited.get() != exited {
+                tab.exited.set(exited);
             }
         }
 
@@ -347,7 +622,7 @@ pub fn App() -> impl IntoElement {
         for info in tabs.iter_mut() {
             if let Some(tab) = poll.tab(info.id) {
                 let base = tab.title.get();
-                let exited = tab.exit.get();
+                let exited = tab.exited.get();
                 let display = match exited {
                     Some(_) => format!("{base} · 已退出"),
                     None => base,
@@ -370,6 +645,8 @@ pub fn App() -> impl IntoElement {
     let menu_state = state.clone();
     let status_state = state.clone();
     let pane_state = state.clone();
+    let area_w = signal(0.0_f32);
+    let area_h = signal(0.0_f32);
 
     view()
         .flex_1()
@@ -383,9 +660,11 @@ pub fn App() -> impl IntoElement {
                 .gap_1()
                 .px_2()
                 .bg(rgb(0x15181d))
-                .child(each(state.tabs, |info| info.id, move |info, _| {
-                    tab_button(bar_state.clone(), info)
-                }))
+                .child(each(
+                    state.tabs,
+                    |info| info.id,
+                    move |info, _| tab_button(bar_state.clone(), info),
+                ))
                 .child(icon_button("+", {
                     let state = state.clone();
                     move || {
@@ -395,10 +674,10 @@ pub fn App() -> impl IntoElement {
                 .child(profile_menu(menu_state))
                 .child(
                     text(move || {
-                        let Some(tab) = status_state.active_tab() else {
+                        let Some(pane) = status_state.active_pane() else {
                             return String::new();
                         };
-                        let (cols, rows) = tab.dims.get();
+                        let (cols, rows) = pane.dims.get();
                         format!("{cols}×{rows}")
                     })
                     .text_size(px(11.0))
@@ -406,14 +685,33 @@ pub fn App() -> impl IntoElement {
                     .px_2(),
                 ),
         )
-        .child(view().flex_1().child(dynamic(move || {
-            let _ = pane_state.tabs.get();
-            if pane_state.runtimes.borrow().is_empty() {
-                return empty_state(pane_state.clone()).into_element();
-            }
-            let id = pane_state.active.get();
-            pane(pane_state.clone(), id).into_element()
-        })))
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.0))
+                .child(dynamic(move || {
+                    let _ = pane_state.tabs.get();
+                    let Some(tab) = pane_state.active_tab() else {
+                        return empty_state(pane_state.clone()).into_element();
+                    };
+                    let layout = tab.layout.get();
+                    render_layout(
+                        pane_state.clone(),
+                        tab,
+                        &layout,
+                        (area_w.get(), area_h.get()),
+                    )
+                    .into_element()
+                }))
+                .on_layout({
+                    let area_w = area_w;
+                    let area_h = area_h;
+                    move |bounds: &Bounds<Points>| {
+                        area_w.set(bounds.size.width.0);
+                        area_h.set(bounds.size.height.0);
+                    }
+                }),
+        )
         .child(when(
             {
                 let state = state.clone();
@@ -424,6 +722,885 @@ pub fn App() -> impl IntoElement {
                 move || palette_overlay(state.clone())
             },
         ))
+        .child(when(
+            {
+                let state = state.clone();
+                move || state.settings_open.get()
+            },
+            {
+                let state = state.clone();
+                move || settings_overlay(state.clone())
+            },
+        ))
+}
+
+fn render_layout(
+    state: Rc<AppState>,
+    tab: Rc<Tab>,
+    layout: &Layout,
+    area: (f32, f32),
+) -> AnyElement {
+    let mut rects = Vec::new();
+    pane_rects(layout, (0.0, 0.0), area, &mut rects);
+    // One canvas paints every pane at its own offset: NSH 0.3 draws a canvas
+    // in a nested view without the view's own offset, so per-pane canvases
+    // land in the wrong place when a tab is split.
+    let metrics = state.metrics.get();
+    let metrics = Rc::new(metrics);
+    let draw_tab = tab.clone();
+    let draw_rects = rects.clone();
+    let draw_metrics = metrics.clone();
+    let draw_active = tab.active;
+
+    let mut container = view()
+        .absolute()
+        .left(px(0.0))
+        .top(px(0.0))
+        .w_full()
+        .h_full()
+        .child(
+            canvas(move || {
+                let mut painter = Painter::new();
+                for (pane_id, (x, y, w, h)) in draw_rects.iter().copied() {
+                    let Some(pane) = draw_tab.pane(pane_id) else {
+                        continue;
+                    };
+                    let _ = pane.epoch.get();
+                    if let Some(frame) = &*pane.frame.borrow() {
+                        painter = grid::draw_into(painter, frame, &draw_metrics, x, y, (w, h));
+                    }
+                    let _ = draw_active.get();
+                }
+                painter
+            })
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .w_full()
+            .h_full(),
+        );
+
+    for (pane_id, rect) in rects {
+        container = container.child(pane_container(state.clone(), tab.clone(), pane_id, rect));
+    }
+    container.into_element()
+}
+
+fn pane_rects(
+    layout: &Layout,
+    origin: (f32, f32),
+    area: (f32, f32),
+    out: &mut Vec<(u64, (f32, f32, f32, f32))>,
+) {
+    match layout {
+        Layout::Leaf(id) => out.push((*id, (origin.0, origin.1, area.0, area.1))),
+        Layout::Split {
+            axis,
+            first,
+            second,
+        } => {
+            if matches!(axis, SplitAxis::Row) {
+                let w = ((area.0 - SEPARATOR) / 2.0).max(1.0);
+                pane_rects(first, origin, (w, area.1), out);
+                pane_rects(
+                    second,
+                    (origin.0 + w + SEPARATOR, origin.1),
+                    ((area.0 - w - SEPARATOR).max(1.0), area.1),
+                    out,
+                );
+            } else {
+                let h = ((area.1 - SEPARATOR) / 2.0).max(1.0);
+                pane_rects(first, origin, (area.0, h), out);
+                pane_rects(
+                    second,
+                    (origin.0, origin.1 + h + SEPARATOR),
+                    (area.0, (area.1 - h - SEPARATOR).max(1.0)),
+                    out,
+                );
+            }
+        }
+    }
+}
+
+/// The tab's panes: one canvas paints every pane at its own offset, and a
+/// layer per pane holds its chrome (find bar, exit strip, menu) and input.
+fn pane_container(
+    state: Rc<AppState>,
+    tab: Rc<Tab>,
+    pane_id: u64,
+    rect: (f32, f32, f32, f32),
+) -> AnyElement {
+    let Some(pane) = tab.pane(pane_id) else {
+        return view().into_element();
+    };
+    let (x, y, w, h) = rect;
+    let pane_metrics = Rc::new(state.metrics.get());
+    let active = tab.active;
+    let activate_state = state.clone();
+    let activate_tab = tab.clone();
+    let focus_ref = pane.focus;
+    let menu_pane = pane.clone();
+    let find_condition = pane.clone();
+    let find_body = pane.clone();
+    let find_state = state.clone();
+    let exit_condition = pane.clone();
+    let exit_body = pane.clone();
+    let exit_state = state.clone();
+    let menu_condition = pane.clone();
+    let menu_body = pane.clone();
+    let menu_state = state.clone();
+    let key_pane = pane.clone();
+    let change_pane = pane.clone();
+    let composing = Rc::new(Cell::new(false));
+    let key_composing = composing.clone();
+    let change_composing = composing.clone();
+    let composition = composing.clone();
+    let error_condition = pane.clone();
+    let error_body = pane.clone();
+    let error_state = state.clone();
+
+    view()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(w))
+        .h(px(h))
+        .overflow_hidden()
+        .border_1()
+        .border_color(move || {
+            if active.get() == pane_id {
+                rgb(ACCENT)
+            } else {
+                rgb(0x101216)
+            }
+        })
+        .on_press(move || {
+            activate_state.activate_pane(&activate_tab, pane_id);
+            focus_ref.focus();
+        })
+        .child(when(
+            move || find_condition.find_open.get(),
+            move || find_bar(find_state.clone(), find_body.clone()),
+        ))
+        .child(when(
+            move || exit_condition.exit.get().is_some(),
+            move || exit_strip(exit_state.clone(), exit_body.clone()),
+        ))
+        .child(when(
+            move || error_condition.error.is_some(),
+            move || error_panel(error_body.clone(), error_state.clone()),
+        ))
+        .child(when(
+            move || menu_condition.menu_open.get(),
+            move || context_menu_view(menu_state.clone(), menu_body.clone()),
+        ))
+        .child(
+            nsh_base::input()
+                .element_ref(&pane.focus)
+                .value(move || String::new())
+                .caret(false)
+                .auto_focus(true)
+                .paste_behavior(PasteBehavior::Report)
+                .on_key_press(move |key: &str| {
+                    if key_composing.get() || key == "Backspace" || key == "Enter" {
+                        return;
+                    }
+                    if !key.is_empty() {
+                        if let Some(session) = key_pane.session.as_ref() {
+                            session.send_text(key);
+                        }
+                    }
+                })
+                .on_change(move |text: &str| {
+                    if change_composing.get() && !text.is_empty() {
+                        if let Some(session) = change_pane.session.as_ref() {
+                            session.send_text(text);
+                        }
+                    }
+                })
+                .on_composition_change(move |event: &Composition| {
+                    composition.set(event.composing);
+                })
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .size(px(1.0))
+                .opacity(0.0),
+        )
+        .child(
+            view()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .w_full()
+                .h_full()
+                .on_context_menu(move |event: &ContextMenuEvent| {
+                    menu_pane
+                        .menu_at
+                        .set((event.position.x.0, event.position.y.0));
+                    menu_pane.menu_open.set(true);
+                })
+                .on_touch({
+                    let pane = pane.clone();
+                    let metrics = pane_metrics.clone();
+                    move |event: &TouchEvent| {
+                        let Some(point) = event.points.iter().find(|point| point.changed) else {
+                            return;
+                        };
+                        let col = ((point.location.x.0 - metrics.pad) / metrics.cell_w)
+                            .floor()
+                            .max(0.0) as u16;
+                        let row = ((point.location.y.0 - metrics.pad) / metrics.cell_h)
+                            .floor()
+                            .max(0.0) as u16;
+                        let (cols, rows) = pane.grid.get();
+                        let cell = (
+                            col.min(cols.saturating_sub(1)),
+                            u32::from(row.min(rows.saturating_sub(1))),
+                        );
+                        match event.phase {
+                            TouchPhase::Start => {
+                                pane.anchor.set(Some(cell));
+                                pane.dragging.set(false);
+                                if let Some(session) = pane.session.as_ref() {
+                                    session.clear_selection();
+                                }
+                            }
+                            TouchPhase::Move => {
+                                if let Some(anchor) = pane.anchor.get() {
+                                    if anchor != cell || pane.dragging.get() {
+                                        pane.dragging.set(true);
+                                        if let Some(session) = pane.session.as_ref() {
+                                            session.select(anchor, cell);
+                                        }
+                                    }
+                                }
+                            }
+                            TouchPhase::End | TouchPhase::Cancel => {
+                                pane.anchor.set(None);
+                            }
+                        }
+                    }
+                })
+                .on_layout({
+                    let pane = pane.clone();
+                    let metrics = pane_metrics.clone();
+                    move |bounds: &Bounds<Points>| {
+                        pane.bounds.set((bounds.size.width.0, bounds.size.height.0));
+                        let cols = metrics.cols(bounds.size.width.0);
+                        let rows = metrics.rows(bounds.size.height.0);
+                        if cols == 0 || rows == 0 {
+                            return;
+                        }
+                        if pane.grid.get() != (cols, rows) {
+                            pane.grid.set((cols, rows));
+                            if pane.dims.get() != (cols, rows) {
+                                pane.dims.set((cols, rows));
+                            }
+                            if let Some(session) = pane.session.as_ref() {
+                                session.resize(
+                                    cols,
+                                    rows,
+                                    metrics.cell_w as u32,
+                                    metrics.cell_h as u32,
+                                );
+                            }
+                        }
+                    }
+                }),
+        )
+        .into_element()
+}
+
+fn error_panel(pane: Rc<Pane>, state: Rc<AppState>) -> impl IntoElement {
+    let message = pane.error.clone().unwrap_or_default();
+    let name = pane.profile.name.clone();
+    let close_state = state.clone();
+    let id = pane.id;
+    let command = format!("{} {}", pane.profile.program, pane.profile.args.join(" "));
+
+    view()
+        .flex_1()
+        .bg(rgb(0x101216))
+        .items_center()
+        .justify_center()
+        .child(
+            view()
+                .w(px(520.0))
+                .gap_3()
+                .child(
+                    text(format!("无法启动 {name}"))
+                        .text_size(px(15.0))
+                        .text_color(rgb(0xf2f4f8)),
+                )
+                .child(text(message).text_size(px(12.0)).text_color(rgb(0xf2b544)))
+                .child(text(command).text_size(px(11.0)).text_color(rgb(0x8b929e)))
+                .child(
+                    view().flex_row().gap_2().child(
+                        view()
+                            .px_3()
+                            .py_2()
+                            .rounded(px(6.0))
+                            .bg(rgb(ACCENT))
+                            .on_press(move || {
+                                close_state.close_pane(
+                                    &close_state.active_tab().unwrap_or_else(|| unreachable!()),
+                                    id,
+                                )
+                            })
+                            .child(
+                                text("关闭窗格")
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xffffff)),
+                            ),
+                    ),
+                ),
+        )
+}
+
+fn exit_strip(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
+    let restart_state = state.clone();
+    let restart_pane = pane.clone();
+    let close_state = state.clone();
+    let text_pane = pane.clone();
+    let color_pane = pane.clone();
+    let close_target = pane.clone();
+
+    view()
+        .h(px(28.0))
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .bg(rgb(0x1b1f26))
+        .child(
+            text(move || {
+                let code = text_pane.exit.get().unwrap_or(-1);
+                if code == 0 {
+                    "进程已退出，代码 0".to_owned()
+                } else {
+                    format!("进程已退出，代码 {code}")
+                }
+            })
+            .text_size(px(11.0))
+            .text_color(move || {
+                if color_pane.exit.get() == Some(0) {
+                    rgb(0x3fb950)
+                } else {
+                    rgb(0xf2b544)
+                }
+            }),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    let profile = restart_pane.profile.name.clone();
+                    let index = restart_state
+                        .profiles
+                        .iter()
+                        .position(|p| p.name == profile);
+                    spawn_tab(&restart_state, index);
+                    let tab = restart_state
+                        .runtimes
+                        .borrow()
+                        .iter()
+                        .find(|tab| tab.pane(restart_pane.id).is_some())
+                        .cloned();
+                    if let Some(tab) = tab {
+                        restart_state.close_pane(&tab, restart_pane.id);
+                    }
+                })
+                .child(
+                    text("重新启动")
+                        .text_size(px(11.0))
+                        .text_color(rgb(0xe6e8ec)),
+                ),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    if let Some(tab) = close_state
+                        .runtimes
+                        .borrow()
+                        .iter()
+                        .find(|tab| tab.pane(close_target.id).is_some())
+                        .cloned()
+                    {
+                        close_state.close_pane(&tab, close_target.id);
+                    }
+                })
+                .child(
+                    text("关闭窗格")
+                        .text_size(px(11.0))
+                        .text_color(rgb(0xc3c8d1)),
+                ),
+        )
+}
+
+fn find_bar(_state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
+    let query_pane = pane.clone();
+    let change_query_pane = pane.clone();
+    let count_pane = pane.clone();
+    let next_pane = pane.clone();
+    let prev_pane = pane.clone();
+    let close_pane = pane.clone();
+    let focus = pane.focus;
+
+    view()
+        .h(px(32.0))
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .bg(rgb(0x1b1f26))
+        .child(
+            nsh_base::input()
+                .element_ref(&pane.find_focus)
+                .value(move || query_pane.find_query.get())
+                .placeholder("查找…")
+                .caret(true)
+                .auto_focus(true)
+                .on_change(move |text: &str| {
+                    change_query_pane.find_query.set(text.to_owned());
+                    change_query_pane.find_skip.set(0);
+                    change_query_pane.find_count.set(None);
+                    if let Some(session) = change_query_pane.session.as_ref() {
+                        session.find(text, 1, 0);
+                    }
+                })
+                .w(px(300.0))
+                .h(px(24.0))
+                .px_2()
+                .text_size(px(12.0))
+                .text_color(rgb(0xe6e8ec))
+                .bg(rgb(0x101216))
+                .rounded(px(4.0)),
+        )
+        .child(
+            text(move || match count_pane.find_count.get() {
+                Some((0, _)) => "0/0".to_owned(),
+                Some((total, selected)) => format!("{selected}/{total}"),
+                None => "…".to_owned(),
+            })
+            .text_size(px(11.0))
+            .text_color(rgb(0x8b929e))
+            .w(px(70.0)),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    let skip = prev_pane.find_skip.get();
+                    let query = prev_pane.find_query.get();
+                    if let Some(session) = prev_pane.session.as_ref() {
+                        session.find(&query, -1, skip);
+                    }
+                })
+                .child(text("↑").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    let skip = next_pane.find_skip.get() + 1;
+                    next_pane.find_skip.set(skip);
+                    let query = next_pane.find_query.get();
+                    if let Some(session) = next_pane.session.as_ref() {
+                        session.find(&query, 1, skip);
+                    }
+                })
+                .child(text("↓").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    close_pane.find_open.set(false);
+                    if let Some(session) = close_pane.session.as_ref() {
+                        session.clear_selection();
+                    }
+                    let focus = focus;
+                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                })
+                .child(text("×").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+}
+
+fn empty_state(state: Rc<AppState>) -> impl IntoElement {
+    view()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .child(
+            text("没有打开的会话")
+                .text_size(px(15.0))
+                .text_color(rgb(0xe6e8ec)),
+        )
+        .child(
+            text("按 Ctrl+Shift+T 新建一个标签")
+                .text_size(px(12.0))
+                .text_color(rgb(0x8b929e)),
+        )
+        .child(
+            view()
+                .px_4()
+                .py_2()
+                .rounded(px(6.0))
+                .bg(rgb(ACCENT))
+                .on_press(move || {
+                    spawn_tab(&state, None);
+                })
+                .child(
+                    text("新建标签")
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xffffff)),
+                ),
+        )
+}
+
+fn register_app_shortcuts(state: &Rc<AppState>) {
+    let bind = |keystroke: &'static str, handler: Box<dyn Fn()>| {
+        on_key_with(
+            keystroke,
+            KeyOptions {
+                when: When::Always,
+                repeat: false,
+            },
+            move |_| handler(),
+        );
+    };
+
+    bind("ctrl+shift+t", {
+        let state = state.clone();
+        Box::new(move || {
+            spawn_tab(&state, None);
+        })
+    });
+    bind("ctrl+shift+d", {
+        let state = state.clone();
+        Box::new(move || split_active(&state, SplitAxis::Row))
+    });
+    bind("ctrl+shift+e", {
+        let state = state.clone();
+        Box::new(move || split_active(&state, SplitAxis::Column))
+    });
+    bind("ctrl+shift+w", {
+        let state = state.clone();
+        Box::new(move || state.close_active_pane())
+    });
+    bind("ctrl+,", {
+        let state = state.clone();
+        Box::new(move || state.settings_open.set(true))
+    });
+    bind("ctrl+tab", {
+        let state = state.clone();
+        Box::new(move || state.activate_offset(1))
+    });
+    bind("ctrl+shift+tab", {
+        let state = state.clone();
+        Box::new(move || state.activate_offset(-1))
+    });
+    bind("alt+left", {
+        let state = state.clone();
+        Box::new(move || state.cycle_pane(-1))
+    });
+    bind("alt+up", {
+        let state = state.clone();
+        Box::new(move || state.cycle_pane(-1))
+    });
+    bind("alt+right", {
+        let state = state.clone();
+        Box::new(move || state.cycle_pane(1))
+    });
+    bind("alt+down", {
+        let state = state.clone();
+        Box::new(move || state.cycle_pane(1))
+    });
+    bind("ctrl+shift+c", {
+        let state = state.clone();
+        Box::new(move || copy_selection(&state))
+    });
+    bind("ctrl+shift+v", {
+        let state = state.clone();
+        Box::new(move || paste_clipboard(&state))
+    });
+    bind("ctrl+shift+f", {
+        let state = state.clone();
+        Box::new(move || toggle_find(&state))
+    });
+    bind("ctrl+shift+p", {
+        let state = state.clone();
+        Box::new(move || {
+            let open = !state.palette_open.get();
+            state.palette_open.set(open);
+            if open {
+                let focus = state.palette_focus;
+                set_timeout(Duration::from_millis(0), move || focus.focus());
+            } else {
+                state.palette_query.set(String::new());
+                state.palette_items.set(state.palette_all.clone());
+            }
+        })
+    });
+    bind("ctrl+shift+u", {
+        let state = state.clone();
+        Box::new(move || {
+            if let Some(pane) = state.active_pane() {
+                if let Some(session) = pane.session.as_ref() {
+                    session.select_all();
+                }
+            }
+        })
+    });
+    bind("shift+pageup", {
+        let state = state.clone();
+        Box::new(move || {
+            if let Some(session) = state.active_pane().and_then(|pane| pane.session()) {
+                session.scroll(-20);
+            }
+        })
+    });
+    bind("shift+pagedown", {
+        let state = state.clone();
+        Box::new(move || {
+            if let Some(session) = state.active_pane().and_then(|pane| pane.session()) {
+                session.scroll(20);
+            }
+        })
+    });
+
+    for (index, keystroke) in [
+        "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let state = state.clone();
+        on_key_with(
+            keystroke,
+            KeyOptions {
+                when: When::Always,
+                repeat: false,
+            },
+            move |_| {
+                if let Some(info) = state.tabs.get().get(index) {
+                    state.activate(info.id);
+                }
+            },
+        );
+    }
+
+    // Terminal keys go to the active pane.
+    for keystroke in keys::TERMINAL_KEYS {
+        let Some((key, mods)) = keys::parse(keystroke) else {
+            continue;
+        };
+        let state = state.clone();
+        on_key_with(
+            keystroke,
+            KeyOptions {
+                when: When::Always,
+                repeat: true,
+            },
+            move |_| {
+                let active = state.active_pane();
+                if keystroke == &"enter" {
+                    if state.palette_open.get() {
+                        if let Some(item) = state.palette_items.get().first() {
+                            run_palette(&state, item.action.clone());
+                        }
+                        return;
+                    }
+                    if let Some(pane) = active.as_ref() {
+                        if pane.find_open.get() {
+                            let skip = pane.find_skip.get() + 1;
+                            pane.find_skip.set(skip);
+                            let query = pane.find_query.get();
+                            if let Some(session) = pane.session.as_ref() {
+                                session.find(&query, 1, skip);
+                            }
+                            return;
+                        }
+                    }
+                }
+                if keystroke == &"escape" {
+                    if state.palette_open.get() {
+                        state.palette_open.set(false);
+                        state.palette_query.set(String::new());
+                        state.palette_items.set(state.palette_all.clone());
+                        state.focus_active_pane();
+                        return;
+                    }
+                    if let Some(pane) = active.as_ref() {
+                        if pane.menu_open.get() {
+                            pane.menu_open.set(false);
+                            return;
+                        }
+                        if pane.find_open.get() {
+                            close_find(pane);
+                            return;
+                        }
+                    }
+                }
+                if let Some(session) = active.and_then(|pane| pane.session()) {
+                    session.send_key(key, mods);
+                }
+            },
+        );
+    }
+}
+
+fn toggle_find(state: &Rc<AppState>) {
+    let Some(pane) = state.active_pane() else {
+        return;
+    };
+    if pane.find_open.get() {
+        close_find(&pane);
+    } else {
+        pane.find_open.set(true);
+        let focus = pane.find_focus;
+        set_timeout(Duration::from_millis(0), move || focus.focus());
+    }
+}
+
+fn close_find(pane: &Rc<Pane>) {
+    pane.find_open.set(false);
+    pane.find_count.set(None);
+    pane.find_query.set(String::new());
+    if let Some(session) = pane.session.as_ref() {
+        session.clear_selection();
+    }
+    let focus = pane.focus;
+    set_timeout(Duration::from_millis(0), move || focus.focus());
+}
+
+fn open_find(state: &Rc<AppState>) {
+    let Some(pane) = state.active_pane() else {
+        return;
+    };
+    pane.find_open.set(true);
+    let focus = pane.find_focus;
+    set_timeout(Duration::from_millis(0), move || focus.focus());
+}
+
+fn copy_selection(state: &Rc<AppState>) {
+    if let Some(pane) = state.active_pane() {
+        if let Some(session) = pane.session.as_ref() {
+            let text = session.selection_text();
+            if !text.is_empty() {
+                set_clipboard(text);
+            }
+        }
+    }
+}
+
+fn paste_clipboard(state: &Rc<AppState>) {
+    let Some(pane) = state.active_pane() else {
+        return;
+    };
+    let Some(session) = pane.session() else {
+        return;
+    };
+    spawn(async move {
+        let text = clipboard_string().await;
+        if !text.is_empty() {
+            session.send_text(&text);
+        }
+    });
+}
+
+fn context_menu_view(state: Rc<AppState>, pane: Rc<Pane>) -> impl IntoElement {
+    let (x, y) = pane.menu_at.get();
+    let close = {
+        let pane = pane.clone();
+        move || pane.menu_open.set(false)
+    };
+    let close_copy = close.clone();
+    let close_paste = close.clone();
+    let close_all = close.clone();
+    let close_find = close.clone();
+    let close_close = close.clone();
+    let state_copy = state.clone();
+    let state_paste = state.clone();
+    let state_all = state.clone();
+    let state_find = state.clone();
+    let state_close = state.clone();
+    let close_pane = pane.clone();
+
+    view()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(184.0))
+        .p_1()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(0x2a3038))
+        .bg(rgb(0x1b1f26))
+        .shadow_lg()
+        .child(menu_row("复制", move || {
+            copy_selection(&state_copy);
+            close_copy();
+        }))
+        .child(menu_row("粘贴", move || {
+            paste_clipboard(&state_paste);
+            close_paste();
+        }))
+        .child(menu_row("全选", move || {
+            if let Some(pane) = state_all.active_pane() {
+                if let Some(session) = pane.session.as_ref() {
+                    session.select_all();
+                }
+            }
+            close_all();
+        }))
+        .child(menu_row("查找…", move || {
+            open_find(&state_find);
+            close_find();
+        }))
+        .child(view().h(px(1.0)).my_1().bg(rgb(0x2a3038)))
+        .child(menu_row("关闭窗格", move || {
+            if let Some(tab) = state_close
+                .runtimes
+                .borrow()
+                .iter()
+                .find(|tab| tab.pane(close_pane.id).is_some())
+                .cloned()
+            {
+                state_close.close_pane(&tab, close_pane.id);
+            }
+            close_close();
+        }))
+}
+
+fn menu_row(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .px_3()
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .active(|s| s.bg(rgb(0x2a3038)))
+        .on_press(on_press)
+        .child(text(label).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
 }
 
 fn icon_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
@@ -434,11 +1611,7 @@ fn icon_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoE
         .rounded(px(6.0))
         .active(|s| s.bg(rgb(0x2a3038)))
         .on_press(on_press)
-        .child(
-            text(label)
-                .text_size(px(15.0))
-                .text_color(rgb(0xaab2be)),
-        )
+        .child(text(label).text_size(px(15.0)).text_color(rgb(0xaab2be)))
 }
 
 fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElement {
@@ -541,784 +1714,6 @@ fn profile_menu(state: Rc<AppState>) -> impl IntoElement {
     menu_view
 }
 
-fn pane(state: Rc<AppState>, id: u64) -> impl IntoElement {
-    let Some(tab) = state.tab(id) else {
-        return view();
-    };
-
-    let error_condition = tab.clone();
-    let error_body = tab.clone();
-    let error_state = state.clone();
-    let surface_condition = tab.clone();
-    let surface_body = tab.clone();
-    let surface_state = state.clone();
-
-    view()
-        .flex_1()
-        .child(when(move || error_condition.error.is_some(), move || {
-            error_panel(error_body.clone(), error_state.clone())
-        }))
-        .child(when(move || surface_condition.error.is_none(), move || {
-            terminal_surface(surface_state.clone(), surface_body.clone())
-        }))
-}
-
-fn error_panel(tab: Rc<Tab>, state: Rc<AppState>) -> impl IntoElement {
-    let message = tab.error.clone().unwrap_or_default();
-    let name = tab.profile.name.clone();
-    let close_state = state.clone();
-    let id = tab.id;
-    let command = format!("{} {}", tab.profile.program, tab.profile.args.join(" "));
-
-    view()
-        .flex_1()
-        .bg(rgb(0x101216))
-        .items_center()
-        .justify_center()
-        .child(
-            view()
-                .w(px(520.0))
-                .gap_3()
-                .child(
-                    text(format!("无法启动 {name}"))
-                        .text_size(px(15.0))
-                        .text_color(rgb(0xf2f4f8)),
-                )
-                .child(
-                    text(message)
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xf2b544)),
-                )
-                .child(
-                    text(command)
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x8b929e)),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .child(
-                            view()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(6.0))
-                                .bg(rgb(0x2563eb))
-                                .on_press(move || close_state.close(id))
-                                .child(
-                                    text("关闭标签")
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(0xffffff)),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .px_3()
-                                .py_2()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(0x2a3038))
-                                .child(
-                                    text("检查配置文件…")
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(0xc3c8d1)),
-                                ),
-                        ),
-                ),
-        )
-}
-
-fn terminal_surface(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
-    let metrics = Rc::new(grid::Metrics::new(FONT_SIZE));
-
-    let draw_tab = tab.clone();
-    let draw_metrics = metrics.clone();
-    let layout_tab = tab.clone();
-    let layout_metrics = metrics.clone();
-    let touch_state = state.clone();
-    let touch_tab = tab.clone();
-    let touch_metrics = metrics.clone();
-    let key_tab = tab.clone();
-    let change_tab = tab.clone();
-    let composing = Rc::new(Cell::new(false));
-    let key_composing = composing.clone();
-    let change_composing = composing.clone();
-    let composition = composing.clone();
-    let focus_ref = state.focus;
-    let find_condition = tab.clone();
-    let menu_tab = tab.clone();
-    let menu_condition = tab.clone();
-    let menu_body = tab.clone();
-    let menu_state = state.clone();
-    let find_body = tab.clone();
-    let find_state = state.clone();
-
-    view()
-        .flex_1()
-        .child(when(
-            move || find_condition.find_open.get(),
-            move || find_bar(find_state.clone(), find_body.clone()),
-        ))
-        .child(when(
-            {
-                let tab = tab.clone();
-                move || tab.exit.get().is_some()
-            },
-            {
-                let state = state.clone();
-                let tab = tab.clone();
-                move || exit_strip(state.clone(), tab.clone())
-            },
-        ))
-        .child(
-            canvas({
-                let metrics = draw_metrics.clone();
-                move || {
-                    let _ = draw_tab.epoch.get();
-                    let painter = match &*draw_tab.frame.borrow() {
-                        Some(frame) => grid::draw(frame, &metrics),
-                        None => Painter::new(),
-                    };
-                    painter
-                }
-            })
-            .flex_1()
-            .min_h(px(0.0))
-            .on_layout(move |bounds: &Bounds<Points>| {
-                let cols = layout_metrics.cols(bounds.size.width.0);
-                let rows = layout_metrics.rows(bounds.size.height.0);
-                if cols == 0 || rows == 0 {
-                    return;
-                }
-                if layout_tab.grid.get() != (cols, rows) {
-                    layout_tab.grid.set((cols, rows));
-                    if layout_tab.dims.get() != (cols, rows) {
-                        layout_tab.dims.set((cols, rows));
-                    }
-                    if let Some(session) = layout_tab.session.as_ref() {
-                        session.resize(
-                            cols,
-                            rows,
-                            layout_metrics.cell_w as u32,
-                            layout_metrics.cell_h as u32,
-                        );
-                    }
-                }
-            })
-            .on_press(move || focus_ref.focus())
-            .on_touch(move |event: &TouchEvent| {
-                let Some(point) = event.points.iter().find(|point| point.changed) else {
-                    return;
-                };
-                let col = ((point.location.x.0 - touch_metrics.pad) / touch_metrics.cell_w)
-                    .floor()
-                    .max(0.0) as u16;
-                let row = ((point.location.y.0 - touch_metrics.pad) / touch_metrics.cell_h)
-                    .floor()
-                    .max(0.0) as u16;
-                let (cols, rows) = touch_tab.grid.get();
-                let cell = (
-                    col.min(cols.saturating_sub(1)),
-                    u32::from(row.min(rows.saturating_sub(1))),
-                );
-                match event.phase {
-                    TouchPhase::Start => {
-                        touch_state.anchor.set(Some(cell));
-                        touch_state.dragging.set(false);
-                        if let Some(session) = touch_tab.session.as_ref() {
-                            session.clear_selection();
-                        }
-                    }
-                    TouchPhase::Move => {
-                        if let Some(anchor) = touch_state.anchor.get() {
-                            if anchor != cell || touch_state.dragging.get() {
-                                touch_state.dragging.set(true);
-                                if let Some(session) = touch_tab.session.as_ref() {
-                                    session.select(anchor, cell);
-                                }
-                            }
-                        }
-                    }
-                    TouchPhase::End | TouchPhase::Cancel => {
-                        touch_state.anchor.set(None);
-                    }
-                }
-                })
-                .on_context_menu(move |event: &ContextMenuEvent| {
-                    menu_tab.menu_at.set((event.position.x.0, event.position.y.0));
-                    menu_tab.menu_open.set(true);
-                }),
-        )
-        .child(when(
-            move || menu_condition.menu_open.get(),
-            move || context_menu_view(menu_state.clone(), menu_body.clone()),
-        ))
-        .child(
-            nsh_base::input()
-                .element_ref(&state.focus)
-                .value(move || String::new())
-                .caret(false)
-                .auto_focus(true)
-                .paste_behavior(PasteBehavior::Report)
-                .on_key_press(move |key: &str| {
-                    if key_composing.get() || key == "Backspace" || key == "Enter" {
-                        return;
-                    }
-                    if !key.is_empty() {
-                        if let Some(session) = key_tab.session.as_ref() {
-                            session.send_text(key);
-                        }
-                    }
-                })
-                .on_change(move |text: &str| {
-                    // Only an IME commit carries text the key presses did not.
-                    if change_composing.get() && !text.is_empty() {
-                        if let Some(session) = change_tab.session.as_ref() {
-                            session.send_text(text);
-                        }
-                    }
-                })
-                .on_composition_change(move |event: &Composition| {
-                    composition.set(event.composing);
-                })
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .size(px(1.0))
-                .opacity(0.0),
-        )
-}
-
-fn exit_strip(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
-    let restart_state = state.clone();
-    let restart_tab = tab.clone();
-    let close_state = state.clone();
-    let text_tab = tab.clone();
-    let color_tab = tab.clone();
-    let id = tab.id;
-
-    view()
-        .h(px(28.0))
-        .w_full()
-        .flex_row()
-        .items_center()
-        .gap_3()
-        .px_3()
-        .bg(rgb(0x1b1f26))
-        .child(
-            text(move || {
-                let code = text_tab.exit.get().unwrap_or(-1);
-                if code == 0 {
-                    "进程已退出，代码 0".to_owned()
-                } else {
-                    format!("进程已退出，代码 {code}")
-                }
-            })
-            .text_size(px(11.0))
-            .text_color(move || {
-                if color_tab.exit.get() == Some(0) {
-                    rgb(0x3fb950)
-                } else {
-                    rgb(0xf2b544)
-                }
-            }),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let profile = restart_tab.profile.name.clone();
-                    let index = restart_state
-                        .profiles
-                        .iter()
-                        .position(|p| p.name == profile);
-                    spawn_tab(&restart_state, index);
-                    restart_state.close(restart_tab.id);
-                })
-                .child(
-                    text("重新启动")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0xe6e8ec)),
-                ),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || close_state.close(id))
-                .child(
-                    text("关闭窗格")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0xc3c8d1)),
-                ),
-        )
-}
-
-fn empty_state(state: Rc<AppState>) -> impl IntoElement {
-    view()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .child(
-            text("没有打开的会话")
-                .text_size(px(15.0))
-                .text_color(rgb(0xe6e8ec)),
-        )
-        .child(
-            text("按 Ctrl+Shift+T 新建一个标签")
-                .text_size(px(12.0))
-                .text_color(rgb(0x8b929e)),
-        )
-        .child(
-            view()
-                .px_4()
-                .py_2()
-                .rounded(px(6.0))
-                .bg(rgb(0x2563eb))
-                .on_press(move || {
-                    spawn_tab(&state, None);
-                })
-                .child(
-                    text("新建标签")
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xffffff)),
-                ),
-        )
-}
-
-fn register_app_shortcuts(state: &Rc<AppState>) {
-    let bind = |keystroke: &'static str, handler: Box<dyn Fn()>| {
-        on_key_with(
-            keystroke,
-            KeyOptions {
-                when: When::Always,
-                repeat: false,
-            },
-            move |_| handler(),
-        );
-    };
-
-    bind(
-        "ctrl+shift+t",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                spawn_tab(&state, None);
-            })
-        },
-    );
-    bind(
-        "ctrl+shift+w",
-        {
-            let state = state.clone();
-            Box::new(move || state.close(state.active.get()))
-        },
-    );
-    bind(
-        "ctrl+tab",
-        {
-            let state = state.clone();
-            Box::new(move || state.activate_offset(1))
-        },
-    );
-    bind(
-        "ctrl+shift+tab",
-        {
-            let state = state.clone();
-            Box::new(move || state.activate_offset(-1))
-        },
-    );
-    bind(
-        "ctrl+shift+c",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                copy_selection(&state);
-            })
-        },
-    );
-    bind(
-        "ctrl+shift+v",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                paste_clipboard(&state);
-            })
-        },
-    );
-    bind(
-        "ctrl+shift+f",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                let Some(tab) = state.active_tab() else {
-                    return;
-                };
-                let open = !tab.find_open.get();
-                tab.find_open.set(open);
-                if open {
-                    let focus = tab.find_focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
-                } else {
-                    tab.find_count.set(None);
-                    tab.find_query.set(String::new());
-                    if let Some(session) = tab.session.as_ref() {
-                        session.clear_selection();
-                    }
-                    let focus = state.focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
-                }
-            })
-        },
-    );
-    bind(
-        "ctrl+shift+p",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                let open = !state.palette_open.get();
-                state.palette_open.set(open);
-                if open {
-                    let focus = state.palette_focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
-                } else {
-                    state.palette_query.set(String::new());
-                    state.palette_items.set(state.palette_all.clone());
-                }
-            })
-        },
-    );
-    // Ctrl+Shift+A is an editing shortcut the focused input keeps, so the
-    // select-all lives on Ctrl+Shift+U.
-    bind(
-        "ctrl+shift+u",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                if let Some(tab) = state.active_tab() {
-                    if let Some(session) = tab.session.as_ref() {
-                        session.select_all();
-                    }
-                }
-            })
-        },
-    );
-    bind(
-        "shift+pageup",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
-                    session.scroll(-20);
-                }
-            })
-        },
-    );
-    bind(
-        "shift+pagedown",
-        {
-            let state = state.clone();
-            Box::new(move || {
-                if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
-                    session.scroll(20);
-                }
-            })
-        },
-    );
-
-    for (index, keystroke) in [
-        "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let state = state.clone();
-        on_key_with(
-            keystroke,
-            KeyOptions {
-                when: When::Always,
-                repeat: false,
-            },
-            move |_| {
-                if let Some(info) = state.tabs.get().get(index) {
-                    state.activate(info.id);
-                }
-            },
-        );
-    }
-
-    // Terminal keys go to the active tab.
-    for keystroke in keys::TERMINAL_KEYS {
-        let Some((key, mods)) = keys::parse(keystroke) else {
-            continue;
-        };
-        let state = state.clone();
-        on_key_with(
-            keystroke,
-            KeyOptions {
-                when: When::Always,
-                repeat: true,
-            },
-            move |_| {
-                let active = state.active_tab();
-                if keystroke == &"enter" {
-                    if state.palette_open.get() {
-                        if let Some(item) = state.palette_items.get().first() {
-                            run_palette(&state, item.action.clone());
-                        }
-                        return;
-                    }
-                    if let Some(tab) = active.as_ref() {
-                        if tab.find_open.get() {
-                            let skip = tab.find_skip.get() + 1;
-                            tab.find_skip.set(skip);
-                            let query = tab.find_query.get();
-                            if let Some(session) = tab.session.as_ref() {
-                                session.find(&query, 1, skip);
-                            }
-                            return;
-                        }
-                    }
-                }
-                if keystroke == &"escape" {
-                    if state.palette_open.get() {
-                        state.palette_open.set(false);
-                        state.palette_query.set(String::new());
-                        state.palette_items.set(state.palette_all.clone());
-                        let focus = state.focus;
-                        set_timeout(Duration::from_millis(0), move || focus.focus());
-                        return;
-                    }
-                    if let Some(tab) = active.as_ref() {
-                        if tab.menu_open.get() {
-                            tab.menu_open.set(false);
-                            return;
-                        }
-                        if tab.find_open.get() {
-                            tab.find_open.set(false);
-                            tab.find_count.set(None);
-                            tab.find_query.set(String::new());
-                            if let Some(session) = tab.session.as_ref() {
-                                session.clear_selection();
-                            }
-                            let focus = state.focus;
-                            set_timeout(Duration::from_millis(0), move || focus.focus());
-                            return;
-                        }
-                    }
-                }
-                if let Some(session) = active.and_then(|tab| tab.session()) {
-                    session.send_key(key, mods);
-                }
-            },
-        );
-    }
-}
-
-fn find_bar(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
-    let query_tab = tab.clone();
-    let count_tab = tab.clone();
-    let next_tab = tab.clone();
-    let prev_tab = tab.clone();
-    let close_tab = tab.clone();
-    let focus = state.focus;
-
-    view()
-        .h(px(32.0))
-        .w_full()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .bg(rgb(0x1b1f26))
-        .child(
-            nsh_base::input()
-                .element_ref(&tab.find_focus)
-                .value(move || query_tab.find_query.get())
-                .placeholder("查找…")
-                .caret(true)
-                .auto_focus(true)
-                .on_change(move |text: &str| {
-                    tab.find_query.set(text.to_owned());
-                    tab.find_skip.set(0);
-                    tab.find_count.set(None);
-                    if let Some(session) = tab.session.as_ref() {
-                        session.find(text, 1, 0);
-                    }
-                })
-                .w(px(300.0))
-                .h(px(24.0))
-                .px_2()
-                .text_size(px(12.0))
-                .text_color(rgb(0xe6e8ec))
-                .bg(rgb(0x101216))
-                .rounded(px(4.0)),
-        )
-        .child(
-            text(move || match count_tab.find_count.get() {
-                Some((0, _)) => "0/0".to_owned(),
-                Some((total, selected)) => format!("{selected}/{total}"),
-                None => "…".to_owned(),
-            })
-            .text_size(px(11.0))
-            .text_color(rgb(0x8b929e))
-            .w(px(70.0)),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let skip = prev_tab.find_skip.get();
-                    let query = prev_tab.find_query.get();
-                    if let Some(session) = prev_tab.session.as_ref() {
-                        session.find(&query, -1, skip);
-                    }
-                })
-                .child(text("↑").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    let skip = next_tab.find_skip.get() + 1;
-                    next_tab.find_skip.set(skip);
-                    let query = next_tab.find_query.get();
-                    if let Some(session) = next_tab.session.as_ref() {
-                        session.find(&query, 1, skip);
-                    }
-                })
-                .child(text("↓").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
-        .child(
-            view()
-                .px_2()
-                .py_1()
-                .rounded(px(4.0))
-                .active(|s| s.bg(rgb(0x2a3038)))
-                .on_press(move || {
-                    close_tab.find_open.set(false);
-                    if let Some(session) = close_tab.session.as_ref() {
-                        session.clear_selection();
-                    }
-                    let focus = focus;
-                    set_timeout(Duration::from_millis(0), move || focus.focus());
-                })
-                .child(text("×").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
-        )
-}
-
-fn copy_selection(state: &Rc<AppState>) {
-    if let Some(tab) = state.active_tab() {
-        if let Some(session) = tab.session.as_ref() {
-            let text = session.selection_text();
-            if !text.is_empty() {
-                set_clipboard(text);
-            }
-        }
-    }
-}
-
-fn paste_clipboard(state: &Rc<AppState>) {
-    let Some(tab) = state.active_tab() else {
-        return;
-    };
-    let Some(session) = tab.session() else {
-        return;
-    };
-    spawn(async move {
-        let text = clipboard_string().await;
-        if !text.is_empty() {
-            session.send_text(&text);
-        }
-    });
-}
-
-fn open_find(state: &Rc<AppState>) {
-    let Some(tab) = state.active_tab() else {
-        return;
-    };
-    tab.find_open.set(true);
-    let focus = tab.find_focus;
-    set_timeout(Duration::from_millis(0), move || focus.focus());
-}
-
-fn context_menu_view(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
-    let (x, y) = tab.menu_at.get();
-    let close = {
-        let tab = tab.clone();
-        move || tab.menu_open.set(false)
-    };
-    let close_copy = close.clone();
-    let close_paste = close.clone();
-    let close_all = close.clone();
-    let close_find = close.clone();
-    let close_close = close.clone();
-    let state_copy = state.clone();
-    let state_paste = state.clone();
-    let state_all = state.clone();
-    let state_find = state.clone();
-    let state_close = state.clone();
-
-    view()
-        .absolute()
-        .left(px(x))
-        .top(px(y))
-        .w(px(184.0))
-        .p_1()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(rgb(0x2a3038))
-        .bg(rgb(0x1b1f26))
-        .shadow_lg()
-        .child(menu_row("复制", move || {
-            copy_selection(&state_copy);
-            close_copy();
-        }))
-        .child(menu_row("粘贴", move || {
-            paste_clipboard(&state_paste);
-            close_paste();
-        }))
-        .child(menu_row("全选", move || {
-            if let Some(tab) = state_all.active_tab() {
-                if let Some(session) = tab.session.as_ref() {
-                    session.select_all();
-                }
-            }
-            close_all();
-        }))
-        .child(menu_row("查找…", move || {
-            open_find(&state_find);
-            close_find();
-        }))
-        .child(view().h(px(1.0)).my_1().bg(rgb(0x2a3038)))
-        .child(menu_row("关闭窗格", move || {
-            state_close.close(state_close.active.get());
-            close_close();
-        }))
-}
-
-fn menu_row(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .px_3()
-        .py(px(6.0))
-        .rounded(px(6.0))
-        .active(|s| s.bg(rgb(0x2a3038)))
-        .on_press(on_press)
-        .child(text(label).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
-}
-
 fn filter_palette(all: &[PaletteItem], query: &str) -> Vec<PaletteItem> {
     let needle = query.trim().to_lowercase();
     all.iter()
@@ -1339,27 +1734,30 @@ fn run_palette(state: &Rc<AppState>, action: PaletteAction) {
         PaletteAction::NewTabProfile(index) => {
             spawn_tab(state, Some(index));
         }
+        PaletteAction::SplitRight => split_active(state, SplitAxis::Row),
+        PaletteAction::SplitDown => split_active(state, SplitAxis::Column),
         PaletteAction::Find => open_find(state),
         PaletteAction::Copy => copy_selection(state),
         PaletteAction::Paste => paste_clipboard(state),
         PaletteAction::SelectAll => {
-            if let Some(tab) = state.active_tab() {
-                if let Some(session) = tab.session.as_ref() {
+            if let Some(pane) = state.active_pane() {
+                if let Some(session) = pane.session.as_ref() {
                     session.select_all();
                 }
             }
         }
-        PaletteAction::CloseTab => state.close(state.active.get()),
+        PaletteAction::CloseTab => state.close_active_pane(),
         PaletteAction::ScrollTop => {
-            if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
+            if let Some(session) = state.active_pane().and_then(|pane| pane.session()) {
                 session.scroll(-100_000);
             }
         }
         PaletteAction::ScrollBottom => {
-            if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
+            if let Some(session) = state.active_pane().and_then(|pane| pane.session()) {
                 session.scroll(100_000);
             }
         }
+        PaletteAction::Settings => state.settings_open.set(true),
     }
     state.palette_open.set(false);
     state.palette_query.set(String::new());
@@ -1403,37 +1801,272 @@ fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
                 .bg(rgb(0x101216))
                 .rounded(px(6.0)),
         )
+        .child(view().gap_1().child(each(
+            state.palette_items,
+            |item| item.title.clone(),
+            move |item, _| {
+                let row_state = row_state.clone();
+                let action = item.get().action.clone();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .active(|s| s.bg(rgb(0x2a3038)))
+                    .on_press(move || {
+                        run_palette(&row_state, action.clone());
+                    })
+                    .child(
+                        text(move || item.get().title.clone())
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xe6e8ec)),
+                    )
+                    .child(
+                        text(move || item.get().hint.clone())
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x6b7280)),
+                    )
+            },
+        )))
+}
+
+fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
+    let current = state.settings.get();
+    let close = {
+        let state = state.clone();
+        move || state.settings_open.set(false)
+    };
+    let close_btn = close.clone();
+
+    let size_up = {
+        let state = state.clone();
+        move || change_font_size(&state, 1.0)
+    };
+    let size_down = {
+        let state = state.clone();
+        move || change_font_size(&state, -1.0)
+    };
+    let size_text = {
+        let state = state.clone();
+        move || format!("{} pt", state.settings.get().font_size)
+    };
+
+    let mut scheme_rows = view().gap_1();
+    for candidate in settings::schemes() {
+        let name = candidate.name.clone();
+        let state_row = state.clone();
+        let selected = candidate.name == current.scheme;
+        scheme_rows = scheme_rows.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .bg(move || {
+                    if state_row.settings.get().scheme == name {
+                        rgb(0x2a3038)
+                    } else {
+                        rgb(0x1b1f26)
+                    }
+                })
+                .on_press({
+                    let state = state.clone();
+                    let name = candidate.name.clone();
+                    move || apply_scheme(&state, &name)
+                })
+                .child(
+                    text(candidate.name.clone())
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xe6e8ec)),
+                )
+                .child(view().flex_1())
+                .child(
+                    text(if selected { "✓" } else { "" })
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x5b9dff)),
+                ),
+        );
+    }
+
+    let mut profile_rows = view().gap_1();
+    for profile in state.profiles.iter() {
+        let name = profile.name.clone();
+        let selected = state.settings.get().default_profile == name;
+        profile_rows = profile_rows.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .on_press({
+                    let state = state.clone();
+                    let name = profile.name.clone();
+                    move || {
+                        let mut next = state.settings.get();
+                        next.default_profile = name.clone();
+                        save_settings(&state, next);
+                    }
+                })
+                .child(
+                    text(profile.name.clone())
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xe6e8ec)),
+                )
+                .child(view().flex_1())
+                .child(
+                    text(if selected { "默认" } else { "" })
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x5b9dff)),
+                ),
+        );
+    }
+
+    view()
+        .absolute()
+        .left(px(120.0))
+        .top(px(56.0))
+        .w(px(560.0))
+        .p_4()
+        .gap_4()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(0x2a3038))
+        .bg(rgb(0x1b1f26))
+        .shadow_lg()
         .child(
             view()
-                .gap_1()
-                .child(each(
-                    state.palette_items,
-                    |item| item.title.clone(),
-                    move |item, _| {
-                        let row_state = row_state.clone();
-                        let action = item.get().action.clone();
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .py(px(6.0))
-                            .rounded(px(6.0))
-                            .active(|s| s.bg(rgb(0x2a3038)))
-                            .on_press(move || {
-                                run_palette(&row_state, action.clone());
-                            })
-                            .child(
-                                text(move || item.get().title.clone())
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(0xe6e8ec)),
-                            )
-                            .child(
-                                text(move || item.get().hint.clone())
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(0x6b7280)),
-                            )
-                    },
-                )),
+                .flex_row()
+                .items_center()
+                .child(text("设置").text_size(px(15.0)).text_color(rgb(0xf2f4f8)))
+                .child(view().flex_1())
+                .child(
+                    view()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(4.0))
+                        .active(|s| s.bg(rgb(0x2a3038)))
+                        .on_press(move || close_btn())
+                        .child(text("关闭").text_size(px(11.0)).text_color(rgb(0xc3c8d1))),
+                ),
         )
+        .child(
+            view()
+                .gap_2()
+                .child(text("字号").text_size(px(11.0)).text_color(rgb(0x8b929e)))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(step_button("−", size_down))
+                        .child(
+                            text(size_text)
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xe6e8ec))
+                                .w(px(60.0)),
+                        )
+                        .child(step_button("+", size_up)),
+                ),
+        )
+        .child(
+            view()
+                .gap_2()
+                .child(
+                    text("配色方案")
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x8b929e)),
+                )
+                .child(scheme_rows),
+        )
+        .child(
+            view()
+                .gap_2()
+                .child(
+                    text("默认配置文件")
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x8b929e)),
+                )
+                .child(profile_rows),
+        )
+}
+
+fn step_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .size(px(26.0))
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(0x2a3038))
+        .active(|s| s.bg(rgb(0x2a3038)))
+        .on_press(on_press)
+        .child(text(label).text_size(px(13.0)).text_color(rgb(0xe6e8ec)))
+}
+
+fn change_font_size(state: &Rc<AppState>, delta: f32) {
+    log::info!("font size delta {delta}");
+    let mut next = state.settings.get();
+    let size = (next.font_size + delta).clamp(9.0, 32.0);
+    if (size - next.font_size).abs() < f32::EPSILON {
+        return;
+    }
+    next.font_size = size;
+    save_settings(state, next);
+}
+
+fn apply_scheme(state: &Rc<AppState>, name: &str) {
+    log::info!("scheme {name}");
+    let mut next = state.settings.get();
+    next.scheme = name.to_owned();
+    save_settings(state, next);
+}
+
+/// Applies settings everywhere they reach: metrics, the PTY sizes and every
+/// running terminal's palette.
+fn save_settings(state: &Rc<AppState>, next: settings::Settings) {
+    let scheme = settings::scheme(&next.scheme);
+    state.metrics.set(grid::Metrics::new(
+        next.font_size,
+        next.line_height,
+        next.padding,
+        &next.font_family,
+    ));
+    state.scheme.set(scheme.clone());
+    state.settings.set(next.clone());
+
+    let metrics = state.metrics.get();
+    for tab in state.runtimes.borrow().iter() {
+        for pane in tab.panes.borrow().iter() {
+            let (width, height) = pane.bounds.get();
+            let cols = metrics.cols(width);
+            let rows = metrics.rows(height);
+            if cols > 0 && rows > 0 {
+                pane.grid.set((cols, rows));
+                pane.dims.set((cols, rows));
+            }
+            if let Some(session) = pane.session.as_ref() {
+                session.set_scheme(&scheme);
+                if cols > 0 && rows > 0 {
+                    session.resize(cols, rows, metrics.cell_w as u32, metrics.cell_h as u32);
+                }
+            }
+        }
+    }
+
+    let _ =
+        nsh_core::storage::Storage::set_item(settings::Settings::storage_key(), next.serialize());
+}
+
+/// Reads the stored settings; anything unreadable falls back to the defaults,
+/// so a corrupt entry never keeps the app from starting.
+fn load_settings() -> settings::Settings {
+    nsh_core::storage::Storage::get_item(settings::Settings::storage_key())
+        .map(|text| settings::Settings::parse(&text))
+        .unwrap_or_default()
 }
