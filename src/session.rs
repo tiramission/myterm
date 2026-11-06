@@ -1,26 +1,32 @@
 //! One terminal session: a ConPTY process, its reader thread, its writer
 //! thread and the VT thread from [`crate::term`].
 
+use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 
 use libghostty_vt::key;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+use crate::profiles::Profile;
 use crate::term::{self, Cmd, Frame, Shared};
 
 pub struct Session {
     cmd: std::sync::mpsc::Sender<Cmd>,
     shared: Arc<Shared>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    pub profile: String,
+    child: RefCell<Box<dyn Child + Send + Sync>>,
 }
 
 impl Session {
-    pub fn spawn(cols: u16, rows: u16, cell_w: u32, cell_h: u32) -> Result<Self, String> {
+    pub fn spawn(
+        profile: &Profile,
+        cols: u16,
+        rows: u16,
+        cell_w: u32,
+        cell_h: u32,
+    ) -> Result<Self, String> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -31,15 +37,16 @@ impl Session {
             })
             .map_err(|e| format!("ConPTY: {e}"))?;
 
-        let (program, profile) = pick_shell();
-        let mut command = CommandBuilder::new(&program);
-        command.arg("-NoLogo");
+        let mut command = CommandBuilder::new(&profile.program);
+        for arg in &profile.args {
+            command.arg(arg);
+        }
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         let child = pair
             .slave
             .spawn_command(command)
-            .map_err(|e| format!("{program}: {e}"))?;
+            .map_err(|e| format!("{}: {e}", profile.program))?;
         drop(pair.slave);
 
         let mut reader = pair
@@ -58,17 +65,16 @@ impl Session {
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) => {
-                            log::warn!("pty reader: end of stream");
+                            log::debug!("pty reader: end of stream");
                             break;
                         }
                         Ok(n) => {
                             if pty_read_tx.send(buf[..n].to_vec()).is_err() {
-                                log::warn!("pty reader: vt thread gone");
                                 break;
                             }
                         }
                         Err(e) => {
-                            log::warn!("pty reader: {e}");
+                            log::debug!("pty reader: {e}");
                             break;
                         }
                     }
@@ -95,8 +101,7 @@ impl Session {
             cmd,
             shared,
             master: pair.master,
-            child,
-            profile,
+            child: RefCell::new(child),
         })
     }
 
@@ -125,6 +130,43 @@ impl Session {
         });
     }
 
+    /// Extends the selection to (`col`, `row`), rows counted from the top of
+    /// the viewport.
+    pub fn select(&self, anchor: (u16, u32), focus: (u16, u32)) {
+        let _ = self.cmd.send(Cmd::Select { anchor, focus });
+    }
+
+    pub fn select_all(&self) {
+        let _ = self.cmd.send(Cmd::SelectAll);
+    }
+
+    pub fn clear_selection(&self) {
+        let _ = self.cmd.send(Cmd::ClearSelection);
+    }
+
+    pub fn scroll(&self, delta: i32) {
+        let _ = self.cmd.send(Cmd::Scroll(delta));
+    }
+
+    /// The selected text as of the last selection change (`""`: none).
+    pub fn selection_text(&self) -> String {
+        self.shared
+            .selection
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default()
+    }
+
+    /// Polls the child; `Some(code)` once it exited (`-1` when unknown).
+    pub fn poll_exit(&self) -> Option<i32> {
+        let mut child = self.child.borrow_mut();
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status.exit_code() as i32),
+            Ok(None) => None,
+            Err(_) => Some(-1),
+        }
+    }
+
     /// Takes the newest frame, leaving the slot empty until the next one.
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
         self.shared.latest.lock().ok()?.take()
@@ -134,6 +176,7 @@ impl Session {
         self.shared.title.lock().ok()?.clone()
     }
 
+    #[allow(dead_code)]
     pub fn frame_ms(&self) -> f32 {
         self.shared.frame_ms.lock().map(|v| *v).unwrap_or(0.0)
     }
@@ -141,23 +184,8 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Ok(mut child) = self.child.try_borrow_mut() {
+            let _ = child.kill();
+        }
     }
-}
-
-/// The shell a new session starts: PowerShell 7 if it is installed, the
-/// Windows PowerShell otherwise.
-fn pick_shell() -> (String, String) {
-    if let Some(path) = find_on_path("pwsh.exe") {
-        (path.to_string_lossy().into_owned(), "PowerShell 7".to_owned())
-    } else {
-        ("powershell.exe".to_owned(), "Windows PowerShell".to_owned())
-    }
-}
-
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
 }

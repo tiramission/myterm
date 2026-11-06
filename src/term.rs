@@ -24,6 +24,7 @@ pub struct CellData {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub selected: bool,
 }
 
 impl CellData {
@@ -36,6 +37,7 @@ impl CellData {
             bold: false,
             italic: false,
             underline: false,
+            selected: false,
         }
     }
 }
@@ -66,6 +68,17 @@ pub enum Cmd {
         cell_w: u32,
         cell_h: u32,
     },
+    /// Extend the selection to a viewport cell (`col`, `row`).
+    Select {
+        anchor: (u16, u32),
+        focus: (u16, u32),
+    },
+    /// Select the whole buffer.
+    SelectAll,
+    /// Drop the selection.
+    ClearSelection,
+    /// Scroll the viewport by `delta` rows (negative: into history).
+    Scroll(i32),
 }
 
 /// What the UI reads between frames.
@@ -74,6 +87,8 @@ pub struct Shared {
     pub latest: Mutex<Option<Arc<Frame>>>,
     pub title: Mutex<Option<String>>,
     pub frame_ms: Mutex<f32>,
+    /// The selected text as of the last change.
+    pub selection: Mutex<String>,
 }
 
 /// Starts the VT thread. Returns the command sender and the shared outputs.
@@ -259,6 +274,42 @@ fn run(
                     }
                     dirty = true;
                 }
+                Ok(Cmd::Select { anchor, focus }) => {
+                    match select(&term, anchor, focus) {
+                        Ok(text) => {
+                            if let Ok(mut slot) = shared.selection.lock() {
+                                *slot = text;
+                            }
+                        }
+                        Err(e) => log::warn!("select: {e}"),
+                    }
+                    dirty = true;
+                }
+                Ok(Cmd::SelectAll) => {
+                    match select_all(&term) {
+                        Ok(text) => {
+                            log::info!("selected {} chars", text.chars().count());
+                            if let Ok(mut slot) = shared.selection.lock() {
+                                *slot = text;
+                            }
+                        }
+                        Err(e) => log::warn!("select all: {e}"),
+                    }
+                    dirty = true;
+                }
+                Ok(Cmd::ClearSelection) => {
+                    let _ = term.set_selection(None);
+                    if let Ok(mut slot) = shared.selection.lock() {
+                        slot.clear();
+                    }
+                    dirty = true;
+                }
+                Ok(Cmd::Scroll(delta)) => {
+                    term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
+                        delta as isize,
+                    ));
+                    dirty = true;
+                }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -324,10 +375,18 @@ fn capture<'a>(
     let mut row_iteration = row_it.update(&snapshot)?;
 
     while let Some(row) = row_iteration.next() {
+        let selection = row.selection()?;
+        let mut column = 0_u16;
         let mut cell_iteration = cell_it.update(row)?;
         while let Some(cell) = cell_iteration.next() {
+            let selected = selection
+                .as_ref()
+                .is_some_and(|s| column >= s.start_x && column <= s.end_x);
+            column += 1;
             if cell.graphemes_len()? == 0 {
-                cells.push(CellData::blank(foreground, background));
+                let mut blank = CellData::blank(foreground, background);
+                blank.selected = selected;
+                cells.push(blank);
                 continue;
             }
             cell.graphemes_utf8(&mut text)?;
@@ -362,6 +421,7 @@ fn capture<'a>(
                 bold,
                 italic,
                 underline,
+                selected,
             });
         }
     }
@@ -376,4 +436,45 @@ fn capture<'a>(
         background,
         foreground,
     })
+}
+
+/// Installs a selection between two viewport cells and returns its text.
+fn select(
+    term: &Terminal<'_, '_>,
+    anchor: (u16, u32),
+    focus: (u16, u32),
+) -> libghostty_vt::error::Result<String> {
+    use libghostty_vt::selection::Selection;
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+
+    let start = term.grid_ref(Point::Viewport(PointCoordinate {
+        x: anchor.0,
+        y: anchor.1,
+    }))?;
+    let end = term.grid_ref(Point::Viewport(PointCoordinate {
+        x: focus.0,
+        y: focus.1,
+    }))?;
+    let selection = Selection::new(start, end, false);
+    term.set_selection(Some(&selection))?;
+    selection_text(term)
+}
+
+fn select_all(term: &Terminal<'_, '_>) -> libghostty_vt::error::Result<String> {
+    let selection = term.select_all()?;
+    term.set_selection(selection.as_ref())?;
+    selection_text(term)
+}
+
+fn selection_text(term: &Terminal<'_, '_>) -> libghostty_vt::error::Result<String> {
+    use libghostty_vt::fmt::Format;
+    use libghostty_vt::selection::FormatOptions;
+
+    let options = FormatOptions::new()
+        .with_emit_format(Format::Plain)
+        .with_trim(true);
+    Ok(term
+        .format_selection_alloc(None, options)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default())
 }

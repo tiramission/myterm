@@ -153,7 +153,7 @@ myterm/
 
 NSH 没有给任意视图发原始按键事件的 API（只有全局 `keymap` 与 `input` 的文本事件）。设计采用三路合并，**这是全案最大的技术风险，必须在 M0 验证**：
 
-1. **可打印文本 / IME**：每个窗格叠一个 1 pt 透明 `input()`，`value` 绑定一个 app 侧缓冲、`caret(false)`、`autoFocus`；`onChange` 报告的是**累积文本**，必须按前缀差只发送增量，并在 `Enter` 后清空缓冲；`onCompositionChange` 把组合串作为「预编辑文本」画在光标处。
+1. **可打印文本 / IME**：每个窗格叠一个 1 pt 透明 `input()`（`caret(false)`、`autoFocus`、`paste_behavior(Report)`）。普通字符走 `on_key_press`（每次一个字符，不再依赖累积文本），组合键走 `on_key`；IME 提交的文本经 `on_composition_change` 的 composing 状态 + `on_change` 发送；`onCompositionChange` 的组合串可作为「预编辑文本」画在光标处。
 2. **特殊键与组合键**：`on_key_with` 按 keystroke 绑定，**必须 `when: Always`**（默认 `Auto` 会让 Backspace/方向键被聚焦的 input 吃掉）；`escape`、`tab`、`enter`、`backspace`、`delete`、`insert`、四个方向、`home`/`end`、`pageup`/`pagedown`、`f1`–`f24`、`ctrl+a`–`ctrl+z`、`alt+*`、`ctrl+shift+*`。由 `key::Encoder` 依据终端模式（应用光标键、kitty 协议）生成字节。绑定表必须过滤平台保留键（`ctrl+q`、`alt+f4`、`f11` 等），否则 `on_key` 会 panic。
 3. **应用快捷键**：先于终端键匹配（`Ctrl+Shift+T` 等，见 §7.1）；不匹配才进入 2 / 1。
 
@@ -417,7 +417,7 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 | 缩放窗格（最大化） | `Ctrl+Shift+Z` | 再按还原 |
 | 关闭分屏 | `Ctrl+Shift+W` | 焦点窗格 |
 | 复制 / 粘贴 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | 粘贴多行时提示确认（见 §7.3） |
-| 全选 | `Ctrl+Shift+A` | |
+| 全选 | `Ctrl+Shift+U` | `Ctrl+Shift+A` 被输入框编辑动作占用 |
 | 查找 | `Ctrl+Shift+F` | |
 | 命令面板 | `Ctrl+Shift+P` | |
 | 设置 | `Ctrl+,` | |
@@ -554,7 +554,7 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 | 阶段 | 内容 | 出口标准 |
 | --- | --- | --- |
 | **M0 Spike（已完成 2026-05-20）** | Zig + libghostty-vt 在 Windows 构建；ConPTY 起 `pwsh` 并回显；Canvas 画网格；隐藏 input + keymap 打通输入；测帧耗 | ✅ 200×51 绘制 0.16–0.42 ms；见 `m0-report.md` |
-| **M1 可用** | 单窗格 + 标签 + 配置发现 + 复制粘贴 + 查找 + 键位表 + 退出/失败状态 | 能替代 Windows Terminal 完成日常命令工作 |
+| **M1 可用（代码完成并验证 2026-05-20）** | 标签 + 配置发现 + 选择/复制粘贴 + 退出/失败/空状态 + 键位表 | ✅ 多标签、粘贴、拖选/全选复制、退出条均人工验证；查找与右键菜单留待 M1.1 |
 | **M2 完整** | 分屏 + 命令面板 + 设置 + 配色方案 + 选择/链接/拖放 + 无障碍模式 | 所有状态矩阵项可复现 |
 | **M3 打磨** | 滚轮/平滑滚动、kitty graphics、通知、标签溢出、会话恢复 | 性能预算全部达标 |
 | **M4 发布** | 图标、安装包（`nsh package --target windows`）、签名、更新说明 | 干净机器上可安装运行 |
@@ -572,7 +572,7 @@ NSH 0.3 的通用视图没有滚轮事件（原生组件与 `Scroll` 有）。�
 | R5 | 连字与等宽网格冲突 | 高级字体观感差 | v1 关闭连字并说明；v2 整行渲染可选开启 |
 | R6 | 选择/搜索跨回滚缓冲的定位 | 大缓冲下卡顿 | 使用 `Snapshot` 的 selection 区间 + 增量搜索（只搜视口附近，向两侧扩展） |
 | R7 | 窗口 resize 频繁触发 VT reflow | 拖动窗口时掉帧 | resize 去抖 60 ms；拖动期间只拉伸背景，松手才重排 |
-| R8 | NSH 0.3 在 Windows 上不绘制 Canvas 之下／窗口下半部的同级视图 | 底部状态条、底部分屏手柄不可用 | M0 已记录最小复现（`m0-report.md` §2.3），待反馈 NSH；当前把 chrome 放在画布上方，浮层限制在上半部或改用 `Overlay` 验证 |
+| R8 | NSH 0.3 在 Windows 上不绘制 Canvas 之下／窗口下半部的同级视图；`justify_between` 的末项与 `absolute().right()` 也不绘制 | 底部状态条、右侧对齐控件不可用 | M0 已记录最小复现（`m0-report.md` §2.3），待反馈 NSH；当前把 chrome 放在画布上方，浮层限制在上半部或改用 `Overlay` 验证 |
 | R9 | PowerShell 写 ConPTY 吞吐低（≈11 KB/s） | 大输出观感慢 | 非本程序瓶颈；文档说明；后续可提供“原生 cmd/WSL 配置”与输出节流开关 |
 
 **待确认的产品决策**（请评审时给出方向）：

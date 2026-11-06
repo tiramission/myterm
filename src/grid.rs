@@ -79,6 +79,30 @@ pub fn draw(frame: &Frame, metrics: &Metrics) -> Painter {
         }
     }
 
+    // Selection: one rectangle per run of selected cells.
+    for row in 0..usize::from(frame.rows) {
+        let y = metrics.pad + row as f32 * metrics.cell_h;
+        let mut run: Option<usize> = None;
+        for col in 0..=usize::from(frame.cols) {
+            let selected = col < usize::from(frame.cols) && cell_at(frame, row, col).selected;
+            match (run, selected) {
+                (Some(start), true) => run = Some(start),
+                (Some(start), false) => {
+                    let width = (col - start) as f32 * metrics.cell_w;
+                    painter = painter.fill_color(hsla([0x2b, 0x4a, 0x7a])).fill_rect(
+                        metrics.pad + start as f32 * metrics.cell_w,
+                        y,
+                        width,
+                        metrics.cell_h,
+                    );
+                    run = None;
+                }
+                (None, true) => run = Some(col),
+                (None, false) => {}
+            }
+        }
+    }
+
     // Text and its decorations.
     for row in 0..usize::from(frame.rows) {
         let y = metrics.pad + row as f32 * metrics.cell_h;
