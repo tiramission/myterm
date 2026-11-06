@@ -868,6 +868,7 @@ fn pane_container(
     let error_condition = pane.clone();
     let error_body = pane.clone();
     let error_state = state.clone();
+    let dismiss_pane = pane.clone();
 
     view()
         .absolute()
@@ -899,10 +900,6 @@ fn pane_container(
         .child(when(
             move || error_condition.error.is_some(),
             move || error_panel(error_body.clone(), error_state.clone()),
-        ))
-        .child(when(
-            move || menu_condition.menu_open.get(),
-            move || context_menu_view(menu_state.clone(), menu_body.clone()),
         ))
         .child(
             nsh_base::input()
@@ -949,6 +946,10 @@ fn pane_container(
                         .menu_at
                         .set((event.position.x.0, event.position.y.0));
                     menu_pane.menu_open.set(true);
+                })
+                .on_press({
+                    let pane = dismiss_pane.clone();
+                    move || pane.menu_open.set(false)
                 })
                 .on_touch({
                     let pane = pane.clone();
@@ -1019,6 +1020,12 @@ fn pane_container(
                     }
                 }),
         )
+        // The menu is the last child, so it sits above the full-size touch
+        // layer: otherwise that layer takes the clicks meant for its rows.
+        .child(when(
+            move || menu_condition.menu_open.get(),
+            move || context_menu_view(menu_state.clone(), menu_body.clone()),
+        ))
         .into_element()
 }
 
@@ -1880,11 +1887,7 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
                     next.font_family = family.to_owned();
                     save_settings(&state_row, next);
                 })
-                .child(
-                    text(family)
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xe6e8ec)),
-                )
+                .child(text(family).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
                 .child(view().flex_1())
                 .child(
                     text(if selected { "✓" } else { "" })
@@ -2018,11 +2021,7 @@ fn settings_overlay(state: Rc<AppState>) -> impl IntoElement {
         .child(
             view()
                 .gap_2()
-                .child(
-                    text("字体")
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x8b929e)),
-                )
+                .child(text("字体").text_size(px(11.0)).text_color(rgb(0x8b929e)))
                 .child(family_rows),
         )
         .child(
