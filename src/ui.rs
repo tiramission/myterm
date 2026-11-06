@@ -276,13 +276,16 @@ pub fn scheme_chip(background: u32, colors: [u32; 3]) -> impl IntoElement {
 /// `size`. Paths are from Lucide (24×24), which is the family the app uses;
 /// they are stroked, not filled, so one weight reads consistently at every
 /// size.
-pub fn icon(path: &'static str, size: f32, color: AdaptiveColor) -> impl IntoElement {
+pub fn icon(path: &'static str, size: f32, color_arg: AdaptiveColor) -> impl IntoElement {
     canvas(move || {
+        // A canvas paints colors, not theme tokens, so the adaptive color is
+        // resolved for the appearance in force when it draws: taking `.light`
+        // would draw a black icon on a dark window.
         let mut painter = Painter::new();
         let scale = size / 24.0;
         painter = painter
             .scale(scale, scale)
-            .stroke_color(color.light)
+            .stroke_color(color(color_arg))
             .line_width(2.0)
             .stroke_svg(path);
         painter
