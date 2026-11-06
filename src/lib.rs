@@ -125,7 +125,12 @@ struct Pane {
     frame: RefCell<Option<Arc<term::Frame>>>,
     epoch: Signal<u64>,
     grid: Cell<(u16, u16)>,
-    dims: Signal<(u16, u16)>,
+    /// The grid size the pane last asked its PTY for. A plain cell: the
+    /// layout callback writes it, and a disposed view must not touch a
+    /// signal.
+    dims: Cell<(u16, u16)>,
+    /// What the status bar shows, published from the poll loop.
+    dims_view: Signal<(u16, u16)>,
     exit: Signal<Option<i32>>,
     title: Signal<String>,
     find_open: Signal<bool>,
@@ -406,7 +411,8 @@ fn new_pane(state: &Rc<AppState>, profile: &profiles::Profile) -> Rc<Pane> {
         frame: RefCell::new(None),
         epoch: signal(0_u64),
         grid: Cell::new((START_COLS, START_ROWS)),
-        dims: signal((START_COLS, START_ROWS)),
+        dims: Cell::new((START_COLS, START_ROWS)),
+        dims_view: signal((START_COLS, START_ROWS)),
         exit: signal(None::<i32>),
         title: signal(profile.name.clone()),
         find_open: signal(false),
@@ -670,6 +676,12 @@ pub fn App() -> impl IntoElement {
                 if pane.find_count.get() != found {
                     pane.find_count.set(found);
                 }
+                // The layout callback keeps the grid size in a plain cell,
+                // so the status bar reads a signal this loop publishes.
+                let dims = pane.dims.get();
+                if pane.dims_view.get() != dims {
+                    pane.dims_view.set(dims);
+                }
             }
 
             let title = tab
@@ -816,7 +828,7 @@ pub fn App() -> impl IntoElement {
                         let Some(pane) = status_dims.active_pane() else {
                             return String::new();
                         };
-                        let (cols, rows) = pane.dims.get();
+                        let (cols, rows) = pane.dims_view.get();
                         format!("{cols}×{rows}")
                     })
                     .text_xs()
@@ -952,6 +964,11 @@ fn pane_container(
     let (x, y, w, h) = rect;
     let pane_metrics = Rc::new(state.metrics.get());
     let active = tab.active;
+    // Whether this tab is split: only then does a pane's focus need marking.
+    let split = {
+        let panes = tab.panes.borrow().len();
+        panes > 1
+    };
     let activate_state = state.clone();
     let activate_tab = tab.clone();
     let focus_ref = pane.focus;
@@ -1036,9 +1053,12 @@ fn pane_container(
                 .w(px(w))
                 .h(px(h))
                 .overflow_hidden()
+                // A single pane needs no focus mark: the window itself is
+                // the focus. Only a split shows which pane has it, and it
+                // shows it with a hairline rather than a colored frame.
                 .border_1()
                 .border_color(move || {
-                    if active.get() == pane_id {
+                    if active.get() == pane_id && split {
                         primary()
                     } else {
                         background()
@@ -1168,9 +1188,7 @@ fn pane_container(
                                 }
                                 if pane.grid.get() != (cols, rows) {
                                     pane.grid.set((cols, rows));
-                                    if pane.dims.get() != (cols, rows) {
-                                        pane.dims.set((cols, rows));
-                                    }
+                                    pane.dims.set((cols, rows));
                                     if let Some(session) = pane.session.as_ref() {
                                         session.resize(
                                             cols,
