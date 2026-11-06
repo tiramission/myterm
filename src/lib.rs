@@ -100,6 +100,9 @@ struct Pane {
     anchor: Cell<Option<(u16, u32)>>,
     dragging: Cell<bool>,
     bounds: Cell<(f32, f32)>,
+    /// Where the terminal cursor is in points inside the pane: the IME
+    /// anchors its composition and candidate windows there.
+    ime_at: Signal<(f32, f32)>,
 }
 
 impl Pane {
@@ -375,6 +378,7 @@ fn new_pane(state: &Rc<AppState>, profile: &profiles::Profile) -> Rc<Pane> {
         anchor: Cell::new(None),
         dragging: Cell::new(false),
         bounds: Cell::new((0.0, 0.0)),
+        ime_at: signal((0.0_f32, 0.0_f32)),
     })
 }
 
@@ -587,6 +591,19 @@ pub fn App() -> impl IntoElement {
                     continue;
                 };
                 if let Some(frame) = session.take_frame() {
+                    // The IME anchors to the terminal's cursor, so its cell
+                    // is kept where the pane can read it.
+                    let metrics = poll.metrics.get();
+                    let at = match frame.cursor {
+                        Some((col, row)) => (
+                            metrics.pad + f32::from(col) * metrics.cell_w,
+                            metrics.pad + f32::from(row) * metrics.cell_h,
+                        ),
+                        None => (0.0, 0.0),
+                    };
+                    if pane.ime_at.get() != at {
+                        pane.ime_at.set(at);
+                    }
                     *pane.frame.borrow_mut() = Some(frame);
                     pane.epoch.update(|value| *value += 1);
                 }
@@ -942,6 +959,7 @@ fn pane_container(
     let error_body = pane.clone();
     let error_state = state.clone();
     let dismiss_pane = pane.clone();
+    let ime_at = pane.ime_at;
 
     view()
         .absolute()
@@ -1002,9 +1020,13 @@ fn pane_container(
                 .on_composition_change(move |event: &Composition| {
                     composition.set(event.composing);
                 })
+                // The IME places its composition and candidate windows at
+                // this input's caret, so the field sits on the terminal's
+                // own cursor instead of the pane's corner: Chinese input
+                // then appears where the text will go.
                 .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
+                .left(move || px(ime_at.get().0))
+                .top(move || px(ime_at.get().1))
                 .size(px(1.0))
                 .opacity(0.0),
         )
