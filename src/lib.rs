@@ -803,6 +803,7 @@ pub fn App() -> impl IntoElement {
                         return empty_state(pane_state.clone()).into_element();
                     };
                     let layout = tab.layout.get();
+                    let _ = layout;
                     render_layout(
                         pane_state.clone(),
                         tab,
@@ -1158,13 +1159,17 @@ fn pane_container(
                                 }
                             }
                         })
+                        // The pane's size is the rect the layout gave it, not
+                        // whatever a layout pass reports for this subtree: a
+                        // Scroll view measures its content before its own width
+                        // is applied, so a second pane briefly measured the whole
+                        // window and took the grid, the PTY and the draw with it.
                         .on_layout({
                             let pane = pane.clone();
                             let metrics = pane_metrics.clone();
-                            move |bounds: &Bounds<Points>| {
-                                pane.bounds.set((bounds.size.width.0, bounds.size.height.0));
-                                let cols = metrics.cols(bounds.size.width.0);
-                                let rows = metrics.rows(bounds.size.height.0);
+                            move |_bounds: &Bounds<Points>| {
+                                let cols = metrics.cols(w);
+                                let rows = metrics.rows(h);
                                 if cols == 0 || rows == 0 {
                                     return;
                                 }
