@@ -20,8 +20,8 @@ use nsh_core::element::TouchEvent;
 use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 use ui::{
-    accent, accent_foreground, background, border, foreground, muted_foreground, popover, primary,
-    radius, success, surface, warning,
+    accent, background, border, foreground, muted_foreground, popover, primary, radius, success,
+    surface, warning,
 };
 
 const START_COLS: u16 = 100;
@@ -757,7 +757,7 @@ pub fn App() -> impl IntoElement {
                     |info| info.id,
                     move |info, _| tab_button(bar_state.clone(), info),
                 ))
-                .child(ui::icon_button("+", "新建标签", {
+                .child(ui::icon_button(ui::icons::PLUS, "新建标签", {
                     let state = state.clone();
                     move || {
                         spawn_tab(&state, None);
@@ -779,11 +779,15 @@ pub fn App() -> impl IntoElement {
                     .text_color(muted_foreground())
                     .px_2(),
                 )
-                .child(ui::icon_button("⌘", "命令面板（Ctrl+Shift+P）", {
-                    let state = palette_button_state.clone();
-                    move || state.palette_open.set(true)
-                }))
-                .child(ui::icon_button("⚙", "设置（Ctrl+,）", {
+                .child(ui::icon_button(
+                    ui::icons::COMMAND,
+                    "命令面板（Ctrl+Shift+P）",
+                    {
+                        let state = palette_button_state.clone();
+                        move || state.palette_open.set(true)
+                    },
+                ))
+                .child(ui::icon_button(ui::icons::SETTINGS, "设置（Ctrl+,）", {
                     let state = settings_button_state.clone();
                     move || state.settings_open.set(true)
                 }))
@@ -1722,6 +1726,7 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
     let activate_state = state.clone();
     let close_state = state.clone();
     let title = move || info.get().title.clone();
+    let closed = info.get().exited.is_some();
 
     view()
         .h(px(28.0))
@@ -1730,13 +1735,17 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
         .flex_row()
         .items_center()
         .rounded(px(6.0))
+        // The active tab is a raised chip, the others sit flat on the
+        // strip; a hovered inactive tab lifts slightly so it reads as
+        // pressable.
         .bg(move || {
             if bg_state.active.get() == id {
-                accent()
+                popover()
             } else {
                 surface()
             }
         })
+        .when(!closed, |v| v.hover(|s| s.bg(accent())))
         .transition_colors()
         .child(
             view()
@@ -1744,16 +1753,23 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
                 .h_full()
                 .flex_row()
                 .items_center()
-                .pl_3()
-                .pr_2()
+                .ps_3()
+                .pe_1()
                 .on_press(move || activate_state.activate(id))
                 .child(
                     text(title)
                         .text_sm()
+                        .font_weight(if closed {
+                            FontWeight::NORMAL
+                        } else {
+                            FontWeight::MEDIUM
+                        })
                         .number_of_lines(1)
                         .text_color(move || {
-                            if fg_state.active.get() == id {
-                                accent_foreground()
+                            if closed {
+                                muted_foreground()
+                            } else if fg_state.active.get() == id {
+                                foreground()
                             } else {
                                 muted_foreground()
                             }
@@ -1762,19 +1778,22 @@ fn tab_button(state: Rc<AppState>, info: ReadSignal<TabInfo>) -> impl IntoElemen
         )
         .child(
             view()
-                .w(px(20.0))
+                .w(px(22.0))
                 .h_full()
                 .items_center()
                 .justify_center()
+                .rounded(px(4.0))
                 .label("关闭标签")
                 .hover(|s| s.bg(accent()))
                 .on_press(move || close_state.close(id))
-                .child(
-                    text("×")
-                        .text_sm()
-                        .text_color(muted_foreground())
-                        .hover(|s| s.text_color(accent_foreground())),
-                ),
+                .child(ui::icon(
+                    ui::icons::CLOSE,
+                    12.0,
+                    AdaptiveColor::new(
+                        nsh_core::color::black().opacity(0.5),
+                        nsh_core::color::white().opacity(0.55),
+                    ),
+                )),
         )
 }
 
@@ -1791,7 +1810,14 @@ fn profile_menu(state: Rc<AppState>) -> impl IntoElement {
                 .rounded(px(6.0))
                 .hover(|s| s.bg(accent()))
                 .active(|s| s.bg(accent()))
-                .child(text("⌄").text_xs().text_color(muted_foreground())),
+                .child(ui::icon(
+                    ui::icons::CHEVRON_DOWN,
+                    14.0,
+                    AdaptiveColor::new(
+                        nsh_core::color::black().opacity(0.6),
+                        nsh_core::color::white().opacity(0.7),
+                    ),
+                )),
         );
 
     for (index, profile) in state.profiles.iter().enumerate() {
