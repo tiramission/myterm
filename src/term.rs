@@ -79,6 +79,13 @@ pub enum Cmd {
     ClearSelection,
     /// Scroll the viewport by `delta` rows (negative: into history).
     Scroll(i32),
+    /// Look for `needle`; `direction` 1 selects the next (older) match,
+    /// -1 the previous one, and `skip` steps first.
+    Find {
+        needle: String,
+        direction: i8,
+        skip: usize,
+    },
 }
 
 /// What the UI reads between frames.
@@ -89,6 +96,8 @@ pub struct Shared {
     pub frame_ms: Mutex<f32>,
     /// The selected text as of the last change.
     pub selection: Mutex<String>,
+    /// (matches, selected 1-based) of the last find.
+    pub find: Mutex<Option<(usize, usize)>>,
 }
 
 /// Starts the VT thread. Returns the command sender and the shared outputs.
@@ -304,6 +313,21 @@ fn run(
                     }
                     dirty = true;
                 }
+                Ok(Cmd::Find {
+                    needle,
+                    direction,
+                    skip,
+                }) => {
+                    match find(&mut term, &needle, direction, skip) {
+                        Ok((total, selected)) => {
+                            if let Ok(mut slot) = shared.find.lock() {
+                                *slot = Some((total, selected));
+                            }
+                        }
+                        Err(e) => log::warn!("find: {e}"),
+                    }
+                    dirty = true;
+                }
                 Ok(Cmd::Scroll(delta)) => {
                     term.scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
                         delta as isize,
@@ -477,4 +501,74 @@ fn selection_text(term: &Terminal<'_, '_>) -> libghostty_vt::error::Result<Strin
         .format_selection_alloc(None, options)?
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default())
+}
+
+/// Runs `needle` through the terminal's history and selects its match, so the
+/// renderer highlights it. Returns (matches, selected, 1-based).
+fn find(
+    term: &mut Terminal<'_, '_>,
+    needle: &str,
+    direction: i8,
+    skip: usize,
+) -> libghostty_vt::error::Result<(usize, usize)> {
+    use libghostty_vt::search::{MatchBuffer, Search};
+
+    if needle.is_empty() {
+        let _ = term.set_selection(None);
+        return Ok((0, 0));
+    }
+
+    let mut search = Search::new(term)?;
+    search.set_needle(term, needle.as_bytes())?;
+    for _ in 0..1024 {
+        match search.tick()? {
+            libghostty_vt::search::Status::Running => {}
+            libghostty_vt::search::Status::FeedRequired => search.feed(term)?,
+            _ => break,
+        }
+    }
+
+    let total = search.total_matches()?;
+    if total == 0 {
+        let _ = term.set_selection(None);
+        return Ok((0, 0));
+    }
+
+    for _ in 0..=skip {
+        let moved = if direction >= 0 {
+            search.select_next(term)?
+        } else {
+            search.select_prev(term)?
+        };
+        if !moved {
+            break;
+        }
+    }
+
+    let mut buffer = MatchBuffer::new();
+    let _ = &mut buffer;
+    let points = {
+        let snapshot = search.snapshot(term)?;
+        match snapshot.selected_match()? {
+            Some(selection) => {
+                use libghostty_vt::terminal::PointSpace;
+                let screen = snapshot.terminal();
+                let start =
+                    screen.point_from_grid_ref(&selection.start(), PointSpace::Viewport)?;
+                let end = screen.point_from_grid_ref(&selection.end(), PointSpace::Viewport)?;
+                start.zip(end)
+            }
+            None => None,
+        }
+    };
+    if let Some((start, end)) = points {
+        use libghostty_vt::selection::Selection;
+        use libghostty_vt::terminal::Point;
+        let start_ref = term.grid_ref(Point::Viewport(start))?;
+        let end_ref = term.grid_ref(Point::Viewport(end))?;
+        let selection = Selection::new(start_ref, end_ref, false);
+        term.set_selection(Some(&selection))?;
+    }
+    let selected = search.selected_index()?.map_or(1, |index| index + 1);
+    Ok((total, selected))
 }

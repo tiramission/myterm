@@ -22,6 +22,27 @@ const START_COLS: u16 = 100;
 const START_ROWS: u16 = 28;
 const TAB_HEIGHT: f32 = 34.0;
 
+#[derive(Clone, PartialEq, Debug)]
+enum PaletteAction {
+    NewTab,
+    NewTabProfile(usize),
+    Find,
+    Copy,
+    Paste,
+    SelectAll,
+    CloseTab,
+    ScrollTop,
+    ScrollBottom,
+}
+
+#[derive(Clone, PartialEq)]
+struct PaletteItem {
+    title: String,
+    hint: String,
+    keywords: &'static str,
+    action: PaletteAction,
+}
+
 #[derive(Clone, PartialEq)]
 struct TabInfo {
     id: u64,
@@ -40,6 +61,13 @@ struct Tab {
     dims: Signal<(u16, u16)>,
     exit: Signal<Option<i32>>,
     title: Signal<String>,
+    find_open: Signal<bool>,
+    find_query: Signal<String>,
+    find_skip: Cell<usize>,
+    find_count: Signal<Option<(usize, usize)>>,
+    find_focus: ElementRef,
+    menu_open: Signal<bool>,
+    menu_at: Signal<(f32, f32)>,
 }
 
 impl Tab {
@@ -57,6 +85,11 @@ struct AppState {
     focus: ElementRef,
     anchor: Cell<Option<(u16, u32)>>,
     dragging: Cell<bool>,
+    palette_open: Signal<bool>,
+    palette_query: Signal<String>,
+    palette_items: Signal<Vec<PaletteItem>>,
+    palette_all: Vec<PaletteItem>,
+    palette_focus: ElementRef,
 }
 
 impl AppState {
@@ -162,6 +195,13 @@ fn spawn_tab(state: &Rc<AppState>, profile: Option<usize>) -> Option<u64> {
         dims: signal((START_COLS, START_ROWS)),
         exit: signal(None::<i32>),
         title: signal(profile.name.clone()),
+        find_open: signal(false),
+        find_query: signal(String::new()),
+        find_skip: Cell::new(0),
+        find_count: signal(None),
+        find_focus: element_ref(),
+        menu_open: signal(false),
+        menu_at: signal((0.0_f32, 0.0_f32)),
     });
     state.runtimes.borrow_mut().push(tab);
 
@@ -191,15 +231,83 @@ fn native(registry: &mut Registry) {
 
 #[component]
 pub fn App() -> impl IntoElement {
+    let profile_list = profiles::discover();
+    let mut palette_all: Vec<PaletteItem> = vec![
+        PaletteItem {
+            title: "新建标签".to_owned(),
+            hint: "Ctrl+Shift+T".to_owned(),
+            keywords: "new tab",
+            action: PaletteAction::NewTab,
+        },
+    ];
+    for (index, profile) in profile_list.iter().enumerate() {
+        palette_all.push(PaletteItem {
+            title: format!("新建 {} 标签", profile.name),
+            hint: String::new(),
+            keywords: "new tab profile",
+            action: PaletteAction::NewTabProfile(index),
+        });
+    }
+    palette_all.extend([
+        PaletteItem {
+            title: "查找…".to_owned(),
+            hint: "Ctrl+Shift+F".to_owned(),
+            keywords: "find search",
+            action: PaletteAction::Find,
+        },
+        PaletteItem {
+            title: "复制选区".to_owned(),
+            hint: "Ctrl+Shift+C".to_owned(),
+            keywords: "copy",
+            action: PaletteAction::Copy,
+        },
+        PaletteItem {
+            title: "粘贴".to_owned(),
+            hint: "Ctrl+Shift+V".to_owned(),
+            keywords: "paste",
+            action: PaletteAction::Paste,
+        },
+        PaletteItem {
+            title: "全选".to_owned(),
+            hint: "Ctrl+Shift+U".to_owned(),
+            keywords: "select all",
+            action: PaletteAction::SelectAll,
+        },
+        PaletteItem {
+            title: "关闭标签".to_owned(),
+            hint: "Ctrl+Shift+W".to_owned(),
+            keywords: "close tab",
+            action: PaletteAction::CloseTab,
+        },
+        PaletteItem {
+            title: "滚动到顶部".to_owned(),
+            hint: "Shift+PageUp".to_owned(),
+            keywords: "scroll top",
+            action: PaletteAction::ScrollTop,
+        },
+        PaletteItem {
+            title: "滚动到底部".to_owned(),
+            hint: "Shift+PageDown".to_owned(),
+            keywords: "scroll bottom",
+            action: PaletteAction::ScrollBottom,
+        },
+    ]);
+    let palette_items = palette_all.clone();
+
     let state = Rc::new(AppState {
         tabs: signal(Vec::<TabInfo>::new()),
         active: signal(0_u64),
         runtimes: RefCell::new(Vec::new()),
         next_id: Cell::new(0),
-        profiles: profiles::discover(),
+        profiles: profile_list,
         focus: element_ref(),
         anchor: Cell::new(None),
         dragging: Cell::new(false),
+        palette_open: signal(false),
+        palette_query: signal(String::new()),
+        palette_items: signal(palette_items),
+        palette_all,
+        palette_focus: element_ref(),
     });
 
     spawn_tab(&state, None);
@@ -226,6 +334,10 @@ pub fn App() -> impl IntoElement {
                     if let Some(code) = session.poll_exit() {
                         tab.exit.set(Some(code));
                     }
+                }
+                let found = session.find_result();
+                if tab.find_count.get() != found {
+                    tab.find_count.set(found);
                 }
             }
         }
@@ -302,6 +414,16 @@ pub fn App() -> impl IntoElement {
             let id = pane_state.active.get();
             pane(pane_state.clone(), id).into_element()
         })))
+        .child(when(
+            {
+                let state = state.clone();
+                move || state.palette_open.get()
+            },
+            {
+                let state = state.clone();
+                move || palette_overlay(state.clone())
+            },
+        ))
 }
 
 fn icon_button(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
@@ -523,9 +645,20 @@ fn terminal_surface(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
     let change_composing = composing.clone();
     let composition = composing.clone();
     let focus_ref = state.focus;
+    let find_condition = tab.clone();
+    let menu_tab = tab.clone();
+    let menu_condition = tab.clone();
+    let menu_body = tab.clone();
+    let menu_state = state.clone();
+    let find_body = tab.clone();
+    let find_state = state.clone();
 
     view()
         .flex_1()
+        .child(when(
+            move || find_condition.find_open.get(),
+            move || find_bar(find_state.clone(), find_body.clone()),
+        ))
         .child(when(
             {
                 let tab = tab.clone();
@@ -610,8 +743,16 @@ fn terminal_surface(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
                         touch_state.anchor.set(None);
                     }
                 }
-            }),
+                })
+                .on_context_menu(move |event: &ContextMenuEvent| {
+                    menu_tab.menu_at.set((event.position.x.0, event.position.y.0));
+                    menu_tab.menu_open.set(true);
+                }),
         )
+        .child(when(
+            move || menu_condition.menu_open.get(),
+            move || context_menu_view(menu_state.clone(), menu_body.clone()),
+        ))
         .child(
             nsh_base::input()
                 .element_ref(&state.focus)
@@ -798,14 +939,7 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
         {
             let state = state.clone();
             Box::new(move || {
-                if let Some(tab) = state.active_tab() {
-                    if let Some(session) = tab.session.as_ref() {
-                        let text = session.selection_text();
-                        if !text.is_empty() {
-                            set_clipboard(text);
-                        }
-                    }
-                }
+                copy_selection(&state);
             })
         },
     );
@@ -814,29 +948,59 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
         {
             let state = state.clone();
             Box::new(move || {
+                paste_clipboard(&state);
+            })
+        },
+    );
+    bind(
+        "ctrl+shift+f",
+        {
+            let state = state.clone();
+            Box::new(move || {
                 let Some(tab) = state.active_tab() else {
                     return;
                 };
-                let Some(session) = tab.session() else {
-                    return;
-                };
-                spawn(async move {
-                    let text = clipboard_string().await;
-                    if !text.is_empty() {
-                        session.send_text(&text);
+                let open = !tab.find_open.get();
+                tab.find_open.set(open);
+                if open {
+                    let focus = tab.find_focus;
+                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                } else {
+                    tab.find_count.set(None);
+                    tab.find_query.set(String::new());
+                    if let Some(session) = tab.session.as_ref() {
+                        session.clear_selection();
                     }
-                });
+                    let focus = state.focus;
+                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                }
+            })
+        },
+    );
+    bind(
+        "ctrl+shift+p",
+        {
+            let state = state.clone();
+            Box::new(move || {
+                let open = !state.palette_open.get();
+                state.palette_open.set(open);
+                if open {
+                    let focus = state.palette_focus;
+                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                } else {
+                    state.palette_query.set(String::new());
+                    state.palette_items.set(state.palette_all.clone());
+                }
             })
         },
     );
     // Ctrl+Shift+A is an editing shortcut the focused input keeps, so the
-    // select-all command lives on Ctrl+Shift+Space.
+    // select-all lives on Ctrl+Shift+U.
     bind(
         "ctrl+shift+u",
         {
             let state = state.clone();
             Box::new(move || {
-                log::info!("select all fired");
                 if let Some(tab) = state.active_tab() {
                     if let Some(session) = tab.session.as_ref() {
                         session.select_all();
@@ -902,10 +1066,374 @@ fn register_app_shortcuts(state: &Rc<AppState>) {
                 repeat: true,
             },
             move |_| {
-                if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
+                let active = state.active_tab();
+                if keystroke == &"enter" {
+                    if state.palette_open.get() {
+                        if let Some(item) = state.palette_items.get().first() {
+                            run_palette(&state, item.action.clone());
+                        }
+                        return;
+                    }
+                    if let Some(tab) = active.as_ref() {
+                        if tab.find_open.get() {
+                            let skip = tab.find_skip.get() + 1;
+                            tab.find_skip.set(skip);
+                            let query = tab.find_query.get();
+                            if let Some(session) = tab.session.as_ref() {
+                                session.find(&query, 1, skip);
+                            }
+                            return;
+                        }
+                    }
+                }
+                if keystroke == &"escape" {
+                    if state.palette_open.get() {
+                        state.palette_open.set(false);
+                        state.palette_query.set(String::new());
+                        state.palette_items.set(state.palette_all.clone());
+                        let focus = state.focus;
+                        set_timeout(Duration::from_millis(0), move || focus.focus());
+                        return;
+                    }
+                    if let Some(tab) = active.as_ref() {
+                        if tab.menu_open.get() {
+                            tab.menu_open.set(false);
+                            return;
+                        }
+                        if tab.find_open.get() {
+                            tab.find_open.set(false);
+                            tab.find_count.set(None);
+                            tab.find_query.set(String::new());
+                            if let Some(session) = tab.session.as_ref() {
+                                session.clear_selection();
+                            }
+                            let focus = state.focus;
+                            set_timeout(Duration::from_millis(0), move || focus.focus());
+                            return;
+                        }
+                    }
+                }
+                if let Some(session) = active.and_then(|tab| tab.session()) {
                     session.send_key(key, mods);
                 }
             },
         );
     }
+}
+
+fn find_bar(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
+    let query_tab = tab.clone();
+    let count_tab = tab.clone();
+    let next_tab = tab.clone();
+    let prev_tab = tab.clone();
+    let close_tab = tab.clone();
+    let focus = state.focus;
+
+    view()
+        .h(px(32.0))
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .bg(rgb(0x1b1f26))
+        .child(
+            nsh_base::input()
+                .element_ref(&tab.find_focus)
+                .value(move || query_tab.find_query.get())
+                .placeholder("查找…")
+                .caret(true)
+                .auto_focus(true)
+                .on_change(move |text: &str| {
+                    tab.find_query.set(text.to_owned());
+                    tab.find_skip.set(0);
+                    tab.find_count.set(None);
+                    if let Some(session) = tab.session.as_ref() {
+                        session.find(text, 1, 0);
+                    }
+                })
+                .w(px(300.0))
+                .h(px(24.0))
+                .px_2()
+                .text_size(px(12.0))
+                .text_color(rgb(0xe6e8ec))
+                .bg(rgb(0x101216))
+                .rounded(px(4.0)),
+        )
+        .child(
+            text(move || match count_tab.find_count.get() {
+                Some((0, _)) => "0/0".to_owned(),
+                Some((total, selected)) => format!("{selected}/{total}"),
+                None => "…".to_owned(),
+            })
+            .text_size(px(11.0))
+            .text_color(rgb(0x8b929e))
+            .w(px(70.0)),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    let skip = prev_tab.find_skip.get();
+                    let query = prev_tab.find_query.get();
+                    if let Some(session) = prev_tab.session.as_ref() {
+                        session.find(&query, -1, skip);
+                    }
+                })
+                .child(text("↑").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    let skip = next_tab.find_skip.get() + 1;
+                    next_tab.find_skip.set(skip);
+                    let query = next_tab.find_query.get();
+                    if let Some(session) = next_tab.session.as_ref() {
+                        session.find(&query, 1, skip);
+                    }
+                })
+                .child(text("↓").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+        .child(
+            view()
+                .px_2()
+                .py_1()
+                .rounded(px(4.0))
+                .active(|s| s.bg(rgb(0x2a3038)))
+                .on_press(move || {
+                    close_tab.find_open.set(false);
+                    if let Some(session) = close_tab.session.as_ref() {
+                        session.clear_selection();
+                    }
+                    let focus = focus;
+                    set_timeout(Duration::from_millis(0), move || focus.focus());
+                })
+                .child(text("×").text_size(px(12.0)).text_color(rgb(0xc3c8d1))),
+        )
+}
+
+fn copy_selection(state: &Rc<AppState>) {
+    if let Some(tab) = state.active_tab() {
+        if let Some(session) = tab.session.as_ref() {
+            let text = session.selection_text();
+            if !text.is_empty() {
+                set_clipboard(text);
+            }
+        }
+    }
+}
+
+fn paste_clipboard(state: &Rc<AppState>) {
+    let Some(tab) = state.active_tab() else {
+        return;
+    };
+    let Some(session) = tab.session() else {
+        return;
+    };
+    spawn(async move {
+        let text = clipboard_string().await;
+        if !text.is_empty() {
+            session.send_text(&text);
+        }
+    });
+}
+
+fn open_find(state: &Rc<AppState>) {
+    let Some(tab) = state.active_tab() else {
+        return;
+    };
+    tab.find_open.set(true);
+    let focus = tab.find_focus;
+    set_timeout(Duration::from_millis(0), move || focus.focus());
+}
+
+fn context_menu_view(state: Rc<AppState>, tab: Rc<Tab>) -> impl IntoElement {
+    let (x, y) = tab.menu_at.get();
+    let close = {
+        let tab = tab.clone();
+        move || tab.menu_open.set(false)
+    };
+    let close_copy = close.clone();
+    let close_paste = close.clone();
+    let close_all = close.clone();
+    let close_find = close.clone();
+    let close_close = close.clone();
+    let state_copy = state.clone();
+    let state_paste = state.clone();
+    let state_all = state.clone();
+    let state_find = state.clone();
+    let state_close = state.clone();
+
+    view()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(184.0))
+        .p_1()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(0x2a3038))
+        .bg(rgb(0x1b1f26))
+        .shadow_lg()
+        .child(menu_row("复制", move || {
+            copy_selection(&state_copy);
+            close_copy();
+        }))
+        .child(menu_row("粘贴", move || {
+            paste_clipboard(&state_paste);
+            close_paste();
+        }))
+        .child(menu_row("全选", move || {
+            if let Some(tab) = state_all.active_tab() {
+                if let Some(session) = tab.session.as_ref() {
+                    session.select_all();
+                }
+            }
+            close_all();
+        }))
+        .child(menu_row("查找…", move || {
+            open_find(&state_find);
+            close_find();
+        }))
+        .child(view().h(px(1.0)).my_1().bg(rgb(0x2a3038)))
+        .child(menu_row("关闭窗格", move || {
+            state_close.close(state_close.active.get());
+            close_close();
+        }))
+}
+
+fn menu_row(label: &'static str, on_press: impl Fn() + 'static) -> impl IntoElement {
+    view()
+        .px_3()
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .active(|s| s.bg(rgb(0x2a3038)))
+        .on_press(on_press)
+        .child(text(label).text_size(px(12.0)).text_color(rgb(0xe6e8ec)))
+}
+
+fn filter_palette(all: &[PaletteItem], query: &str) -> Vec<PaletteItem> {
+    let needle = query.trim().to_lowercase();
+    all.iter()
+        .filter(|item| {
+            needle.is_empty()
+                || item.title.to_lowercase().contains(&needle)
+                || item.keywords.contains(&needle)
+        })
+        .cloned()
+        .collect()
+}
+
+fn run_palette(state: &Rc<AppState>, action: PaletteAction) {
+    match action {
+        PaletteAction::NewTab => {
+            spawn_tab(state, None);
+        }
+        PaletteAction::NewTabProfile(index) => {
+            spawn_tab(state, Some(index));
+        }
+        PaletteAction::Find => open_find(state),
+        PaletteAction::Copy => copy_selection(state),
+        PaletteAction::Paste => paste_clipboard(state),
+        PaletteAction::SelectAll => {
+            if let Some(tab) = state.active_tab() {
+                if let Some(session) = tab.session.as_ref() {
+                    session.select_all();
+                }
+            }
+        }
+        PaletteAction::CloseTab => state.close(state.active.get()),
+        PaletteAction::ScrollTop => {
+            if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
+                session.scroll(-100_000);
+            }
+        }
+        PaletteAction::ScrollBottom => {
+            if let Some(session) = state.active_tab().and_then(|tab| tab.session()) {
+                session.scroll(100_000);
+            }
+        }
+    }
+    state.palette_open.set(false);
+    state.palette_query.set(String::new());
+    state.palette_items.set(state.palette_all.clone());
+}
+
+fn palette_overlay(state: Rc<AppState>) -> impl IntoElement {
+    let query_state = state.clone();
+    let change_state = state.clone();
+    let row_state = state.clone();
+    let all = Rc::new(state.palette_all.clone());
+
+    view()
+        .absolute()
+        .top(px(64.0))
+        .left(px(140.0))
+        .w(px(520.0))
+        .p_2()
+        .gap_2()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(0x2a3038))
+        .bg(rgb(0x1b1f26))
+        .shadow_lg()
+        .child(
+            nsh_base::input()
+                .element_ref(&state.palette_focus)
+                .value(move || query_state.palette_query.get())
+                .placeholder("输入命令…")
+                .auto_focus(true)
+                .on_change(move |text: &str| {
+                    let items = filter_palette(&all, text);
+                    change_state.palette_query.set(text.to_owned());
+                    change_state.palette_items.set(items);
+                })
+                .h(px(30.0))
+                .w_full()
+                .px_2()
+                .text_size(px(13.0))
+                .text_color(rgb(0xe6e8ec))
+                .bg(rgb(0x101216))
+                .rounded(px(6.0)),
+        )
+        .child(
+            view()
+                .gap_1()
+                .child(each(
+                    state.palette_items,
+                    |item| item.title.clone(),
+                    move |item, _| {
+                        let row_state = row_state.clone();
+                        let action = item.get().action.clone();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .active(|s| s.bg(rgb(0x2a3038)))
+                            .on_press(move || {
+                                run_palette(&row_state, action.clone());
+                            })
+                            .child(
+                                text(move || item.get().title.clone())
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xe6e8ec)),
+                            )
+                            .child(
+                                text(move || item.get().hint.clone())
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x6b7280)),
+                            )
+                    },
+                )),
+        )
 }

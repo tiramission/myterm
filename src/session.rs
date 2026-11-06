@@ -148,6 +148,20 @@ impl Session {
         let _ = self.cmd.send(Cmd::Scroll(delta));
     }
 
+    /// Searches the scrollback; `direction` 1 is the next (older) match.
+    pub fn find(&self, needle: &str, direction: i8, skip: usize) {
+        let _ = self.cmd.send(Cmd::Find {
+            needle: needle.to_owned(),
+            direction,
+            skip,
+        });
+    }
+
+    /// (matches, selected 1-based) of the last find.
+    pub fn find_result(&self) -> Option<(usize, usize)> {
+        self.shared.find.lock().ok()?.clone()
+    }
+
     /// The selected text as of the last selection change (`""`: none).
     pub fn selection_text(&self) -> String {
         self.shared
