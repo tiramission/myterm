@@ -383,4 +383,3 @@ mod tests {
         assert!(ratio >= 0.1 && ratio <= 0.9, "got {ratio}");
     }
 }
-

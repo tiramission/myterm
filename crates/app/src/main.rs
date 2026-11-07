@@ -917,6 +917,16 @@ impl Workspace {
         }
     }
 
+    /// Splits `id`, focusing it first if it was not already focused.
+    ///
+    /// The pane overlay uses this so a split can be started from the pane it
+    /// applies to instead of from the title bar, which is far away once the
+    /// window is divided.
+    fn split_pane(&mut self, id: u64, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane(id, cx);
+        self.split_active(axis, window, cx);
+    }
+
     /// Splits the focused pane and moves focus into the new one.
     ///
     /// Starting a pseudo console takes tens of milliseconds, which is long
@@ -1240,6 +1250,7 @@ impl Workspace {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
+                    .group("pane")
                     .bg(style.background)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1288,6 +1299,38 @@ impl Workspace {
                                 .right_0()
                                 .h(px(1.0))
                                 .bg(theme.ring),
+                        )
+                    })
+                    // Splitting again from inside the pane, without travelling
+                    // back up to the title bar. It only appears once there is
+                    // more than one pane: a lone terminal is already the size you
+                    // asked for, and the title bar covers that case.
+                    .when(multi, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(4.0))
+                                .right(px(4.0))
+                                .flex()
+                                .gap(px(2.0))
+                                .opacity(0.0)
+                                .group_hover("pane", |this| this.opacity(1.0))
+                                .child(pane_action(
+                                    "pane-split-right",
+                                    SPLIT_HORIZONTAL,
+                                    &theme,
+                                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                                        workspace.split_pane(id, Axis::Horizontal, window, cx);
+                                    }),
+                                ))
+                                .child(pane_action(
+                                    "pane-split-down",
+                                    SPLIT_VERTICAL,
+                                    &theme,
+                                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                                        workspace.split_pane(id, Axis::Vertical, window, cx);
+                                    }),
+                                )),
                         )
                     })
                     .when_some(exit, |this, code| {
@@ -1586,12 +1629,16 @@ impl Workspace {
     }
 }
 
-/// The draggable rule between two panes of a split.
+/// The draggable gutter between two panes of a split.
 ///
-/// The visible line is one pixel; the element around it is wider so the pointer
-/// has something to grab, and it lights up on hover to say it can be moved. The
-/// two panes on either side identify which split is being resized, which is what
-/// keeps a nested split pointing at its own divider.
+/// The panes are separated by a strip of chrome rather than a hairline. A
+/// terminal paints its own background, so a one-pixel rule between two panes of
+/// the same colour is nearly invisible; a strip of the title bar's tone reads as
+/// a deliberate division and makes the two panes feel like separate surfaces.
+///
+/// It is wide enough to grab, which a hairline is not, and it brightens on hover
+/// to say it can be moved. The two panes on either side identify which split is
+/// being resized, which is what keeps a nested split pointing at its own gutter.
 fn divider_element(
     axis: Axis,
     first: &Layout,
@@ -1601,26 +1648,17 @@ fn divider_element(
 ) -> AnyElement {
     let left = first.leaves().last().copied();
     let right = second.leaves().first().copied();
-    let color = theme.border;
 
-    // `flex_shrink_0` keeps the divider at its real width. Without it the two
-    // halves plus the divider exceed the container and flex shrinks the only
-    // item that can give, leaving nothing to aim at.
-    let mut divider = div()
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .justify_center()
-        .bg(color);
+    const GUTTER: f32 = 6.0;
 
-    divider = match axis {
-        Axis::Horizontal => divider.w(px(3.0)).h_full().cursor_col_resize(),
-        Axis::Vertical => divider.h(px(3.0)).w_full().cursor_row_resize(),
+    let mut grip = div().flex_shrink_0().bg(theme.border);
+
+    grip = match axis {
+        Axis::Horizontal => grip.w(px(GUTTER)).h_full().cursor_col_resize(),
+        Axis::Vertical => grip.h(px(GUTTER)).w_full().cursor_row_resize(),
     };
 
-    divider
-        .relative()
-        .hover(move |this| this.bg(theme.ring))
+    grip.hover(move |this| this.bg(theme.ring))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
@@ -1630,6 +1668,33 @@ fn divider_element(
             }),
         )
         .into_any_element()
+}
+
+/// A small split control floating inside a pane.
+///
+/// Smaller than [`icon_button`] and tinted like chrome rather than like content,
+/// because it covers terminal text: it has to be reachable without becoming part
+/// of what the terminal is saying.
+fn pane_action(
+    id: &'static str,
+    icon: &'static [u8],
+    theme: &gpui_kit::component::Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(22.0))
+        .rounded(px(5.0))
+        .bg(theme.title_bar)
+        .border_1()
+        .border_color(theme.border.opacity(0.7))
+        .cursor_pointer()
+        .hover(move |this| this.bg(theme.accent))
+        .on_click(on_click)
+        .child(icon_data(icon, theme.muted_foreground))
 }
 
 /// One tab: name, pane count, and a close affordance that only appears when
@@ -2112,6 +2177,32 @@ fn system_prefers_light() -> bool {
     true
 }
 
+/// The font the terminal grid is drawn with.
+///
+/// Maple Mono NF CN is a programming face with CJK coverage and Nerd Font
+/// glyphs, so box drawing, powerline separators and Chinese text all come from
+/// one font instead of falling back mid-cell.
+const TERMINAL_FONT: &str = "Maple Mono NF CN";
+
+/// Points the theme's monospace family at [`TERMINAL_FONT`].
+///
+/// Both registered theme configs are rewritten, not just the live family: a
+/// mode change re-applies the config, and a config that says nothing about the
+/// mono family would put the old one back.
+fn apply_terminal_font(cx: &mut App) {
+    gpui_kit::component::Theme::update(cx, |theme| {
+        let mut dark = (*theme.dark_theme).clone();
+        dark.mono_font_family = Some(TERMINAL_FONT.into());
+        theme.dark_theme = std::rc::Rc::new(dark);
+
+        let mut light = (*theme.light_theme).clone();
+        light.mono_font_family = Some(TERMINAL_FONT.into());
+        theme.light_theme = std::rc::Rc::new(light);
+
+        theme.mono_font_family = TERMINAL_FONT.into();
+    });
+}
+
 fn main() {
     env_logger::init();
 
@@ -2145,6 +2236,8 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+
+            apply_terminal_font(cx);
 
             // The app follows the desktop's light/dark setting, resolved before
             // the loop started so the first shell could be painted to match.
