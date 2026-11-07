@@ -1,8 +1,13 @@
 [package]
-name = "app"
+name = "myterm"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+description = "A Windows terminal built on GPUI Kit with libghostty-vt"
+
+[[bin]]
+name = "myterm"
+path = "src/main.rs"
 
 [dependencies]
 vt.workspace = true
@@ -12,3 +17,6 @@ env_logger.workspace = true
 gpui-kit = "0.9.0"
 image.workspace = true
 raw-window-handle.workspace = true
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true

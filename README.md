@@ -8,6 +8,12 @@
 
 ![myterm](icon.png)
 
+## 安装
+
+从 [Releases](https://github.com/tiramission/myterm/releases) 下载 `myterm.exe`，双击运行。它是单个可执行文件，没有安装程序；想要更新就让它自己更新，或换掉那个文件。
+
+首次运行会向 GitHub 查询一次新版本。
+
 ## 构建与运行
 
 前置：
@@ -19,9 +25,10 @@
 不需要 CMake、Zig 或任何系统级依赖：`libghostty-vt` 的静态库已随仓库提供。
 
 ```sh
-cargo build -p app     # 构建
-cargo run -p app       # 打开窗口
-cargo test             # 布局与 VT 绑定的单元测试
+cargo build -p myterm  # 构建
+cargo run -p myterm    # 打开窗口
+cargo test             # 布局、版本比较与 VT 绑定的单元测试
+cargo clippy --workspace --all-targets  # CI 会把警告当错误
 ```
 
 ## 结构
@@ -31,10 +38,10 @@ crates/
   vt-sys/   libghostty-vt 1.0.0 的裸 FFI 声明 + 预编译静态库
   vt/       安全封装：所有权、错误、颜色、渲染状态、按键编码
   pty/      ConPTY 进程与读写线程
-  app/      GPUI Kit 界面：标签、窗格、渲染、快捷键
+  myterm/   GPUI Kit 界面：标签、窗格、渲染、快捷键、更新检查
 ```
 
-依赖只向下：`app → pty/vt → vt-sys`。`vt-sys` 之外没有 `unsafe`。
+依赖只向下：`myterm → pty/vt → vt-sys`。`vt-sys` 之外没有 `unsafe`。
 
 ## 功能
 
@@ -56,6 +63,7 @@ crates/
 - **退出提示**：进程退出后在窗格底部显示退出码，保留最后一帧输出。
 - **剪贴板**：`Ctrl+C` 复制选区，没有选区时复制整屏；`Ctrl+V` 粘贴。
 - **滚轮**：回滚视口，超出半屏自动回到底部。
+- **自动更新**：启动后向 GitHub 查询最新 release，有新版本时标题栏出现一个徽章，点一下下载并在退出后替换、重启。查询失败或无发布版本时什么都不显示。
 
 ## 已知限制
 
@@ -63,4 +71,5 @@ crates/
 - 查找尚未接入（`vt` 层已提供搜索接口）。
 - 中文输入已接通输入法通道，但组字过程的端到端效果需要真机手动验证。
 - 仅支持 Windows。
+- 自动更新只替换可执行文件，不处理同目录的其他文件；目前也只有这一个文件。
 - 字体依赖本机安装 Maple Mono NF CN；未安装时会回退到系统默认等宽字体。

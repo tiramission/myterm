@@ -72,6 +72,11 @@ pub struct TerminalGrid {
 }
 
 impl TerminalGrid {
+    /// Eight parameters is one more than the lint likes, and they are all
+    /// needed: the grid has to reach the window, the workspace, and the focus
+    /// handle, and each is a different kind of thing. Bundling them into a
+    /// struct would move the spelling without making the call clearer.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<ElementId>,
         frame: Frame,
@@ -442,19 +447,20 @@ fn paint_cursor(
 
             // The character under the caret, in the color the cell's background
             // would have been, so it stays readable on the filled block.
-            if let Some(cell) = cell {
-                if !cell.text.is_empty() && !cell.style.invisible {
-                    paint_glyph(
-                        window,
-                        cx,
-                        &cell.text,
-                        style.background,
-                        cell.style.bold,
-                        bounds,
-                        style,
-                        font,
-                    );
-                }
+            if let Some(cell) = cell
+                && !cell.text.is_empty()
+                && !cell.style.invisible
+            {
+                paint_glyph(
+                    window,
+                    cx,
+                    &cell.text,
+                    style.background,
+                    cell.style.bold,
+                    bounds,
+                    style,
+                    font,
+                );
             }
         }
     }

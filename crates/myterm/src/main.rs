@@ -6,6 +6,7 @@ mod layout;
 mod palette;
 mod pty_command;
 mod terminal;
+mod update;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -41,7 +42,6 @@ const WINDOW_MINIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewB
 const WINDOW_MAXIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>"#;
 
 /// Zoom a pane to fill the card; and the reverse.
-
 /// The sidebar toggle: a column beside a page.
 const SIDEBAR_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/></svg>"#;
 
@@ -331,6 +331,13 @@ pub struct Workspace {
     /// A pane shown on its own, filling the window. The rest of the split stays
     /// as it was and comes back when the zoom is released.
     zoomed: Option<u64>,
+    /// The result of the last update check, once it has one.
+    ///
+    /// `None` means "not checked yet". The check runs once shortly after start,
+    /// on a background thread, so a slow network never delays the first frame.
+    update: Option<Result<update::Release, String>>,
+    /// Set while a download is in flight, so the button cannot be pressed twice.
+    updating: bool,
     /// What the user asked for. `None` means "decide by how much there is to
     /// list", which is what keeps a single terminal free of a list of one.
     sidebar_choice: Option<bool>,
@@ -366,6 +373,8 @@ impl Workspace {
             selection: false,
             zoomed: None,
             sidebar_choice: None,
+            update: None,
+            updating: false,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             resize_drag: None,
@@ -389,6 +398,9 @@ impl Workspace {
     /// Starts polling the shells, and focuses the grid once it exists.
     fn ensure_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_ticking(cx);
+        // Once per run, and not on the first frame: the terminal should be
+        // usable before anything asks the network a question.
+        self.check_for_update(cx);
 
         if !self.focus.is_focused(window) {
             self.focus.focus(window, cx);
@@ -451,7 +463,7 @@ impl Workspace {
         }
 
         let elapsed = self.caret_moved.elapsed();
-        let visible = (elapsed.as_millis() / PERIOD.as_millis()) % 2 == 0;
+        let visible = (elapsed.as_millis() / PERIOD.as_millis()).is_multiple_of(2);
         if visible != self.caret_visible {
             self.caret_visible = visible;
             true
@@ -1399,7 +1411,7 @@ impl Workspace {
                         focused,
                         zoomed,
                         exit.is_some(),
-                        &theme,
+                        theme,
                         cx,
                     ));
                 }
@@ -1639,6 +1651,94 @@ impl Workspace {
             _ => tab.active,
         };
         Some((self.active_tab, id))
+    }
+
+    /// What the update badge should say, if anything.
+    ///
+    /// `None` hides it: no check yet, no newer release, or a check that failed.
+    /// The second field says whether it can be acted on.
+    fn update_badge(&self) -> Option<(String, bool)> {
+        if self.updating {
+            return Some(("正在更新…".to_owned(), false));
+        }
+        match &self.update {
+            Some(Ok(release)) => Some((format!("更新到 {}", release.version), true)),
+            Some(Err(message)) if !message.is_empty() => Some((message.clone(), false)),
+            _ => None,
+        }
+    }
+
+    /// Asks GitHub for the latest release, once, off the UI thread.
+    ///
+    /// The answer only becomes a small badge in the title bar. A failed check is
+    /// kept silent on purpose: an app that announces every network problem is
+    /// worse than one that simply does not mention updates.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if self.update.is_some() {
+            return;
+        }
+        // Claim the slot before the work starts, so a second call is a no-op
+        // rather than a second request.
+        self.update = Some(Err(String::new()));
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { update::check() })
+                .await;
+
+            let found = match result {
+                Ok(release) if update::is_newer(&release.version, update::current_version()) => {
+                    Ok(release)
+                }
+                Ok(_) => Err(String::new()),
+                Err(update::UpdateError::NoRelease) => Err(String::new()),
+                Err(error) => Err(error.to_string()),
+            };
+
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.update = Some(found);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Downloads the pending release and hands off to the restart script.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        if self.updating {
+            return;
+        }
+        let Some(Ok(release)) = self.update.clone() else {
+            return;
+        };
+        self.updating = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let staged = cx
+                .background_executor()
+                .spawn(async move { update::download(&release) })
+                .await;
+
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.updating = false;
+                match staged {
+                    Ok(path) => {
+                        // The swap needs this process gone, so the app quits as
+                        // soon as the script is running.
+                        if update::install_and_restart(&path).is_ok() {
+                            cx.quit();
+                            return;
+                        }
+                        workspace.update = Some(Err("无法启动更新程序".to_owned()));
+                    }
+                    Err(error) => workspace.update = Some(Err(error.to_string())),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether the sidebar is on screen.
@@ -2001,6 +2101,35 @@ impl Workspace {
                     workspace.toggle_theme(cx);
                 })),
             )
+            // The update badge sits with the app's own controls, not with the
+            // window's: it is about this program, not about the window.
+            .when_some(self.update_badge(), |this, (label, ready)| {
+                // Copied out of `theme` before the closures below capture it.
+                let ready_bg = theme.ring.opacity(0.16);
+                let ready_hover = theme.ring.opacity(0.24);
+                let ready_fg = theme.ring;
+                let idle_bg = theme.muted;
+                let idle_fg = theme.muted_foreground;
+                this.child(
+                    div()
+                        .id("update")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(24.0))
+                        .px(px(10.0))
+                        .rounded(px(999.0))
+                        .bg(if ready { ready_bg } else { idle_bg })
+                        .text_size(px(11.5))
+                        .text_color(if ready { ready_fg } else { idle_fg })
+                        .when(ready, |this| this.cursor_pointer())
+                        .when(ready, |this| this.hover(move |this| this.bg(ready_hover)))
+                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                            workspace.install_update(cx);
+                        }))
+                        .child(label),
+                )
+            })
             // A gap wide enough that the caption buttons read as window controls
             // and not as more of the app's own toolbar.
             .child(div().w(px(10.0)));
@@ -2933,9 +3062,9 @@ fn main() {
     let light = system_prefers_light();
     let mut theme = gpui_kit::component::Theme::default();
     theme.colors = if light {
-        (*gpui_kit::component::ThemeColor::light()).clone()
+        *gpui_kit::component::ThemeColor::light()
     } else {
-        (*gpui_kit::component::ThemeColor::dark()).clone()
+        *gpui_kit::component::ThemeColor::dark()
     };
     theme.mode = if light {
         gpui_kit::component::ThemeMode::Light

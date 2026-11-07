@@ -207,24 +207,26 @@ pub struct KeyInput<'a> {
 ///
 /// The `write_pty` callback is invoked when the terminal wants to answer the
 /// host program (device status reports, mode queries). It receives raw bytes.
+/// The callback that carries terminal output to the PTY.
+///
+/// Named because it is boxed twice and written out four times, and the spelling
+/// is where a mistake would hide.
+type WritePty = Box<dyn FnMut(&[u8]) + 'static>;
+
 pub struct Terminal {
     raw: sys::GhosttyTerminal,
     cols: u16,
     rows: u16,
     /// Boxed so the pointer handed to the library stays valid; the library
     /// stores the address, so this must not move after installation.
-    write_pty: Option<Box<Box<dyn FnMut(&[u8]) + 'static>>>,
+    write_pty: Option<Box<WritePty>>,
     encoder: KeyEncoder,
     title: String,
 }
 
 impl Terminal {
     /// Creates a terminal that reports its answers through `write_pty`.
-    pub fn new(
-        cols: u16,
-        rows: u16,
-        write_pty: Option<Box<dyn FnMut(&[u8]) + 'static>>,
-    ) -> Result<Self> {
+    pub fn new(cols: u16, rows: u16, write_pty: Option<WritePty>) -> Result<Self> {
         let cols = cols.max(1);
         let rows = rows.max(1);
 
@@ -260,12 +262,12 @@ impl Terminal {
         Ok(terminal)
     }
 
-    fn install_write_pty(&mut self, cb: Box<dyn FnMut(&[u8])>) -> Result<()> {
+    fn install_write_pty(&mut self, cb: WritePty) -> Result<()> {
         // Double boxing keeps the trait-object fat pointer address stable while
         // the library holds on to it. `userdata` points at the same box, which
         // is what the trampoline dereferences.
-        let mut boxed: Box<Box<dyn FnMut(&[u8])>> = Box::new(cb);
-        let userdata = &mut *boxed as *mut Box<dyn FnMut(&[u8])> as *mut c_void;
+        let mut boxed: Box<WritePty> = Box::new(cb);
+        let userdata = &mut *boxed as *mut WritePty as *mut c_void;
         self.write_pty = Some(boxed);
 
         unsafe {
@@ -382,7 +384,7 @@ impl Terminal {
             },
             Scroll::Delta(d) => sys::GhosttyTerminalScrollViewport {
                 tag: sys::GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA,
-                value: sys::GhosttyTerminalScrollViewportValue { delta: d as isize },
+                value: sys::GhosttyTerminalScrollViewportValue { delta: d },
             },
         };
         unsafe {
@@ -628,6 +630,11 @@ impl KeyEncoder {
     }
 
     /// Encodes one key event, syncing the encoder with the terminal's modes.
+    ///
+    /// The terminal handle is passed through to the C API, which is where it is
+    /// dereferenced; this function only carries it. The lint assumes a raw pointer
+    /// argument means a dereference here, which is not the case.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn encode(&mut self, terminal: sys::GhosttyTerminal, input: KeyInput<'_>) -> Vec<u8> {
         let mut event: sys::GhosttyKeyEvent = std::ptr::null_mut();
         if check(unsafe { sys::ghostty_key_event_new(std::ptr::null(), &mut event) }).is_err() {
@@ -714,6 +721,10 @@ impl RenderState {
     }
 
     /// Refreshes the snapshot from the terminal.
+    ///
+    /// The terminal handle is only carried to the C API, not dereferenced here;
+    /// see the note on `encode`.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn update(&mut self, terminal: sys::GhosttyTerminal) -> Result<()> {
         check(unsafe { sys::ghostty_render_state_update(self.raw, terminal) })
     }

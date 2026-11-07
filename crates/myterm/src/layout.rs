@@ -380,6 +380,6 @@ mod tests {
         let Layout::Split { ratio, .. } = layout else {
             panic!("still split");
         };
-        assert!(ratio >= 0.05 && ratio <= 0.95, "got {ratio}");
+        assert!((0.05..=0.95).contains(&ratio), "got {ratio}");
     }
 }
