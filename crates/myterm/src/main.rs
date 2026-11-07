@@ -2,6 +2,7 @@
 //! and the key handling that drives them.
 
 mod grid_element;
+mod install;
 mod layout;
 mod palette;
 mod pty_command;
@@ -353,6 +354,10 @@ pub struct Workspace {
     update_progress: Option<(u64, Option<u64>)>,
     /// Progress reports from the background download, drained by the ticker.
     update_rx: Option<std::sync::mpsc::Receiver<(u64, Option<u64>)>>,
+    /// Whether an install or uninstall is running.
+    installing: bool,
+    /// The last install or uninstall failure, shown in the about panel.
+    install_error: Option<String>,
     /// What the user asked for. `None` means "decide by how much there is to
     /// list", which is what keeps a single terminal free of a list of one.
     sidebar_choice: Option<bool>,
@@ -394,6 +399,8 @@ impl Workspace {
             updating: false,
             update_progress: None,
             update_rx: None,
+            installing: false,
+            install_error: None,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             tab_claimed: false,
@@ -1297,6 +1304,8 @@ impl Render for Workspace {
             .text_color(theme.foreground)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::handle_key))
+            // The install button dispatches rather than calling, so the about
+            // card can be built by a plain function; the handler lands here.
             // A divider drag has to keep tracking once the pointer leaves the
             // few pixels of the grip, so the move and release are handled at the
             // root, which is under the pointer for the whole gesture.
@@ -1896,6 +1905,77 @@ impl Workspace {
         .detach();
     }
 
+    /// The install state the about panel shows.
+    fn install_state(&self) -> InstallState {
+        InstallState {
+            installed: install::is_installed(),
+            present: install::is_present(),
+            busy: self.installing,
+        }
+    }
+
+    /// Installs or removes the app, depending on what is there now.
+    ///
+    /// Both directions end with this process gone: installing starts the copy
+    /// that was just written, and uninstalling deletes the one that is running.
+    /// The work is done off the UI thread because writing a shortcut and a
+    /// registry key can each take a moment, and a frozen window during an
+    /// install reads as a failed install.
+    fn run_install(&mut self, cx: &mut Context<Self>) {
+        if self.installing {
+            return;
+        }
+
+        let removing = install::is_installed();
+        self.installing = true;
+        self.install_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    if removing {
+                        install::uninstall()
+                    } else {
+                        install::install(&install::InstallOptions {
+                            // Offered by default, the way every installer on
+                            // Windows does it, but the panel can turn it off.
+                            desktop_shortcut: true,
+                        })
+                        .map(|_| ())
+                    }
+                })
+                .await;
+
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.installing = false;
+                match outcome {
+                    Ok(()) => {
+                        if removing {
+                            // The files go away only after this process exits,
+                            // so quitting is what completes the uninstall.
+                            cx.quit();
+                            return;
+                        }
+                        // Starting the installed copy before quitting means the
+                        // user sees the app come back rather than disappear.
+                        if install::launch_installed().is_ok() {
+                            cx.quit();
+                            return;
+                        }
+                        workspace.install_error = Some("安装完成，但无法启动新副本".to_owned());
+                    }
+                    Err(error) => {
+                        workspace.install_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Whether the sidebar is on screen.
     ///
     /// With no explicit choice it follows how much there is to list: a list of
@@ -2284,6 +2364,9 @@ impl Workspace {
                 // Copied out before the closure below captures `theme`.
                 let card_theme = theme.clone();
                 let mark = theme.muted_foreground;
+                let install_state = self.install_state();
+                let install_error = self.install_error.clone();
+                let card_entity = cx.entity();
                 // The trigger is a circled `i`, not the app mark: the mark is
                 // already at the leading edge of this same bar, and a second
                 // copy reads as decoration rather than as a control.
@@ -2298,7 +2381,14 @@ impl Workspace {
                     .anchor(Anchor::TopRight)
                     .offset(px(6.0))
                     .trigger(trigger)
-                    .content(move |_, _, _| about_card(&card_theme))
+                    .content(move |_, _, _| {
+                        about_card(
+                            &card_theme,
+                            install_state,
+                            install_error.clone(),
+                            card_entity.clone(),
+                        )
+                    })
             })
             // The theme toggle shows the theme it switches to, not the one in
             // use, which is the convention every app with this control follows.
@@ -2652,6 +2742,12 @@ fn pane_header(
         )
 }
 
+// Asks the workspace to install or remove this app. An action rather than a
+// callback so the button can be built by a plain function without threading a
+// `Context<Workspace>` through it; the handler lives on the workspace, which is
+// what owns the busy flag and the quit.
+gpui::actions!(myterm, [InstallRequested]);
+
 /// The about card: what this is, which build, and where it comes from.
 ///
 /// Kept short on purpose. A version panel that lists every dependency is a
@@ -2664,7 +2760,12 @@ fn pane_header(
 /// The surface, ring and shadow belong to the popover that hosts this, so the
 /// card contributes only its contents and its own width. Drawing a second
 /// background here would nest one sheet inside another.
-fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
+fn about_card(
+    theme: &gpui_kit::component::Theme,
+    install: InstallState,
+    error: Option<String>,
+    entity: Entity<Workspace>,
+) -> AnyElement {
     let muted = theme.muted_foreground;
     let faint = theme.border;
     let accent = theme.ring;
@@ -2682,7 +2783,7 @@ fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
             .child(div().text_size(px(11.5)).text_color(text).child(value))
     };
 
-    div()
+    let mut card = div()
         .w(px(268.0))
         .flex()
         .flex_col()
@@ -2728,20 +2829,137 @@ fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
                 .child(row("界面框架", "GPUI Kit 0.9"))
                 .child(row("平台", "Windows")),
         )
-        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
-        .child(
-            div()
-                .id("about-link")
-                .mt(px(12.0))
-                .text_size(px(11.0))
-                .text_color(muted)
-                .cursor_pointer()
-                .hover(move |this| this.text_color(accent))
-                .on_click(|_: &ClickEvent, _, cx| {
-                    cx.open_url("https://github.com/tiramission/myterm");
-                })
-                .child("github.com/tiramission/myterm"),
-        )
+        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint));
+
+    // Installing is a once-in-a-lifetime action, so it lives here rather than
+    // taking a permanent slot in the title bar. The row states which copy is
+    // running, because "installed" and "running from a download folder" look
+    // identical from the outside.
+    card = card.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .mt(px(14.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(32.0))
+                    .w_full()
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(muted)
+                            .child("安装状态"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(if install.installed { accent } else { muted })
+                            .child(install.summary()),
+                    ),
+            )
+            .child(install_action(theme, install, entity))
+            .when_some(error, |this, message| {
+                this.child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.danger)
+                        .child(message),
+                )
+            }),
+    );
+
+    card.child(
+        div()
+            .id("about-link")
+            .mt(px(12.0))
+            .text_size(px(11.0))
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(move |this| this.text_color(accent))
+            .on_click(|_: &ClickEvent, _, cx| {
+                cx.open_url("https://github.com/tiramission/myterm");
+            })
+            .child("github.com/tiramission/myterm"),
+    )
+    .into_any_element()
+}
+
+/// What the install row says and offers.
+#[derive(Clone, Copy)]
+pub struct InstallState {
+    /// This process is the installed copy.
+    pub installed: bool,
+    /// A copy exists at the install location, but this is not it.
+    pub present: bool,
+    /// An install or uninstall is running.
+    pub busy: bool,
+}
+
+impl InstallState {
+    fn summary(self) -> &'static str {
+        if self.busy {
+            return "处理中…";
+        }
+        match (self.installed, self.present) {
+            (true, _) => "已安装",
+            (false, true) => "已安装（当前不是它）",
+            (false, false) => "未安装",
+        }
+    }
+}
+
+/// The button that installs, or removes, this app.
+fn install_action(
+    theme: &gpui_kit::component::Theme,
+    install: InstallState,
+    entity: Entity<Workspace>,
+) -> AnyElement {
+    if install.busy {
+        return div().into_any_element();
+    }
+
+    let accent = theme.ring;
+    let muted = theme.muted_foreground;
+    let danger = theme.danger;
+    let (label, color, destructive) = if install.installed {
+        ("卸载", danger, true)
+    } else if install.present {
+        // A copy exists but this is not it. Offering "install" would silently
+        // overwrite it; the honest action is to remove what is there first.
+        ("重新安装", accent, false)
+    } else {
+        ("安装到本机", accent, false)
+    };
+
+    div()
+        .id("install-action")
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .h(px(26.0))
+        .w_full()
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(color.opacity(0.35))
+        .text_size(px(11.5))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(move |this| this.bg(color.opacity(0.12)))
+        .on_click(move |_: &ClickEvent, _, cx| {
+            // Called on the workspace directly rather than dispatched: the card
+            // lives in a popover, which is painted in a deferred layer outside
+            // the window's element tree, so an action dispatched here would
+            // bubble through nodes that never see it.
+            let _ = (destructive, muted);
+            entity.update(cx, |workspace, cx| workspace.run_install(cx));
+        })
+        .child(label)
         .into_any_element()
 }
 
@@ -3387,6 +3605,20 @@ fn apply_terminal_font(cx: &mut App) {
 
 fn main() {
     env_logger::init();
+
+    // `--uninstall` is what the registry entry points at. It runs the same
+    // removal the about panel does, without opening a window: a user who
+    // uninstalls from Settings → Apps expects the program to disappear, not to
+    // flash a terminal first.
+    if std::env::args().any(|arg| arg == "--uninstall") {
+        match install::uninstall() {
+            Ok(()) => std::process::exit(0),
+            Err(error) => {
+                log::error!("uninstall failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // The first shell is started before the event loop exists. A pseudo console
     // takes about 50 ms to come up, and `App::run` keeps the app borrowed for
