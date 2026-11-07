@@ -32,9 +32,14 @@ jobs:
       # records this workspace's own version, so every release wrote a cache
       # under a key the next run never asked for, and restored nothing.
       #
-      # `add-job-id-key` is off so the check and release jobs share one key.
-      # That is what lets the release job reach this cache at all: see the note
-      # there.
+      # `key` names the build profile, not the job. The check job caches a
+      # debug target directory and the release job a release one; giving them
+      # distinct keys keeps one from restoring the other's and then rebuilding
+      # everything anyway.
+      #
+      # `add-job-id-key` is off because the key above already says which build
+      # this is, and the job id would only make the name longer than the thing
+      # it identifies.
       #
       # Saving is limited to `main` because a cache is scoped to the ref that
       # wrote it. Saving from a tag would create an entry only that tag can
@@ -42,6 +47,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          key: debug
           add-job-id-key: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -67,22 +73,19 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Restores the cache the check job wrote on `main`, and never saves one.
+      # Restores the cache the warm job wrote on `main`.
       #
-      # Caches are scoped to the ref that created them: a release cache saved by
-      # tag v0.2.1 is invisible to v0.2.2, so every release used to miss, rebuild
-      # from nothing, and upload another 650 MB that the next release could not
-      # read either. The one cache visible from every ref is the default
-      # branch's, which is why this job matches its key instead of keeping a
-      # separate one per job.
+      # The key must match that job's exactly, which is why both name it
+      # `release` and both drop the job-id suffix.
       #
-      # What it buys is the registry and the dependency sources; the release
-      # profile still compiles its own artifacts, since the cached target dir
-      # holds a debug build. What it stops is spending the repository's cache
-      # quota on entries that are unreachable by construction.
+      # Nothing is saved here: a cache is scoped to the ref that wrote it, and
+      # this job only runs on tags, so whatever it saved would be invisible to
+      # the next release. The warm workflow is where the release cache is
+      # maintained.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
+          key: release
           add-job-id-key: false
           save-if: false
 

@@ -1,0 +1,49 @@
+name: Warm
+
+# Builds the release profile on the default branch so the release job has a
+# cache to restore.
+#
+# `cargo build --release` compiles every dependency in the release profile, and
+# the check job's debug cache cannot help with any of it. The release job only
+# runs on tags, and a cache written on a tag is invisible to every other tag —
+# so a release cache can only be found again if it lives on the default branch.
+# This workflow puts it there.
+#
+# Path-filtered to the files that decide dependency compilation: a source-only
+# change recompiles the workspace crates on top of the cached dependencies in
+# well under a minute, which is what the release job does too. It runs rarely
+# enough that the extra build costs less than every release paying for it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - crates/*/Cargo.toml
+      - .github/workflows/warm.yml
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-cache:
+    name: Warm the release cache
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The key has to match the release job's exactly, which is why both name
+      # it `release` and both drop the job-id suffix: the job ids differ, and a
+      # suffix would make two keys where one is meant.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          add-job-id-key: false
+
+      - name: Build
+        run: cargo build --release --locked
