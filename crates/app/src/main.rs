@@ -8,6 +8,7 @@ mod terminal;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -30,6 +31,33 @@ use vt::Rgb;
 const SPLIT_HORIZONTAL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>"#;
 const SPLIT_VERTICAL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 12h18"/></svg>"#;
 
+/// The three window controls, drawn at the weight Windows uses for them.
+///
+/// They are drawn rather than taken from the icon set because the set's shapes
+/// are 16 px UI glyphs, and these read as stray marks at that stroke width when
+/// scaled to the 10 px a title bar button wants.
+const WINDOW_MINIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>"#;
+const WINDOW_MAXIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>"#;
+const WINDOW_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
+const WINDOW_RESTORE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="4" y="8" width="12" height="12" rx="1.5"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16"/></svg>"#;
+
+/// The app mark in the title bar: a prompt caret inside a window frame.
+///
+/// Drawn inline because several icons from the bundled set render blank on this
+/// platform, and the one glyph that identifies the app is the worst place to
+/// gamble on that.
+const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></svg>"#;
+
+/// The theme toggle: a sun in light mode, a moon in dark mode.
+const THEME_SUN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
+const THEME_MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>"#;
+
+/// Height of the drawn title bar.
+///
+/// 38 px matches the caption Windows draws for itself, so the tabs sit where
+/// the eye expects a title to be rather than where a toolbar would go.
+const TITLE_BAR_HEIGHT: f32 = 38.0;
+
 /// The 16 ANSI colors the app installs into every terminal.
 const ANSI: [Rgb; 16] = [
     Rgb::new(0x1c, 0x1f, 0x26),
@@ -50,11 +78,39 @@ const ANSI: [Rgb; 16] = [
     Rgb::new(0xe8, 0xec, 0xf2),
 ];
 
+/// The 16 ANSI colors for a light background.
+///
+/// The dark set is tuned for light text on black; on white the same hues read as
+/// washed out and the bright variants vanish entirely, so the light set darkens
+/// each hue and swaps the meaning of the first and last entries.
+const ANSI_LIGHT: [Rgb; 16] = [
+    Rgb::new(0x3b, 0x3f, 0x46),
+    Rgb::new(0xc0, 0x39, 0x3b),
+    Rgb::new(0x2e, 0x7d, 0x32),
+    Rgb::new(0x9a, 0x6b, 0x00),
+    Rgb::new(0x1a, 0x62, 0xb8),
+    Rgb::new(0x82, 0x40, 0xb8),
+    Rgb::new(0x0d, 0x74, 0x84),
+    Rgb::new(0x6b, 0x70, 0x7a),
+    Rgb::new(0x8a, 0x8f, 0x98),
+    Rgb::new(0xe0, 0x4f, 0x52),
+    Rgb::new(0x3d, 0x9a, 0x42),
+    Rgb::new(0xb8, 0x83, 0x00),
+    Rgb::new(0x25, 0x7a, 0xd8),
+    Rgb::new(0x9c, 0x55, 0xd0),
+    Rgb::new(0x14, 0x8c, 0x9e),
+    Rgb::new(0x2b, 0x2f, 0x36),
+];
+
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
 /// followed by the library's own defaults for the rest.
-fn palette() -> [Rgb; 256] {
+fn palette(mode: gpui_kit::component::ThemeMode) -> [Rgb; 256] {
+    let ansi = match mode {
+        gpui_kit::component::ThemeMode::Light => ANSI_LIGHT,
+        _ => ANSI,
+    };
     let mut palette = [Rgb::default(); 256];
-    palette[..ANSI.len()].copy_from_slice(&ANSI);
+    palette[..ansi.len()].copy_from_slice(&ansi);
     palette
 }
 
@@ -97,12 +153,7 @@ impl Pane {
         rows: u16,
         theme: &gpui_kit::component::Theme,
     ) -> Self {
-        session.set_colors(
-            to_rgb(theme.foreground),
-            to_rgb(theme.background),
-            Some(to_rgb(theme.caret)),
-            &palette(),
-        );
+        apply_colors(&mut session, theme);
         Self {
             session,
             command: command.clone(),
@@ -110,6 +161,21 @@ impl Pane {
             dims: Rc::new(Cell::new((cols, rows))),
         }
     }
+
+    /// Repaints the terminal with a different theme's colors.
+    fn retheme(&mut self, theme: &gpui_kit::component::Theme) {
+        apply_colors(&mut self.session, theme);
+    }
+}
+
+/// Installs a theme's foreground, background, caret and palette into a session.
+fn apply_colors(session: &mut Session, theme: &gpui_kit::component::Theme) {
+    session.set_colors(
+        to_rgb(theme.foreground),
+        to_rgb(theme.background),
+        Some(to_rgb(theme.caret)),
+        &palette(theme.mode),
+    );
 }
 
 /// Converts a theme color to the byte triplet the parser stores.
@@ -231,6 +297,9 @@ pub struct Workspace {
     ticking: bool,
     /// The most recent failure, shown in place of the grid.
     error: Option<String>,
+    /// Cell metrics from the last frame, kept so the IME can anchor its
+    /// candidate window without measuring the font again.
+    cached_style: GridStyle,
     focus: FocusHandle,
 }
 
@@ -246,6 +315,7 @@ impl Workspace {
             command: pty_command::default_profile(),
             ticking: false,
             error: None,
+            cached_style: GridStyle::default(),
             focus: cx.focus_handle(),
         }
     }
@@ -361,6 +431,28 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Where the IME candidate window should point.
+    ///
+    /// The anchor is the cursor cell, converted from cells to pixels with the
+    /// same metrics the grid paints with. It is only a hint to the platform, so
+    /// an approximation near the caret is enough: the candidate list follows the
+    /// text being typed, not an exact glyph position.
+    fn ime_anchor(&self) -> Bounds<Pixels> {
+        let Some(pane) = self.active_pane() else {
+            return Bounds::new(point(px(0.0), px(0.0)), size(px(1.0), px(1.0)));
+        };
+        let cursor = pane.session.frame().cursor;
+        let style = self.cached_style;
+
+        Bounds::new(
+            point(
+                style.cell_width * f32::from(cursor.x),
+                style.cell_height * f32::from(cursor.y),
+            ),
+            size(style.cell_width, style.cell_height),
+        )
     }
 
     fn grid_style(&self, window: &Window, cx: &App) -> GridStyle {
@@ -506,6 +598,11 @@ impl Workspace {
                 }
                 "e" => {
                     self.split_active(Axis::Vertical, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "l" => {
+                    self.toggle_theme(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -655,6 +752,93 @@ impl Workspace {
     }
 }
 
+/// Wires the terminal into the platform's text input stack.
+///
+/// A terminal has no text buffer to edit, so most of this trait has nothing to
+/// report. What matters is `replace_text_in_range`: it is the call a Chinese,
+/// Japanese or Korean IME makes when the user commits a composition, and it is
+/// the only way composed text reaches the shell. Without it the IME opens, draws
+/// its candidate window and then drops whatever was chosen.
+impl EntityInputHandler for Workspace {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        None
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(pane) = self.active_pane_mut() {
+            pane.session.write(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        _new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // The composition is still being edited. Nothing is sent until it is
+        // committed, which arrives through `replace_text_in_range`.
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // Anchors the candidate window to the cursor cell rather than the corner
+        // of the screen.
+        Some(self.ime_anchor())
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_started(window, cx);
@@ -666,13 +850,17 @@ impl Render for Workspace {
             self.focus.focus(window, cx);
         }
         let style = self.grid_style(window, cx);
+        self.cached_style = style;
         let theme = gpui_kit::component::Theme::global(cx).clone();
 
         let mut body = div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
+            // The body is deliberately left unpainted. The title bar wants the
+            // Mica backdrop to show through it, and the grid paints its own
+            // opaque background, so a fill here would only hide the material
+            // and make the bar look flat.
             .text_color(theme.foreground)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::handle_key));
@@ -686,6 +874,7 @@ impl Render for Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .bg(theme.background)
                     .text_sm()
                     .text_color(theme.danger)
                     .child(error.clone()),
@@ -766,6 +955,8 @@ impl Workspace {
                         style,
                         focused,
                         dims,
+                        cx.entity(),
+                        self.focus.clone(),
                     )))
                     // Focus is shown inside the pane rather than as a border, so
                     // gaining focus never shifts the text by a pixel.
@@ -884,33 +1075,96 @@ impl Workspace {
             cx.notify();
         }
     }
+
+    /// Switches between the light and dark themes.
+    ///
+    /// The shells have to be repainted as well as the chrome: the terminal's
+    /// default foreground, background and ANSI palette are its own copy, so a
+    /// theme change that only reached the window would leave a black grid under a
+    /// white title bar.
+    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        let next = match gpui_kit::component::Theme::global(cx).mode {
+            gpui_kit::component::ThemeMode::Light => gpui_kit::component::ThemeMode::Dark,
+            _ => gpui_kit::component::ThemeMode::Light,
+        };
+        gpui_kit::component::Theme::change(next, None, cx);
+
+        let theme = gpui_kit::component::Theme::global(cx).clone();
+        for tab in &mut self.tabs {
+            for pane in tab.panes.values_mut() {
+                pane.retheme(&theme);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Closes the window, which ends the app.
+    ///
+    /// Every shell is a child of this process, so dropping the workspace on the
+    /// way out takes the whole tree with it rather than leaving orphaned
+    /// consoles behind.
+    fn close_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        self.tabs.clear();
+        window.remove_window();
+    }
 }
 
 impl Workspace {
-    /// Draws the tab strip and the pane controls.
+    /// Draws the title bar: window drag area, tabs, and window controls.
     ///
-    /// The strip carries three levels of meaning and each gets one signal:
-    /// which tab is open (a filled surface), how many panes it holds (a count
-    /// beside the name), and what else can be done (icon buttons on the trailing
-    /// edge, separated from the tabs by empty space rather than a rule).
-    fn render_tabs(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// This is the whole title bar, not a strip under one. The tabs live where
+    /// the OS caption would be, which is what lets a terminal read as a single
+    /// surface. Two things therefore have to be true at once: the empty areas
+    /// must drag the window, and the buttons must not. The drag area is a
+    /// `WindowControlArea::Drag` hitbox behind the content, and the tabs and
+    /// buttons sit on top of it and swallow their own clicks.
+    fn render_tabs(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let active = self.active_tab;
-
+        let maximized = window.is_maximized();
         let mut strip = div()
             .flex()
             .flex_row()
             .items_center()
-            .h(px(38.0))
-            .pl_2()
-            .pr_1()
+            .h(px(TITLE_BAR_HEIGHT))
+            .relative()
             .gap(px(2.0))
-            // The strip is a shade off the grid so the tabs sit in it rather than
-            // floating on the terminal background. The selected tab then reads as
-            // the one that connects down into the grid.
-            .bg(theme.muted)
+            // The bar is a shade above the grid rather than a transparent pane.
+            // The Windows backend renders through DirectComposition, which
+            // presents an opaque surface, so the Mica backdrop cannot reach the
+            // pixels here no matter how the window is configured. Depth is drawn
+            // instead: one step lighter than the grid, with a hairline highlight
+            // along the top edge where a real pane of glass would catch light.
+            .bg(theme.description_list_label)
             .border_b_1()
-            .border_color(theme.border);
+            .border_color(theme.border.opacity(0.5))
+            // Only the empty areas drag the window. Marking the whole strip as a
+            // drag area would put a caption hitbox over the tabs and buttons and
+            // swallow their clicks, so the fill regions below carry it instead.
+            // A one-pixel highlight along the top edge, where a pane of glass
+            // would catch the light. It is what separates a glass bar from a flat
+            // strip of a slightly different grey.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(1.0))
+                    .bg(gpui_kit::rgba(0xffffff12)),
+            )
+            .child(
+                // The app mark doubles as the leading drag handle, so the empty
+                // corner is not wasted on a pure margin.
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(34.0))
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(icon_data(APP_MARK, theme.muted_foreground)),
+            );
 
         for (index, tab) in self.tabs.iter().enumerate() {
             let selected = index == active;
@@ -923,17 +1177,21 @@ impl Workspace {
             ));
         }
 
-        strip = strip.child(div().w(px(4.0)));
         strip = strip.child(icon_button("new-tab", IconName::Plus, &theme, cx).on_click(
             cx.listener(|workspace, _: &ClickEvent, window, cx| {
                 workspace.new_tab(window, cx);
             }),
         ));
 
-        // The pane actions sit at the far edge: they act on the current tab, not
-        // on the tab list, and grouping them with the tabs would say otherwise.
-        strip
-            .child(div().flex_1())
+        // Pane actions act on the current tab rather than on the tab list, so
+        // they are pushed to the far edge, away from the tabs they do not touch.
+        strip = strip
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
             .child(
                 icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
                     cx.listener(|workspace, _: &ClickEvent, window, cx| {
@@ -948,6 +1206,64 @@ impl Workspace {
                     }),
                 ),
             )
+            // The theme toggle shows the theme it switches to, not the one in
+            // use, which is the convention every app with this control follows.
+            .child(
+                icon_button(
+                    "toggle-theme",
+                    if theme.mode == gpui_kit::component::ThemeMode::Light {
+                        Glyph::Inline(THEME_MOON)
+                    } else {
+                        Glyph::Inline(THEME_SUN)
+                    },
+                    &theme,
+                    cx,
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                    workspace.toggle_theme(cx);
+                })),
+            )
+            .child(div().w(px(6.0)));
+
+        strip
+            .child(window_button(
+                "win-min",
+                Glyph::Inline(WINDOW_MINIMIZE),
+                WindowControlArea::Min,
+                false,
+                &theme,
+                cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    window.minimize_window();
+                    let _ = workspace;
+                    let _ = cx;
+                }),
+            ))
+            .child(window_button(
+                "win-max",
+                if maximized {
+                    Glyph::Inline(WINDOW_RESTORE)
+                } else {
+                    Glyph::Inline(WINDOW_MAXIMIZE)
+                },
+                WindowControlArea::Max,
+                false,
+                &theme,
+                cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    window.zoom_window();
+                    let _ = workspace;
+                    let _ = cx;
+                }),
+            ))
+            .child(window_button(
+                "win-close",
+                Glyph::Inline(WINDOW_CLOSE),
+                WindowControlArea::Close,
+                true,
+                &theme,
+                cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.close_window(window, cx);
+                }),
+            ))
     }
 }
 
@@ -1105,6 +1421,45 @@ fn icon_data(svg: &'static [u8], color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// One of the three caption buttons at the trailing edge of the title bar.
+///
+/// These are deliberately not [`icon_button`]: a caption button fills its whole
+/// 46×38 cell edge to edge and squares off its hover, because that is the shape
+/// Windows users aim at. Rounding it or insetting it makes the target feel
+/// smaller than it is.
+fn window_button(
+    id: &'static str,
+    icon: Glyph,
+    area: WindowControlArea,
+    destructive: bool,
+    theme: &gpui_kit::component::Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let color = theme.muted_foreground;
+    let hover = if destructive {
+        theme.danger
+    } else {
+        theme.accent
+    };
+    let glyph = match icon {
+        Glyph::Asset(path) => icon_element(path, color),
+        Glyph::Inline(svg) => icon_data(svg, color),
+    };
+
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(46.0))
+        .h_full()
+        .window_control_area(area)
+        .cursor_pointer()
+        .hover(move |this| this.bg(hover))
+        .on_click(on_click)
+        .child(glyph)
+}
+
 fn key_input(keystroke: &Keystroke) -> Option<vt::KeyInput<'_>> {
     let key = map_key(&keystroke.key)?;
     let mut mods = 0u16;
@@ -1260,6 +1615,142 @@ fn initial_grid(window: &Window) -> (u16, u16) {
     (cols, rows)
 }
 
+/// The window and taskbar icon, decoded from the bundled PNG.
+///
+/// A missing or unreadable file leaves the window with the default icon rather
+/// than refusing to start, since the icon is decoration and the shell is not.
+fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../../../icon.png");
+    match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+        Ok(image) => Some(std::sync::Arc::new(image.to_rgba8())),
+        Err(error) => {
+            log::warn!("could not decode the window icon: {error}");
+            None
+        }
+    }
+}
+
+/// Applies the Mica material and the dark frame to the window.
+///
+/// Two things have to line up for the glass to read correctly. Mica takes its
+/// tint from the window's light/dark mode, and GPUI decides that from the OS
+/// setting at creation time, so a user on a light desktop running this dark
+/// terminal would get a pale bar over a black grid. And `window_background` is
+/// carried through `WindowOptions` but not applied by the Windows backend, so
+/// the material has to be requested directly.
+#[cfg(target_os = "windows")]
+fn apply_window_material(window: &Window, light: bool) {
+    use raw_window_handle::RawWindowHandle;
+    use std::ffi::c_void;
+
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    /// `DWMSBT_MAINWINDOW`: the Mica backdrop.
+    const DWMSBT_MAINWINDOW: i32 = 2;
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            attribute: u32,
+            value: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    // `Window` has its own `window_handle`, so the trait method is named in full.
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut c_void;
+
+    // SAFETY: the handle comes from the live window and each value outlives its
+    // call. A failure only costs the material or the frame tint, never the app.
+    unsafe {
+        let dark: i32 = if light { 0 } else { 1 };
+        let status = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        if status != 0 {
+            log::debug!("could not force the dark window frame: {status}");
+        }
+
+        let backdrop = DWMSBT_MAINWINDOW;
+        let status = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const i32 as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        if status != 0 {
+            log::debug!("could not apply the Mica backdrop: {status}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_window_material(_window: &Window, _light: bool) {}
+
+/// Whether the desktop is using the light theme.
+///
+/// Read before the event loop starts, because the first shell is spawned there
+/// and needs the palette it will be drawn with. The registry key is the one
+/// Settings writes; a missing key means light, which is the Windows default.
+#[cfg(target_os = "windows")]
+fn system_prefers_light() -> bool {
+    use std::ffi::c_void;
+
+    const HKEY_CURRENT_USER: *mut c_void = 0x8000_0001u32 as isize as *mut c_void;
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            key: *mut c_void,
+            subkey: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+
+    // Both strings are NUL-terminated and live for the whole call.
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0"
+        .encode_utf16()
+        .collect();
+    let value: Vec<u16> = "AppsUseLightTheme\0".encode_utf16().collect();
+
+    let mut data: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: the buffers are sized as declared and outlive the call.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut data as *mut u32 as *mut c_void,
+            &mut size,
+        )
+    };
+
+    status != 0 || data != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_prefers_light() -> bool {
+    true
+}
+
 fn main() {
     env_logger::init();
 
@@ -1270,10 +1761,20 @@ fn main() {
     let command = pty_command::default_profile();
 
     // The pane needs the palette the window will end up with, and the theme is
-    // only installed later in `gpui_kit::init`, so the dark colors are resolved
+    // only installed later in `gpui_kit::init`, so the colors are resolved
     // directly from the theme crate here.
+    let light = system_prefers_light();
     let mut theme = gpui_kit::component::Theme::default();
-    theme.colors = (*gpui_kit::component::ThemeColor::dark()).clone();
+    theme.colors = if light {
+        (*gpui_kit::component::ThemeColor::light()).clone()
+    } else {
+        (*gpui_kit::component::ThemeColor::dark()).clone()
+    };
+    theme.mode = if light {
+        gpui_kit::component::ThemeMode::Light
+    } else {
+        gpui_kit::component::ThemeMode::Dark
+    };
     let (mut first_pane, startup_error) = match Pane::new(&command, 120, 40, &theme) {
         Ok(pane) => (Some(pane), None),
         Err(message) => (None, Some(message)),
@@ -1281,26 +1782,40 @@ fn main() {
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             gpui_kit::init(cx);
 
-            // A terminal is read as light-on-dark: the grid, the shell colors and
-            // the chrome should agree, so the app starts in the dark theme.
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            // The app follows the desktop's light/dark setting, resolved before
+            // the loop started so the first shell could be painted to match.
+            let mode = if light {
+                gpui_kit::component::ThemeMode::Light
+            } else {
+                gpui_kit::component::ThemeMode::Dark
+            };
+            gpui_kit::component::Theme::change(mode, None, cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                     point(px(160.0), px(120.0)),
                     size(px(1100.0), px(720.0)),
                 ))),
+                // The title bar is drawn by the app so the tabs can live in it,
+                // which is what makes a terminal feel like one surface instead of
+                // a window with a strip bolted on top.
                 titlebar: Some(TitlebarOptions {
                     title: Some("myterm".into()),
+                    appears_transparent: true,
                     ..Default::default()
                 }),
+                icon: window_icon(),
                 ..Default::default()
             };
 
             gpui_kit::open_window(options, cx, move |window, cx| {
+                // The window exists now, so the frame can be told what theme it is
+                // drawing for.
+                apply_window_material(window, light);
+
                 let pane = first_pane.take();
                 let error = startup_error.clone();
                 cx.new(|cx| {

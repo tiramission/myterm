@@ -12,6 +12,8 @@ vt = { path = "crates/vt" }
 pty = { path = "crates/pty" }
 log = "0.4"
 env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
 
 [profile.release]
 lto = "thin"

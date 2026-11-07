@@ -237,8 +237,10 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "gpui-kit",
+ "image",
  "log",
  "pty",
+ "raw-window-handle",
  "vt",
 ]
 

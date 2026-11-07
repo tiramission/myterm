@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use gpui_kit::*;
 
+use crate::Workspace;
 use crate::terminal::Frame;
 
 /// How the grid is drawn: geometry plus the colors to use.
@@ -24,6 +25,21 @@ pub struct GridStyle {
     pub selection: Hsla,
 }
 
+impl Default for GridStyle {
+    /// A placeholder used before the first frame measures the font.
+    fn default() -> Self {
+        Self {
+            cell_width: px(8.0),
+            cell_height: px(18.0),
+            font_size: px(14.0),
+            baseline: px(14.0),
+            background: Hsla::default(),
+            cursor: Hsla::default(),
+            selection: Hsla::default(),
+        }
+    }
+}
+
 /// Paints one terminal frame into the bounds it is given.
 pub struct TerminalGrid {
     id: ElementId,
@@ -33,6 +49,10 @@ pub struct TerminalGrid {
     /// Written during prepaint with the cell count the element actually has
     /// room for, so the owner can size the pseudo console to match.
     dims: Rc<Cell<(u16, u16)>>,
+    /// The view that owns this grid, so the element can register itself as the
+    /// platform's text input target while it paints.
+    entity: Entity<Workspace>,
+    focus: FocusHandle,
 }
 
 impl TerminalGrid {
@@ -42,6 +62,8 @@ impl TerminalGrid {
         style: GridStyle,
         focused: bool,
         dims: Rc<Cell<(u16, u16)>>,
+        entity: Entity<Workspace>,
+        focus: FocusHandle,
     ) -> Self {
         Self {
             id: id.into(),
@@ -49,6 +71,8 @@ impl TerminalGrid {
             style,
             focused,
             dims,
+            entity,
+            focus,
         }
     }
 }
@@ -134,6 +158,16 @@ impl Element for TerminalGrid {
         cx: &mut App,
     ) {
         let style = self.style;
+
+        // Registering the grid as the text input target is what lets an IME
+        // reach the shell at all. The platform asks the focused handler for
+        // caret geometry and delivers the committed text back through it.
+        window.handle_input(
+            &self.focus,
+            ElementInputHandler::new(bounds, self.entity.clone()),
+            cx,
+        );
+
         window.paint_quad(fill(bounds, style.background));
 
         let origin = bounds.origin;
