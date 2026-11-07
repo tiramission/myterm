@@ -26,6 +26,9 @@ pub struct GridStyle {
     /// A low-contrast foreground for chrome drawn inside the grid, such as the
     /// scrollbar. Using the caret color for this hid it against a pale grid.
     pub muted: Hsla,
+    /// How strongly a selection tints a cell. The accent has to stay legible
+    /// under text, and the two modes need opposite amounts of it.
+    pub selection_alpha: f32,
     /// Whether the caret is in its visible blink phase. Ignored when the
     /// terminal asked for a steady cursor.
     pub cursor_visible: bool,
@@ -43,6 +46,7 @@ impl Default for GridStyle {
             cursor: Hsla::default(),
             selection: Hsla::default(),
             muted: Hsla::default(),
+            selection_alpha: 0.25,
             cursor_visible: true,
         }
     }
@@ -211,7 +215,7 @@ impl Element for TerminalGrid {
             for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
                 let bg = resolve(cell.style.bg, &palette, default_bg);
                 let bg = if cell.selected {
-                    blend(bg, style.selection, 0.4)
+                    blend(bg, style.selection, style.selection_alpha)
                 } else if cell.style.inverse {
                     resolve(cell.style.fg, &palette, default_fg)
                 } else {

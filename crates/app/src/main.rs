@@ -3,6 +3,7 @@
 
 mod grid_element;
 mod layout;
+mod palette;
 mod pty_command;
 mod terminal;
 
@@ -58,57 +59,10 @@ const THEME_MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 /// the eye expects a title to be rather than where a toolbar would go.
 const TITLE_BAR_HEIGHT: f32 = 38.0;
 
-/// The 16 ANSI colors the app installs into every terminal.
-const ANSI: [Rgb; 16] = [
-    Rgb::new(0x1c, 0x1f, 0x26),
-    Rgb::new(0xe0, 0x5c, 0x5c),
-    Rgb::new(0x7f, 0xb0, 0x6a),
-    Rgb::new(0xd8, 0xb0, 0x5a),
-    Rgb::new(0x6a, 0x9f, 0xd8),
-    Rgb::new(0xb0, 0x7f, 0xd8),
-    Rgb::new(0x5a, 0xb0, 0xb0),
-    Rgb::new(0xc0, 0xc4, 0xcc),
-    Rgb::new(0x50, 0x55, 0x60),
-    Rgb::new(0xf0, 0x7a, 0x7a),
-    Rgb::new(0x9a, 0xc8, 0x82),
-    Rgb::new(0xe8, 0xc4, 0x76),
-    Rgb::new(0x8a, 0xb8, 0xe8),
-    Rgb::new(0xc8, 0x9a, 0xe8),
-    Rgb::new(0x7a, 0xc8, 0xc8),
-    Rgb::new(0xe8, 0xec, 0xf2),
-];
-
-/// The 16 ANSI colors for a light background.
-///
-/// The dark set is tuned for light text on black; on white the same hues read as
-/// washed out and the bright variants vanish entirely, so the light set darkens
-/// each hue and swaps the meaning of the first and last entries.
-const ANSI_LIGHT: [Rgb; 16] = [
-    Rgb::new(0x3b, 0x3f, 0x46),
-    Rgb::new(0xc0, 0x39, 0x3b),
-    Rgb::new(0x2e, 0x7d, 0x32),
-    Rgb::new(0x9a, 0x6b, 0x00),
-    Rgb::new(0x1a, 0x62, 0xb8),
-    Rgb::new(0x82, 0x40, 0xb8),
-    Rgb::new(0x0d, 0x74, 0x84),
-    Rgb::new(0x6b, 0x70, 0x7a),
-    Rgb::new(0x8a, 0x8f, 0x98),
-    Rgb::new(0xe0, 0x4f, 0x52),
-    Rgb::new(0x3d, 0x9a, 0x42),
-    Rgb::new(0xb8, 0x83, 0x00),
-    Rgb::new(0x25, 0x7a, 0xd8),
-    Rgb::new(0x9c, 0x55, 0xd0),
-    Rgb::new(0x14, 0x8c, 0x9e),
-    Rgb::new(0x2b, 0x2f, 0x36),
-];
-
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
-/// followed by the library's own defaults for the rest.
+/// followed by the library's defaults for the rest.
 fn palette(mode: gpui_kit::component::ThemeMode) -> [Rgb; 256] {
-    let ansi = match mode {
-        gpui_kit::component::ThemeMode::Light => ANSI_LIGHT,
-        _ => ANSI,
-    };
+    let ansi = palette::Palette::for_mode(mode).ansi();
     let mut palette = [Rgb::default(); 256];
     palette[..ansi.len()].copy_from_slice(&ansi);
     palette
@@ -569,6 +523,7 @@ impl Workspace {
             cursor: theme.caret,
             selection: theme.selection,
             muted: theme.muted_foreground,
+            selection_alpha: palette::Palette::current(cx).selection_alpha(),
             cursor_visible: true,
         }
     }
@@ -1183,16 +1138,41 @@ impl Render for Workspace {
         body = body.child(self.render_tabs(window, cx));
 
         if let Some(error) = &self.error {
+            // A failure is the one moment the grid is not there, so it gets the
+            // same card treatment as a pane rather than a bare line of red text
+            // floating in an empty window.
             body = body.child(
                 div()
                     .flex_1()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(theme.background)
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child(error.clone()),
+                    .p(px(24.0))
+                    .bg(theme.title_bar)
+                    .child(
+                        div()
+                            .max_w(px(460.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .p(px(20.0))
+                            .rounded(px(12.0))
+                            .bg(theme.background)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.danger)
+                                    .child("无法启动终端"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(error.clone()),
+                            ),
+                    ),
             );
             return body;
         }
@@ -1201,7 +1181,18 @@ impl Render for Workspace {
             return body;
         };
 
-        body.child(self.render_panes(tab, style, cx))
+        // The pane area is chrome, not grid: the space between panes shows this
+        // tone, so the panes read as cards laid on a surface rather than as
+        // rectangles that happen to stop.
+        body.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .p(px(10.0))
+                .bg(theme.title_bar)
+                .child(self.render_panes(tab, style, cx)),
+        )
     }
 }
 
@@ -1251,6 +1242,16 @@ impl Workspace {
                     .relative()
                     .overflow_hidden()
                     .group("pane")
+                    .rounded(px(10.0))
+                    .border_1()
+                    // Only a divided window needs to say which pane has the
+                    // keyboard; a lone pane is focused by definition, and ringing
+                    // it would spend the accent on nothing.
+                    .border_color(if focused && multi {
+                        theme.ring.opacity(0.55)
+                    } else {
+                        theme.border
+                    })
                     .bg(style.background)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1288,19 +1289,6 @@ impl Workspace {
                         cx.entity(),
                         self.focus.clone(),
                     )))
-                    // Focus is shown inside the pane rather than as a border, so
-                    // gaining focus never shifts the text by a pixel.
-                    .when(multi && focused, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .h(px(1.0))
-                                .bg(theme.ring),
-                        )
-                    })
                     // Splitting again from inside the pane, without travelling
                     // back up to the title bar. It only appears once there is
                     // more than one pane: a lone terminal is already the size you
@@ -1449,7 +1437,7 @@ impl Workspace {
             gpui_kit::component::ThemeMode::Light => gpui_kit::component::ThemeMode::Dark,
             _ => gpui_kit::component::ThemeMode::Light,
         };
-        gpui_kit::component::Theme::change(next, None, cx);
+        palette::install(cx, next);
 
         let theme = gpui_kit::component::Theme::global(cx).clone();
         for tab in &mut self.tabs {
@@ -1484,66 +1472,52 @@ impl Workspace {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let active = self.active_tab;
         let maximized = window.is_maximized();
+
+        // The bar is chrome: one step warmer than the grid, flat rather than
+        // glossy, and separated from the panes by a single hairline. The app mark
+        // is the only thing allowed to wear the accent colour at rest, which is
+        // what makes it read as the mark rather than another button.
         let mut strip = div()
             .flex()
             .flex_row()
             .items_center()
             .h(px(TITLE_BAR_HEIGHT))
             .relative()
-            .gap(px(2.0))
-            // The bar is a shade above the grid rather than a transparent pane.
-            // The Windows backend renders through DirectComposition, which
-            // presents an opaque surface, so the Mica backdrop cannot reach the
-            // pixels here no matter how the window is configured. Depth is drawn
-            // instead: one step lighter than the grid, with a hairline highlight
-            // along the top edge where a real pane of glass would catch light.
-            .bg(theme.description_list_label)
+            .pl(px(10.0))
+            .pr(px(6.0))
+            .gap(px(6.0))
+            .bg(theme.title_bar)
             .border_b_1()
-            .border_color(theme.border.opacity(0.5))
-            // Only the empty areas drag the window. Marking the whole strip as a
-            // drag area would put a caption hitbox over the tabs and buttons and
-            // swallow their clicks, so the fill regions below carry it instead.
-            // A one-pixel highlight along the top edge, where a pane of glass
-            // would catch the light. It is what separates a glass bar from a flat
-            // strip of a slightly different grey.
+            .border_color(theme.border)
             .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(1.0))
-                    .bg(gpui_kit::rgba(0xffffff12)),
-            )
-            .child(
-                // The app mark doubles as the leading drag handle, so the empty
-                // corner is not wasted on a pure margin.
                 div()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(34.0))
-                    .h_full()
+                    .size(px(26.0))
                     .window_control_area(WindowControlArea::Drag)
-                    .child(icon_data(APP_MARK, theme.muted_foreground)),
+                    .child(icon_data(APP_MARK, theme.ring)),
             );
 
+        // Tabs sit close together in a group, the way a pill row reads; the
+        // spacing between them is smaller than the spacing to anything else.
+        let mut tabs = div().flex().flex_row().items_center().gap(px(4.0));
         for (index, tab) in self.tabs.iter().enumerate() {
             let selected = index == active;
             let title = tab.title.clone();
             let pane_count = tab.panes.len();
             let closable = self.tabs.len() > 1;
 
-            strip = strip.child(tab_chip(
+            tabs = tabs.child(tab_chip(
                 index, title, pane_count, selected, closable, &theme, cx,
             ));
         }
-
-        strip = strip.child(icon_button("new-tab", IconName::Plus, &theme, cx).on_click(
+        tabs = tabs.child(icon_button("new-tab", IconName::Plus, &theme, cx).on_click(
             cx.listener(|workspace, _: &ClickEvent, window, cx| {
                 workspace.new_tab(window, cx);
             }),
         ));
+        strip = strip.child(tabs);
 
         // Pane actions act on the current tab rather than on the tab list, so
         // they are pushed to the far edge, away from the tabs they do not touch.
@@ -1585,7 +1559,9 @@ impl Workspace {
                     workspace.toggle_theme(cx);
                 })),
             )
-            .child(div().w(px(6.0)));
+            // A gap wide enough that the caption buttons read as window controls
+            // and not as more of the app's own toolbar.
+            .child(div().w(px(10.0)));
 
         strip
             .child(window_button(
@@ -1649,16 +1625,18 @@ fn divider_element(
     let left = first.leaves().last().copied();
     let right = second.leaves().first().copied();
 
-    const GUTTER: f32 = 6.0;
+    const GUTTER: f32 = 10.0;
 
-    let mut grip = div().flex_shrink_0().bg(theme.border);
+    let mut grip = div().flex_shrink_0().bg(theme.title_bar);
 
     grip = match axis {
         Axis::Horizontal => grip.w(px(GUTTER)).h_full().cursor_col_resize(),
         Axis::Vertical => grip.h(px(GUTTER)).w_full().cursor_row_resize(),
     };
 
-    grip.hover(move |this| this.bg(theme.ring))
+    // The gutter is the same tone as the surface behind it, so it is invisible
+    // until the pointer finds it and the accent says it can be moved.
+    grip.hover(move |this| this.bg(theme.ring.opacity(0.3)))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
@@ -1686,13 +1664,13 @@ fn pane_action(
         .flex()
         .items_center()
         .justify_center()
-        .size(px(22.0))
-        .rounded(px(5.0))
-        .bg(theme.title_bar)
+        .size(px(24.0))
+        .rounded(px(999.0))
+        .bg(theme.background)
         .border_1()
-        .border_color(theme.border.opacity(0.7))
+        .border_color(theme.border)
         .cursor_pointer()
-        .hover(move |this| this.bg(theme.accent))
+        .hover(move |this| this.bg(theme.muted))
         .on_click(on_click)
         .child(icon_data(icon, theme.muted_foreground))
 }
@@ -1722,10 +1700,10 @@ fn tab_chip(
         .items_center()
         .gap(px(6.0))
         .h(px(28.0))
-        .pl_3()
-        .pr(if closable { px(4.0) } else { px(12.0) })
-        .rounded(px(7.0))
-        .when(selected, |this| this.bg(theme.secondary_active))
+        .pl(px(11.0))
+        .pr(if closable { px(5.0) } else { px(11.0) })
+        .rounded(px(999.0))
+        .when(selected, |this| this.bg(theme.background))
         .text_sm()
         .text_color(text_color)
         .cursor_pointer()
@@ -1736,7 +1714,7 @@ fn tab_chip(
             if selected {
                 this
             } else {
-                this.bg(theme.accent).text_color(theme.foreground)
+                this.bg(theme.muted).text_color(theme.foreground)
             }
         })
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -1752,9 +1730,14 @@ fn tab_chip(
                 .child(title),
         );
 
+    // The pane count is a quiet badge rather than a number floating after the
+    // name: it is a property of the tab, not part of its title.
     if pane_count > 1 {
         chip = chip.child(
             div()
+                .px(px(6.0))
+                .rounded(px(999.0))
+                .bg(theme.muted)
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .child(pane_count.to_string()),
@@ -1769,10 +1752,10 @@ fn tab_chip(
                 .items_center()
                 .justify_center()
                 .size(px(18.0))
-                .rounded(px(4.0))
+                .rounded(px(999.0))
                 .opacity(0.0)
                 .group_hover("tab", |this| this.opacity(1.0))
-                .hover(|this| this.bg(theme.accent))
+                .hover(|this| this.bg(theme.muted))
                 .child(
                     gpui_kit::svg()
                         .path(IconName::X.path())
@@ -1803,7 +1786,7 @@ impl From<IconName> for Glyph {
     }
 }
 
-/// A square icon-only button, sized for a toolbar row.
+/// A round icon-only button, sized for the title bar.
 ///
 /// Icon-only controls carry no visible label, so the caller must pass an id that
 /// also reads as a name.
@@ -1819,21 +1802,23 @@ fn icon_button(
         Glyph::Inline(svg) => icon_data(svg, color),
     };
 
+    // Round, like every other control in the bar. A square icon button next to
+    // pill-shaped tabs reads as a different design language.
     div()
         .id(id)
         .flex()
         .items_center()
         .justify_center()
-        .size(px(26.0))
-        .rounded(px(6.0))
+        .size(px(28.0))
+        .rounded(px(999.0))
         .cursor_pointer()
-        .hover(move |this| this.bg(theme.accent))
+        .hover(move |this| this.bg(theme.muted))
         .child(glyph)
 }
 
-/// Draws a 24×24 icon by path, at a fixed size.
+/// Draws a 16 px icon by path.
 ///
-/// Kept in one place so every toolbar glyph shares the same optical size.
+/// Kept in one place so every glyph in the bar shares the same optical size.
 fn icon_element(path: SharedString, color: Hsla) -> AnyElement {
     gpui_kit::svg()
         .path(path)
@@ -1853,10 +1838,10 @@ fn icon_data(svg: &'static [u8], color: Hsla) -> AnyElement {
 
 /// One of the three caption buttons at the trailing edge of the title bar.
 ///
-/// These are deliberately not [`icon_button`]: a caption button fills its whole
-/// 46×38 cell edge to edge and squares off its hover, because that is the shape
-/// Windows users aim at. Rounding it or insetting it makes the target feel
-/// smaller than it is.
+/// These keep their own shape: a caption button is a rectangle flush to the
+/// corner in Windows, and rounding it would make the window feel like it is
+/// missing its edge. Only the tint follows the palette — the close button gets a
+/// red wash on hover, the others the same grey the rest of the bar uses.
 fn window_button(
     id: &'static str,
     icon: Glyph,
@@ -1866,11 +1851,14 @@ fn window_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let color = theme.muted_foreground;
-    let hover = if destructive {
-        theme.danger
+    let wash = if destructive {
+        theme.danger.opacity(0.14)
     } else {
-        theme.accent
+        theme.muted
     };
+    // The cross stays the same grey as its neighbours and only the wash turns
+    // red: a permanently red close button draws the eye to the one control the
+    // user is least likely to want.
     let glyph = match icon {
         Glyph::Asset(path) => icon_element(path, color),
         Glyph::Inline(svg) => icon_data(svg, color),
@@ -1881,11 +1869,12 @@ fn window_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(46.0))
-        .h_full()
+        .w(px(40.0))
+        .h(px(28.0))
+        .rounded(px(7.0))
         .window_control_area(area)
         .cursor_pointer()
-        .hover(move |this| this.bg(hover))
+        .hover(move |this| this.bg(wash))
         .on_click(on_click)
         .child(glyph)
 }
@@ -2246,7 +2235,7 @@ fn main() {
             } else {
                 gpui_kit::component::ThemeMode::Dark
             };
-            gpui_kit::component::Theme::change(mode, None, cx);
+            palette::install(cx, mode);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
