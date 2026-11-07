@@ -5,6 +5,7 @@
 //! never has to talk to the parser.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use pty::{Command, Pty};
 use vt::{Cursor, RenderState, Rgb, Row, Scrollbar, Terminal};
@@ -48,6 +49,9 @@ pub struct Session {
     /// Bytes the parser wants to send back to the program. Shared with the
     /// write-pty closure, which the parser calls while `feed` is running.
     pending_write: Arc<Mutex<Vec<u8>>>,
+    /// When the program last wrote anything. What the sidebar shows as
+    /// "working" is simply output that arrived a moment ago.
+    last_output: Instant,
 }
 
 impl Session {
@@ -94,6 +98,7 @@ impl Session {
             size: (cols, rows),
             exit: None,
             pending_write,
+            last_output: Instant::now(),
         };
         session.capture();
         Ok(session)
@@ -106,6 +111,7 @@ impl Session {
 
         if !bytes.is_empty() {
             self.term.feed(&bytes);
+            self.last_output = Instant::now();
             changed = true;
         }
 
@@ -211,6 +217,11 @@ impl Session {
     /// The selected text, if anything is selected.
     pub fn selected_text(&mut self) -> Option<String> {
         self.term.selected_text()
+    }
+
+    /// How long ago the program last wrote.
+    pub fn idle_for(&self) -> Duration {
+        self.last_output.elapsed()
     }
 
     pub fn exit_code(&self) -> Option<i32> {

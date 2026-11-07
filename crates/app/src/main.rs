@@ -41,6 +41,10 @@ const WINDOW_MINIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewB
 const WINDOW_MAXIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>"#;
 
 /// Zoom a pane to fill the card; and the reverse.
+
+/// The sidebar toggle: a column beside a page.
+const SIDEBAR_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/></svg>"#;
+
 const ZOOM_IN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9"/><path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9"/><path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15"/><path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></svg>"#;
 const ZOOM_OUT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4"/><path d="M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4"/><path d="M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20"/><path d="M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/></svg>"#;
 
@@ -69,6 +73,9 @@ const PANE_HEADER_HEIGHT: f32 = 32.0;
 
 /// Corner radius of a pane card.
 const PANE_RADIUS: f32 = 12.0;
+
+/// Width of the pane list.
+const SIDEBAR_WIDTH: f32 = 214.0;
 
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
 /// followed by the library's defaults for the rest.
@@ -305,6 +312,9 @@ pub struct Workspace {
     /// A pane shown on its own, filling the window. The rest of the split stays
     /// as it was and comes back when the zoom is released.
     zoomed: Option<u64>,
+    /// What the user asked for. `None` means "decide by how much there is to
+    /// list", which is what keeps a single terminal free of a list of one.
+    sidebar_choice: Option<bool>,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -330,6 +340,7 @@ impl Workspace {
             drag_anchor: None,
             selection: false,
             zoomed: None,
+            sidebar_choice: None,
             resize_drag: None,
             focus: cx.focus_handle(),
         }
@@ -653,6 +664,11 @@ impl Workspace {
                 }
                 "l" => {
                     self.toggle_theme(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "b" => {
+                    self.toggle_sidebar(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1181,11 +1197,18 @@ impl Render for Workspace {
 
         body = body.child(self.render_tabs(window, cx));
 
+        // The list and the panes sit side by side under the bar, so the window
+        // still has exactly one title row.
+        let mut content = div().flex_1().min_h_0().flex().flex_row();
+        if self.sidebar_shown() {
+            content = content.child(self.render_sidebar(&theme, cx));
+        }
+
         if let Some(error) = &self.error {
             // A failure is the one moment the grid is not there, so it gets the
             // same card treatment as a pane rather than a bare line of red text
             // floating in an empty window.
-            body = body.child(
+            content = content.child(
                 div()
                     .flex_1()
                     .flex()
@@ -1218,17 +1241,17 @@ impl Render for Workspace {
                             ),
                     ),
             );
-            return body;
+            return body.child(content);
         }
 
         let Some(tab) = self.active_tab() else {
-            return body;
+            return body.child(content);
         };
 
         // The pane area is chrome, not grid: the space between panes shows this
         // tone, so the panes read as cards laid on a surface rather than as
         // rectangles that happen to stop.
-        body.child(
+        content = content.child(
             div()
                 .flex_1()
                 .min_h_0()
@@ -1236,7 +1259,9 @@ impl Render for Workspace {
                 .p(px(10.0))
                 .bg(theme.title_bar)
                 .child(self.render_panes(tab, style, cx)),
-        )
+        );
+
+        body.child(content)
     }
 }
 
@@ -1514,6 +1539,168 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// Whether the sidebar is on screen.
+    ///
+    /// With no explicit choice it follows how much there is to list: a list of
+    /// one is not worth a column, and a window full of panes is worth one even
+    /// if nobody asked. An explicit toggle wins either way.
+    fn sidebar_shown(&self) -> bool {
+        let panes: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+        self.sidebar_choice.unwrap_or(panes > 1)
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_choice = Some(!self.sidebar_shown());
+        cx.notify();
+    }
+
+    /// Every tab and pane, with enough state to jump to one.
+    ///
+    /// This is the whole model the sidebar reads: it is rebuilt from the
+    /// workspace each frame rather than kept in step with it, so there is
+    /// nothing to keep in sync.
+    fn render_sidebar(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut list = div().flex().flex_col().gap(px(1.0)).px(px(6.0)).pb(px(8.0));
+
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let current_tab = tab_index == self.active_tab;
+
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(26.0))
+                    .px(px(7.0))
+                    .mt(px(4.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if current_tab {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(tab.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(tab.panes.len().to_string()),
+                    ),
+            );
+
+            for (id, pane) in &tab.panes {
+                let id = *id;
+                let selected = current_tab && id == tab.active;
+                let status = pane_status(pane);
+                // Captured by the listeners below, which outlive this borrow.
+                let hover_bg = theme.muted;
+                let selected_bg = theme.background;
+
+                list = list.child(
+                    div()
+                        .id(("side-pane", id))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(7.0))
+                        .h(px(28.0))
+                        .px(px(8.0))
+                        .rounded(px(7.0))
+                        .cursor_pointer()
+                        .when(selected, |this| this.bg(selected_bg))
+                        .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
+                        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.active_tab = tab_index;
+                            workspace.focus_pane(id, cx);
+                        }))
+                        .child(div().size(px(6.0)).rounded(px(999.0)).bg(match status {
+                            PaneStatus::Working => theme.ring,
+                            PaneStatus::Idle => theme.border,
+                            PaneStatus::Exited => theme.danger,
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(12.0))
+                                .text_color(if selected {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(pane_label(pane)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted_foreground.opacity(0.85))
+                                .child(status.label()),
+                        ),
+                );
+            }
+        }
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(TITLE_BAR_HEIGHT))
+            .pl(px(13.0))
+            .pr(px(6.0))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("窗格"),
+            )
+            .child(
+                icon_button("side-new", IconName::Plus, theme, cx).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, window, cx| {
+                        workspace.new_tab(window, cx);
+                    },
+                )),
+            );
+
+        div()
+            .w(px(SIDEBAR_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(theme.title_bar)
+            .border_r_1()
+            .border_color(theme.border)
+            .child(header)
+            .child(
+                div()
+                    .id("side-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
+            )
+            .into_any_element()
+    }
+
     /// Draws the title bar: window drag area, tabs, and window controls.
     ///
     /// This is the whole title bar, not a strip under one. The tabs live where
@@ -1581,6 +1768,15 @@ impl Workspace {
                     .flex_1()
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
+            )
+            // The list comes before the pane actions: it is a place to go, not
+            // an action on the current pane.
+            .child(
+                icon_button("toggle-sidebar", Glyph::Inline(SIDEBAR_ICON), &theme, cx)
+                    .when(self.sidebar_shown(), |this| this.bg(theme.muted))
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                        workspace.toggle_sidebar(cx);
+                    })),
             )
             .child(
                 icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
@@ -2163,6 +2359,36 @@ fn tab_title(pane: &Pane) -> Option<String> {
         None
     } else {
         Some(name.to_owned())
+    }
+}
+
+/// What a pane is doing, as far as the sidebar can tell.
+///
+/// There is no agent detection here: a pane is working when it wrote something
+/// in the last moment, idle when it has not, and exited when the process is
+/// gone. That covers a shell, a build and a test watcher without asking any of
+/// them to cooperate.
+enum PaneStatus {
+    Working,
+    Idle,
+    Exited,
+}
+
+impl PaneStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working => "输出中",
+            Self::Idle => "空闲",
+            Self::Exited => "已退出",
+        }
+    }
+}
+
+fn pane_status(pane: &Pane) -> PaneStatus {
+    match pane.session.exit_code() {
+        Some(_) => PaneStatus::Exited,
+        None if pane.session.idle_for() < Duration::from_millis(1200) => PaneStatus::Working,
+        None => PaneStatus::Idle,
     }
 }
 
