@@ -1307,13 +1307,13 @@ impl Workspace {
         let active = tab.active;
 
         // A zoomed pane covers the split rather than replacing it, so releasing
-        // the zoom puts every pane back exactly where it was.
-        if let Some(id) = self.zoomed {
-            if tab.panes.contains_key(&id) {
-                return self
-                    .render_node(&Layout::Leaf(id), tab, style, &theme, multi, id, cx)
-                    .into_any_element();
-            }
+        // the zoom puts every pane back exactly where it was. Which pane that is
+        // comes from the same place the sidebar reads it.
+        let active = self.effective_active().map(|(_, id)| id).unwrap_or(active);
+        if self.zoomed.is_some_and(|id| tab.panes.contains_key(&id)) {
+            return self
+                .render_node(&Layout::Leaf(active), tab, style, &theme, multi, active, cx)
+                .into_any_element();
         }
 
         self.render_node(&tab.layout, tab, style, &theme, multi, active, cx)
@@ -1614,6 +1614,21 @@ impl Workspace {
         }
     }
 
+    /// The pane the keyboard is actually in.
+    ///
+    /// A zoomed pane is the one on screen whatever `active` says, so both the
+    /// grid and the sidebar read this instead of deciding for themselves. Two
+    /// derivations of "the current pane" is exactly how the sidebar ends up
+    /// highlighting a pane the window is not showing.
+    fn effective_active(&self) -> Option<(usize, u64)> {
+        let tab = self.active_tab()?;
+        let id = match self.zoomed {
+            Some(zoomed) if tab.panes.contains_key(&zoomed) => zoomed,
+            _ => tab.active,
+        };
+        Some((self.active_tab, id))
+    }
+
     /// Whether the sidebar is on screen.
     ///
     /// With no explicit choice it follows how much there is to list: a list of
@@ -1640,6 +1655,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut list = div().flex().flex_col().gap(px(1.0)).px(px(6.0)).pb(px(8.0));
+        // One answer for "which pane is current", shared with the grid.
+        let current = self.effective_active();
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
@@ -1679,7 +1696,7 @@ impl Workspace {
 
             for (id, pane) in &tab.panes {
                 let id = *id;
-                let selected = current_tab && id == tab.active;
+                let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
                 // Captured by the listeners below, which outlive this borrow.
                 let hover_bg = theme.muted;
@@ -1818,12 +1835,12 @@ impl Workspace {
             .items_center()
             .gap(px(4.0))
             .py(px(10.0));
+        let current = self.effective_active();
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
-            let current_tab = tab_index == self.active_tab;
             for (id, pane) in &tab.panes {
                 let id = *id;
-                let selected = current_tab && id == tab.active;
+                let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
                 let selected_bg = theme.background;
                 let hover_bg = theme.muted;
