@@ -63,6 +63,12 @@ const TAB_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 /// gamble on that.
 const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></svg>"#;
 
+/// The about control. A circled `i` is what every platform uses for "what is
+/// this program", and it is deliberately not the app mark: that glyph already
+/// sits at the leading edge as the window's identity, and using it twice in one
+/// bar leaves the second copy with no reason to look clickable.
+const INFO_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></svg>"#;
+
 /// The theme toggle: a sun in light mode, a moon in dark mode.
 const THEME_SUN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
 const THEME_MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>"#;
@@ -2278,16 +2284,15 @@ impl Workspace {
                 // Copied out before the closure below captures `theme`.
                 let card_theme = theme.clone();
                 let mark = theme.muted_foreground;
-                // The trigger is the app mark, not the number. A version string
-                // sitting in the bar reads as a status readout and invites the
-                // eye to compare it every time; the build number is something to
-                // look up, not something to monitor.
+                // The trigger is a circled `i`, not the app mark: the mark is
+                // already at the leading edge of this same bar, and a second
+                // copy reads as decoration rather than as a control.
                 let trigger = Button::new("about")
                     .text()
                     .compact()
                     .tooltip("关于 myterm")
                     .accessibility_label("关于 myterm")
-                    .child(icon_data(APP_MARK, 16.0, mark));
+                    .child(icon_data(INFO_ICON, 16.0, mark));
 
                 gpui_kit::component::popover::Popover::new("about-popover")
                     .anchor(Anchor::TopRight)
