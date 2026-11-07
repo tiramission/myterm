@@ -343,6 +343,10 @@ pub struct Workspace {
     update: Option<Result<update::Release, String>>,
     /// Set while a download is in flight, so the button cannot be pressed twice.
     updating: bool,
+    /// Download progress as bytes received and the total when known.
+    update_progress: Option<(u64, Option<u64>)>,
+    /// Progress reports from the background download, drained by the ticker.
+    update_rx: Option<std::sync::mpsc::Receiver<(u64, Option<u64>)>>,
     /// What the user asked for. `None` means "decide by how much there is to
     /// list", which is what keeps a single terminal free of a list of one.
     sidebar_choice: Option<bool>,
@@ -382,6 +386,8 @@ impl Workspace {
             sidebar_choice: None,
             update: None,
             updating: false,
+            update_progress: None,
+            update_rx: None,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             tab_claimed: false,
@@ -481,7 +487,14 @@ impl Workspace {
                 // separate update. Calling `notify` inside the first one re-enters
                 // the app and drops the frame.
                 //
-                let changed = match this.update(cx, |workspace, _| workspace.poll()) {
+                // The download reports progress on its own thread; taking only
+                // the latest value per tick keeps the badge current without
+                // repainting once per chunk.
+                let changed = match this.update(cx, |workspace, _| {
+                    let polled = workspace.poll();
+                    let drained = workspace.drain_update_progress();
+                    polled || drained
+                }) {
                     Ok(changed) => changed,
                     Err(_) => break,
                 };
@@ -1712,14 +1725,63 @@ impl Workspace {
         Some((self.active_tab, id))
     }
 
+    /// Takes the newest download progress report, if any arrived.
+    ///
+    /// Returns whether anything changed. Only the last value in the queue
+    /// matters: intermediate byte counts are already stale by the time a frame
+    /// is drawn, and applying them all would make the badge flicker through
+    /// numbers nobody can read.
+    fn drain_update_progress(&mut self) -> bool {
+        let Some(rx) = &self.update_rx else {
+            return false;
+        };
+
+        let mut latest = None;
+        while let Ok(report) = rx.try_recv() {
+            latest = Some(report);
+        }
+
+        match latest {
+            Some(progress) => {
+                self.update_progress = Some(progress);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The badge text while a download is running.
+    ///
+    /// Shows a percentage when the server declared a length, and a byte count
+    /// when it did not — a bar that cannot compute a fraction still has to show
+    /// that something is moving.
+    fn download_label(&self) -> String {
+        let Some((written, total)) = self.update_progress else {
+            return "正在更新…".to_owned();
+        };
+
+        match total.filter(|total| *total > 0) {
+            Some(total) => {
+                let percent = (written.saturating_mul(100) / total).min(100);
+                format!("正在更新 {percent}%")
+            }
+            // No declared length, so there is no fraction to show. A byte count
+            // still says the download is moving, but not before the first chunk
+            // lands: "0 MB" is a number that reads as a stall.
+            None if written == 0 => "正在更新…".to_owned(),
+            None => format!("正在更新 {}", update::megabytes(written)),
+        }
+    }
+
     /// What the update badge should say, if anything.
     ///
     /// `None` hides it: no check yet, no newer release, or a check that failed.
     /// The second field says whether it can be acted on.
     fn update_badge(&self) -> Option<(String, bool)> {
         if self.updating {
-            return Some(("正在更新…".to_owned(), false));
+            return Some((self.download_label(), false));
         }
+
         match &self.update {
             Some(Ok(release)) => Some((format!("更新到 {}", release.version), true)),
             // A failure stays clickable so the download can be retried without
@@ -1782,16 +1844,32 @@ impl Workspace {
             return;
         };
         self.updating = true;
+        self.update_progress = Some((0, None));
         cx.notify();
+
+        // The download runs on a background thread, so its progress has to come
+        // back through the UI thread. The channel carries one update per chunk;
+        // the loop below drains it on every frame rather than repainting per
+        // chunk, which would ask for thousands of frames for one file.
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, Option<u64>)>();
+        self.update_rx = Some(rx);
 
         cx.spawn(async move |this, cx| {
             let staged = cx
                 .background_executor()
-                .spawn(async move { update::download(&release) })
+                .spawn(async move {
+                    update::download(&release, |written, total| {
+                        // A closed receiver means the window is gone; the
+                        // download is still worth finishing, so the error is
+                        // deliberately ignored.
+                        let _ = tx.send((written, total));
+                    })
+                })
                 .await;
 
             let _ = this.update(cx, |workspace, cx| {
                 workspace.updating = false;
+                workspace.update_progress = None;
                 match staged {
                     Ok(path) => {
                         // The swap needs this process gone, so the app quits as
@@ -2101,7 +2179,10 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(26.0))
+                    // The same box as an icon button, so the mark and the
+                    // controls beside it share one centre line instead of the
+                    // mark sitting two pixels off it.
+                    .size(px(28.0))
                     .window_control_area(WindowControlArea::Drag)
                     .child(icon_data(APP_MARK, 16.0, theme.ring)),
             )
@@ -2115,7 +2196,9 @@ impl Workspace {
                     .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                         workspace.toggle_sidebar(cx);
                     })),
-            );
+            )
+            // The mark and the list belong to the window; the tabs are the work.
+            .child(bar_divider(&theme));
 
         // Tabs sit close together in a group, the way a pill row reads; the
         // spacing between them is smaller than the spacing to anything else.
@@ -2148,6 +2231,7 @@ impl Workspace {
             )
             // The list comes before the pane actions: it is a place to go, not
             // an action on the current pane.
+            //
             // Once there is more than one pane, every pane header carries its own
             // split, zoom and close controls, so the title bar's copies are a
             // second set of the same buttons pointing at a pane the user did not
@@ -2155,20 +2239,33 @@ impl Workspace {
             // a single pane has no header to hold them.
             .when(!multi, |this| {
                 this.child(
-                    icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
-                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                            workspace.split_active(Axis::Horizontal, window, cx);
-                        }),
-                    ),
-                )
-                .child(
-                    icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx).on_click(
-                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                            workspace.split_active(Axis::Vertical, window, cx);
-                        }),
-                    ),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        // Tighter than the bar's own gap: these two are one
+                        // control in two parts, and the pair should read that
+                        // way next to the tab strip's looser spacing.
+                        .gap(px(2.0))
+                        .child(
+                            icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx)
+                                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                                    workspace.split_active(Axis::Horizontal, window, cx);
+                                })),
+                        )
+                        .child(
+                            icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx)
+                                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                                    workspace.split_active(Axis::Vertical, window, cx);
+                                })),
+                        ),
                 )
             })
+            // The app's own controls: the build, the theme, and any pending
+            // update. A hairline separates them from the pane actions, because
+            // the two sets answer different questions and an even gap would say
+            // they belong together.
+            .child(bar_divider(&theme))
             // The version is a control rather than a line of text: it is the
             // one place that answers "which build is this", which matters when
             // the app updates itself and two machines can be a version apart.
@@ -2708,7 +2805,10 @@ fn tab_chip(
         .h(px(28.0))
         .pl(px(11.0))
         .pr(if closable { px(5.0) } else { px(11.0) })
-        .rounded(px(999.0))
+        // A tab is a card, not a pill. The fully rounded ends read as a
+        // button beside the bar's round icon controls, and the tab is a
+        // container for a name rather than a thing to press.
+        .rounded(px(8.0))
         .when(selected, |this| this.bg(theme.background))
         .text_sm()
         .text_color(text_color)
@@ -2797,6 +2897,22 @@ impl From<IconName> for Glyph {
 ///
 /// Icon-only controls carry no visible label, so the caller must pass an id that
 /// also reads as a name.
+/// A hairline between groups of controls in the title bar.
+///
+/// Groups are separated by space and a rule rather than by a wider gap alone:
+/// a gap says "not adjacent", a rule says "a different set", and the bar has
+/// three sets in it (tabs, pane actions, app controls).
+fn bar_divider(theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    div()
+        .w(px(1.0))
+        .h(px(16.0))
+        .mx(px(4.0))
+        // The bar's own hairline is the pane edge, too faint to read as a
+        // separator between controls; this is the same ink at a strength that
+        // survives being one pixel wide.
+        .bg(theme.muted_foreground.opacity(0.22))
+}
+
 fn icon_button(
     id: &'static str,
     icon: impl Into<Glyph>,

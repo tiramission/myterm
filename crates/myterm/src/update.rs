@@ -16,6 +16,11 @@ const REPO: &str = "tiramission/myterm";
 /// The asset name a Windows release carries.
 const ASSET: &str = "myterm.exe";
 
+/// The largest download to accept. A ceiling is required because the body
+/// reader will otherwise stream until the connection closes, and this is the
+/// binary that replaces the running program.
+const MAX_DOWNLOAD: u64 = 256 * 1024 * 1024;
+
 /// The version this build reports.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -140,7 +145,15 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// locked on Windows, so the swap has to happen after this process exits. The
 /// returned path is the staged file, and it is the caller's job to arrange the
 /// replacement.
-pub fn download(release: &Release) -> Result<PathBuf, UpdateError> {
+///
+/// `progress` is called as bytes arrive, with how many have been written and
+/// the total when the server declared one. A 22 MB download over a slow link
+/// takes long enough that a badge saying only "正在更新…" looks stuck, and the
+/// difference between slow and hung is the one thing the user needs to know.
+pub fn download(
+    release: &Release,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<PathBuf, UpdateError> {
     let exe = std::env::current_exe()
         .map_err(|error| UpdateError::Network(format!("current executable: {error}")))?;
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
@@ -151,27 +164,53 @@ pub fn download(release: &Release) -> Result<PathBuf, UpdateError> {
         .call()
         .map_err(|error| UpdateError::Network(error.to_string()))?;
 
-    // `read_to_end` on the body reader never returns here: the reader does not
-    // know where the body stops. `read_to_vec` does, but its default ceiling is
-    // ten megabytes and this binary is larger, so the limit is raised explicitly
-    // rather than left to fail once the app grows.
-    let bytes = response
+    // The declared length is advisory: it can be absent for a chunked response
+    // and wrong for a compressed one, so the badge falls back to counting bytes
+    // rather than dividing by a number it cannot trust.
+    let total = response.body().content_length();
+
+    let mut file = std::fs::File::create(&staged)
+        .map_err(|error| UpdateError::Network(format!("create staged file: {error}")))?;
+
+    // Streamed rather than read into memory: the buffer is one read at a time,
+    // and the progress callback needs to fire as the bytes land instead of
+    // after the whole file is in hand.
+    let mut reader = response
         .body_mut()
         .with_config()
-        .limit(256 * 1024 * 1024)
-        .read_to_vec()
-        .map_err(|error| UpdateError::Network(error.to_string()))?;
+        .limit(MAX_DOWNLOAD)
+        .reader();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut written = 0u64;
+    // The first bytes decide whether this is a program at all, so they are kept
+    // rather than re-read from disk afterwards.
+    let mut head = Vec::with_capacity(2);
+
+    loop {
+        let read = std::io::Read::read(&mut reader, &mut buffer)
+            .map_err(|error| UpdateError::Network(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        if head.len() < 2 {
+            head.extend_from_slice(&buffer[..read.min(2 - head.len())]);
+        }
+        std::io::Write::write_all(&mut file, &buffer[..read])
+            .map_err(|error| UpdateError::Network(format!("write staged file: {error}")))?;
+        written += read as u64;
+        progress(written, total);
+    }
+
+    drop(file);
 
     // A redirect to an HTML error page would otherwise be saved as if it were a
     // program, and the swap would leave the user with something that cannot start.
-    if !bytes.starts_with(b"MZ") {
+    if !head.starts_with(b"MZ") {
+        let _ = std::fs::remove_file(&staged);
         return Err(UpdateError::Malformed(
             "the download is not a Windows executable".to_owned(),
         ));
     }
-
-    std::fs::write(&staged, &bytes)
-        .map_err(|error| UpdateError::Network(format!("writing {}: {error}", staged.display())))?;
 
     Ok(staged)
 }
@@ -242,5 +281,24 @@ mod tests {
         // Refusing to update is the safe direction.
         assert!(!is_newer("nightly", "0.1.0"));
         assert!(!is_newer("1.0.0-beta.2", "0.1.0"));
+    }
+}
+
+/// Bytes as whole megabytes, for a badge with no room for decimals.
+pub fn megabytes(bytes: u64) -> String {
+    format!("{} MB", bytes / (1024 * 1024))
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::megabytes;
+
+    #[test]
+    fn megabytes_rounds_down_to_whole_units() {
+        // The badge is read at a glance; a decimal would change too fast to
+        // follow and the exact byte count is not what the user is asking.
+        assert_eq!(megabytes(0), "0 MB");
+        assert_eq!(megabytes(1024 * 1024), "1 MB");
+        assert_eq!(megabytes(1024 * 1024 * 22 + 700_000), "22 MB");
     }
 }

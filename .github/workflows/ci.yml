@@ -32,18 +32,12 @@ jobs:
       # records this workspace's own version, so every release wrote a cache
       # under a key the next run never asked for, and restored nothing.
       #
-      # `key` names the build profile, not the job. The check job caches a
-      # debug target directory and the release job a release one; giving them
-      # distinct keys keeps one from restoring the other's and then rebuilding
-      # everything anyway.
-      #
-      # `add-job-id-key` is off because the key above already says which build
-      # this is, and the job id would only make the name longer than the thing
-      # it identifies.
+      # `key: debug` says which build this cache holds. The release job keeps no
+      # cache at all, so this is the only profile cached in the repository.
       #
       # Saving is limited to `main` because a cache is scoped to the ref that
-      # wrote it. Saving from a tag would create an entry only that tag can
-      # read, which is how this repository accumulated a copy per release.
+      # wrote it: saving on a tag would create an entry only that tag can read,
+      # which is how this repository once accumulated a copy per release.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -73,22 +67,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Restores the cache the warm job wrote on `main`.
-      #
-      # The key must match that job's exactly, which is why both name it
-      # `release` and both drop the job-id suffix.
-      #
-      # Nothing is saved here: a cache is scoped to the ref that wrote it, and
-      # this job only runs on tags, so whatever it saved would be invisible to
-      # the next release. The warm workflow is where the release cache is
-      # maintained.
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release
-          add-job-id-key: false
-          save-if: false
-
+      # No cache. The release profile cannot reuse the check job's debug
+      # artifacts, and a cache written on a tag is invisible to every other tag,
+      # so a release cache could only ever be maintained by a separate job on
+      # the default branch — which is more machinery than one build per release
+      # is worth. ripgrep, helix and uv all ship releases without caching for
+      # the same reason.
       - name: Build
         run: cargo build --release --locked
 

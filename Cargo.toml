@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/myterm", "crates/pty", "crates/vt", "crates/vt-sys"]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 publish = false
 
