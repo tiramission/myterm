@@ -244,6 +244,19 @@ impl Terminal {
             terminal.install_write_pty(cb)?;
         }
 
+        // A blinking caret is the convention for an interactive prompt, and
+        // libghostty defaults to a steady one. This only sets the default that
+        // `CSI 0 q` restores: a program that asks for a specific style still
+        // gets exactly what it asked for.
+        let blink = true;
+        unsafe {
+            let _ = sys::ghostty_terminal_set(
+                terminal.raw,
+                sys::GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK,
+                &blink as *const _ as *const c_void,
+            );
+        }
+
         Ok(terminal)
     }
 
@@ -436,6 +449,72 @@ impl Terminal {
         }
 
         text
+    }
+
+    /// Replaces the selection with the given viewport-space cells.
+    ///
+    /// Coordinates are viewport-relative: x is a column, y a row down from the
+    /// top of the visible screen. `grid_ref` turns each end into a reference the
+    /// parser can hold, so the selection survives scrolling and reflow.
+    pub fn set_selection(&mut self, start: (u16, u32), end: (u16, u32)) -> bool {
+        let Some(start) = self.grid_ref(start.0, start.1) else {
+            return false;
+        };
+        let Some(end) = self.grid_ref(end.0, end.1) else {
+            return false;
+        };
+
+        let selection = sys::GhosttySelection {
+            start,
+            end,
+            rectangle: false,
+        };
+
+        unsafe {
+            check(sys::ghostty_terminal_set(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_OPT_SELECTION,
+                &selection as *const _ as *const c_void,
+            ))
+            .is_ok()
+        }
+    }
+
+    /// Drops the selection.
+    pub fn clear_selection(&mut self) {
+        unsafe {
+            let _ = sys::ghostty_terminal_set(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_OPT_SELECTION,
+                std::ptr::null(),
+            );
+        }
+    }
+
+    /// The current selection as plain text.
+    pub fn selected_text(&mut self) -> Option<String> {
+        self.format_selection()
+    }
+
+    /// Resolves a viewport cell into a grid reference.
+    fn grid_ref(&self, x: u16, y: u32) -> Option<sys::GhosttyGridRef> {
+        let point = sys::GhosttyPoint {
+            tag: sys::GHOSTTY_POINT_TAG_VIEWPORT,
+            value: sys::GhosttyPointValue {
+                coordinate: sys::GhosttyPointCoordinate { x, y },
+            },
+        };
+
+        let mut out = sys::GhosttyGridRef {
+            node: std::ptr::null_mut(),
+            x: 0,
+            y: 0,
+        };
+
+        unsafe {
+            check(sys::ghostty_terminal_grid_ref(self.raw, point, &mut out)).ok()?;
+        }
+        Some(out)
     }
 
     /// Formats the current selection as plain text.

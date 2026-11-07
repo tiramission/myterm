@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
@@ -125,9 +125,10 @@ struct Pane {
     /// Filled by the grid element during prepaint with the cells that fit.
     dims: Rc<Cell<(u16, u16)>>,
     /// Where the grid landed in window coordinates, filled by the same prepaint.
-    /// The IME needs window coordinates to place its candidate window, and the
-    /// grid is the only thing that knows where it was drawn.
-    origin: Rc<Cell<Point<Pixels>>>,
+    /// The IME needs it to place its candidate window, the mouse needs it to
+    /// resolve a pointer to a cell, and a split drag needs the extent to turn a
+    /// pointer position into a ratio.
+    bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl Pane {
@@ -163,7 +164,10 @@ impl Pane {
             command: command.clone(),
             grid: (cols, rows),
             dims: Rc::new(Cell::new((cols, rows))),
-            origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
+            bounds: Rc::new(Cell::new(Bounds::new(
+                point(px(0.0), px(0.0)),
+                size(px(0.0), px(0.0)),
+            ))),
         }
     }
 
@@ -293,7 +297,21 @@ impl Tab {
     }
 }
 
-/// The window's content.
+/// A split being dragged.
+struct ResizeDrag {
+    /// The panes on either side of the divider, in visual order.
+    left: u64,
+    right: u64,
+    axis: Axis,
+    /// Where the divider started, in window coordinates along the drag axis.
+    start: f32,
+    /// How far the first half spans at the start of the drag.
+    span: f32,
+    /// The first half's share when the drag began.
+    ratio: f32,
+}
+
+/// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -308,6 +326,20 @@ pub struct Workspace {
     /// The caret cell the IME was last told about, so a move can push a fresh
     /// position instead of waiting for the next composition to start.
     ime_cursor: (u16, u16),
+    /// When the caret last moved. Blinking restarts from here, so the cursor is
+    /// solid while typing instead of disappearing mid-keystroke.
+    caret_moved: Instant,
+    /// Whether the caret is in its visible half of the blink cycle.
+    caret_visible: bool,
+    /// Where a mouse drag started, as a pane id and a viewport cell. Present
+    /// only while the button is held.
+    drag_anchor: Option<(u64, (u16, u32))>,
+    /// Whether the active pane currently has a selection, kept in step with the
+    /// drag so copying does not have to scan every cell of the frame.
+    selection: bool,
+    /// The split being dragged, as the two panes on either side plus the span
+    /// the divider travels across. Present only while the divider is held.
+    resize_drag: Option<ResizeDrag>,
     focus: FocusHandle,
 }
 
@@ -325,6 +357,11 @@ impl Workspace {
             error: None,
             cached_style: GridStyle::default(),
             ime_cursor: (0, 0),
+            caret_moved: Instant::now(),
+            caret_visible: true,
+            drag_anchor: None,
+            selection: false,
+            resize_drag: None,
             focus: cx.focus_handle(),
         }
     }
@@ -385,9 +422,40 @@ impl Workspace {
         .detach();
     }
 
+    /// Advances the caret blink, returning true when it changed state.
+    ///
+    /// Only a blinking caret needs this. A steady one costs nothing, which is
+    /// why the flag is read from the frame rather than assumed: shells and
+    /// programs turn blinking on and off per pane.
+    fn advance_caret_blink(&mut self) -> bool {
+        const PERIOD: Duration = Duration::from_millis(530);
+
+        let blinking = self
+            .active_pane()
+            .map(|pane| pane.session.frame().cursor)
+            .is_some_and(|cursor| cursor.blinking && cursor.visible);
+
+        if !blinking {
+            if self.caret_visible {
+                return false;
+            }
+            self.caret_visible = true;
+            return true;
+        }
+
+        let elapsed = self.caret_moved.elapsed();
+        let visible = (elapsed.as_millis() / PERIOD.as_millis()) % 2 == 0;
+        if visible != self.caret_visible {
+            self.caret_visible = visible;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drains every pane. Returns true when a frame changed.
     fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.advance_caret_blink();
         for tab in &mut self.tabs {
             for pane in tab.panes.values_mut() {
                 if pane.session.poll() {
@@ -442,12 +510,6 @@ impl Workspace {
         }
     }
 
-    /// Where the IME candidate window should point.
-    ///
-    /// The anchor is the cursor cell, converted from cells to pixels with the
-    /// same metrics the grid paints with. It is only a hint to the platform, so
-    /// an approximation near the caret is enough: the candidate list follows the
-    /// text being typed, not an exact glyph position.
     /// Where the IME candidate window should point, in window coordinates.
     ///
     /// The grid reports where it was painted during prepaint; the caret cell is
@@ -460,7 +522,7 @@ impl Workspace {
         };
         let cursor = pane.session.frame().cursor;
         let style = self.cached_style;
-        let origin = pane.origin.get();
+        let origin = pane.bounds.get().origin;
 
         let width = style.cell_width * f32::from(cursor.x);
         let height = style.cell_height * f32::from(cursor.y);
@@ -506,6 +568,8 @@ impl Workspace {
             background: theme.background,
             cursor: theme.caret,
             selection: theme.selection,
+            muted: theme.muted_foreground,
+            cursor_visible: true,
         }
     }
 
@@ -668,10 +732,186 @@ impl Workspace {
         }
     }
 
+    /// Starts dragging the divider between `left` and `right`.
+    ///
+    /// The span the divider travels is measured from the two panes' recorded
+    /// bounds rather than from the split's own box, because only the panes know
+    /// where they were actually painted.
+    fn begin_resize(
+        &mut self,
+        left: u64,
+        right: u64,
+        axis: Axis,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let (Some(l), Some(r)) = (tab.panes.get(&left), tab.panes.get(&right)) else {
+            return;
+        };
+        let (lb, rb) = (l.bounds.get(), r.bounds.get());
+
+        let (start, span) = match axis {
+            Axis::Horizontal => (
+                position.x.as_f32(),
+                rb.right().as_f32() - lb.left().as_f32(),
+            ),
+            Axis::Vertical => (
+                position.y.as_f32(),
+                rb.bottom().as_f32() - lb.top().as_f32(),
+            ),
+        };
+        if span <= 0.0 {
+            return;
+        }
+
+        let ratio = match axis {
+            Axis::Horizontal => (position.x.as_f32() - lb.left().as_f32()) / span,
+            Axis::Vertical => (position.y.as_f32() - lb.top().as_f32()) / span,
+        };
+
+        self.resize_drag = Some(ResizeDrag {
+            left,
+            right,
+            axis,
+            start,
+            span,
+            ratio: ratio.clamp(0.1, 0.9),
+        });
+        cx.notify();
+    }
+
+    /// Moves the divider with the pointer.
+    fn extend_resize(&mut self, axis: Axis, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = &self.resize_drag else {
+            return;
+        };
+        if drag.axis != axis {
+            return;
+        }
+
+        let now = match axis {
+            Axis::Horizontal => position.x.as_f32(),
+            Axis::Vertical => position.y.as_f32(),
+        };
+        // A share of the whole span rather than an absolute offset, so the same
+        // drag code works at any window size and inside a nested split.
+        let ratio = (drag.ratio + (now - drag.start) / drag.span).clamp(0.1, 0.9);
+        let (left, right) = (drag.left, drag.right);
+
+        if let Some(tab) = self.active_tab_mut() {
+            tab.layout.resize_between(left, right, ratio);
+        }
+        cx.notify();
+    }
+
+    /// Converts a pointer position to a viewport cell in `pane`.
+    ///
+    /// The pointer arrives in window coordinates and the grid records where it
+    /// was painted, so subtracting the origin gives a position inside the grid.
+    /// The result is clamped to the pane rather than rejected: dragging past the
+    /// edge of the text is how you select to the end of a line.
+    fn cell_at(&self, pane: &Pane, position: Point<Pixels>, style: GridStyle) -> (u16, u32) {
+        let origin = pane.bounds.get().origin;
+        let cols = pane.dims.get().0.max(1);
+        let rows = pane.dims.get().1.max(1);
+
+        let x = ((position.x - origin.x).as_f32() / style.cell_width.as_f32()).floor();
+        let y = ((position.y - origin.y).as_f32() / style.cell_height.as_f32()).floor();
+
+        (
+            (x.max(0.0) as u16).min(cols.saturating_sub(1)),
+            (y.max(0.0) as u32).min(u32::from(rows.saturating_sub(1))),
+        )
+    }
+
+    /// Starts a selection at the pointer.
+    fn begin_selection(
+        &mut self,
+        id: u64,
+        position: Point<Pixels>,
+        style: GridStyle,
+        cx: &mut Context<Self>,
+    ) {
+        // The cell is resolved before taking a mutable borrow of the pane, so
+        // the two borrows never overlap.
+        let cell = {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let Some(pane) = tab.panes.get(&id) else {
+                return;
+            };
+            self.cell_at(pane, position, style)
+        };
+
+        self.drag_anchor = Some((id, cell));
+        self.selection = false;
+
+        if let Some(tab) = self.active_tab_mut() {
+            tab.active = id;
+            if let Some(pane) = tab.panes.get_mut(&id) {
+                pane.session.clear_selection();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Extends the selection to the pointer while the button is held.
+    fn extend_selection(
+        &mut self,
+        id: u64,
+        position: Point<Pixels>,
+        style: GridStyle,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((anchor_pane, anchor)) = self.drag_anchor else {
+            return;
+        };
+        // A selection belongs to one pane; dragging into another would leave the
+        // two ends in different grids, which the parser cannot represent.
+        if anchor_pane != id {
+            return;
+        }
+
+        let cell = {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let Some(pane) = tab.panes.get(&id) else {
+                return;
+            };
+            self.cell_at(pane, position, style)
+        };
+
+        if let Some(tab) = self.active_tab_mut()
+            && let Some(pane) = tab.panes.get_mut(&id)
+        {
+            pane.session.set_selection(anchor, cell);
+        }
+        self.selection = anchor != cell;
+        cx.notify();
+    }
+
+    /// Ends a drag.
+    fn end_selection(&mut self) {
+        self.drag_anchor = None;
+    }
+
     fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let text = self
-            .active_pane_mut()
-            .and_then(|pane| pane.session.select_all_text());
+        // A drag leaves a real selection behind, so copy exactly that. With no
+        // selection the old behaviour is kept: copy the whole screen, which is
+        // what people reach for when they want the output they just ran.
+        let text = match self.selection {
+            true => self
+                .active_pane_mut()
+                .and_then(|pane| pane.session.selected_text()),
+            false => self
+                .active_pane_mut()
+                .and_then(|pane| pane.session.select_all_text()),
+        };
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -874,12 +1114,14 @@ impl Render for Workspace {
             self.focus.focus(window, cx);
         }
         let style = self.grid_style(window, cx);
-        self.cached_style = style;
 
         // The platform only asks for the caret position when a composition
         // starts, which is too late to help: by then the candidate window is
         // already placed. Watching the caret here means a prompt that moves to a
         // new line pushes a fresh position before the user types anything.
+        //
+        // The same check restarts the blink, so the caret is always solid right
+        // after a keystroke rather than vanishing halfway through one.
         let cursor = self
             .active_pane()
             .map(|pane| pane.session.frame().cursor)
@@ -887,8 +1129,15 @@ impl Render for Workspace {
             .unwrap_or((0, 0));
         if cursor != self.ime_cursor {
             self.ime_cursor = cursor;
+            self.caret_moved = Instant::now();
+            self.caret_visible = true;
             window.invalidate_character_coordinates();
         }
+        let style = GridStyle {
+            cursor_visible: self.caret_visible,
+            ..style
+        };
+        self.cached_style = style;
 
         let theme = gpui_kit::component::Theme::global(cx).clone();
 
@@ -902,7 +1151,24 @@ impl Render for Workspace {
             // and make the bar look flat.
             .text_color(theme.foreground)
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(Self::handle_key));
+            .capture_key_down(cx.listener(Self::handle_key))
+            // A divider drag has to keep tracking once the pointer leaves the
+            // few pixels of the grip, so the move and release are handled at the
+            // root, which is under the pointer for the whole gesture.
+            .on_mouse_move(cx.listener(|workspace, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left)
+                    && let Some(drag) = &workspace.resize_drag
+                {
+                    let axis = drag.axis;
+                    workspace.extend_resize(axis, event.position, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseUpEvent, _, _| {
+                    workspace.resize_drag = None;
+                }),
+            );
 
         body = body.child(self.render_tabs(window, cx));
 
@@ -965,7 +1231,7 @@ impl Workspace {
                 let id = *id;
                 let frame = pane.session.frame().clone();
                 let dims = pane.dims.clone();
-                let origin = pane.origin.clone();
+                let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
 
                 div()
@@ -975,14 +1241,26 @@ impl Workspace {
                     .relative()
                     .overflow_hidden()
                     .bg(style.background)
-                    .when(!focused, |this| {
-                        this.cursor_pointer().on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |workspace, _: &MouseDownEvent, _, cx| {
-                                workspace.focus_pane(id, cx);
-                            }),
-                        )
-                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+                            workspace.focus_pane(id, cx);
+                            workspace.begin_selection(id, event.position, style, cx);
+                        }),
+                    )
+                    .on_mouse_move(
+                        cx.listener(move |workspace, event: &MouseMoveEvent, _, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                workspace.extend_selection(id, event.position, style, cx);
+                            }
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|workspace, _: &MouseUpEvent, _, _| {
+                            workspace.end_selection();
+                        }),
+                    )
                     .on_scroll(cx.listener(move |workspace, event: &ScrollEvent, _, cx| {
                         workspace.handle_scroll(event, style, cx);
                     }))
@@ -995,7 +1273,7 @@ impl Workspace {
                         style,
                         focused,
                         dims,
-                        origin,
+                        bounds_cell,
                         cx.entity(),
                         self.focus.clone(),
                     )))
@@ -1037,15 +1315,7 @@ impl Workspace {
                 first,
                 second,
             } => {
-                // A one-pixel gap shows the division without drawing a border on
-                // either side, which keeps each pane's grid aligned to its box.
-                let mut container = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .gap(px(1.0))
-                    .bg(theme.border);
+                let mut container = div().flex_1().min_w_0().min_h_0().flex();
                 container = match axis {
                     Axis::Horizontal => container.flex_row(),
                     Axis::Vertical => container.flex_col(),
@@ -1064,6 +1334,13 @@ impl Workspace {
                 let first_share = (ratio.clamp(0.1, 0.9) * 1000.0).round();
                 let second_share = 1000.0 - first_share;
 
+                // The divider is a real flex child rather than a gap: a gap
+                // cannot be grabbed, and splitting a window by eye is the one
+                // adjustment a terminal user makes constantly. It stays one
+                // pixel wide, but a wider transparent area around it gives the
+                // pointer something to hit.
+                let divider = divider_element(*axis, first, second, theme, cx);
+
                 // The wrapper carries the basis, and it is itself a flex container so
                 // the pane inside can fill it. Without that the pane has no box to
                 // stretch into and collapses to nothing.
@@ -1076,6 +1353,7 @@ impl Workspace {
                             .min_h_0()
                             .child(first_el),
                     )
+                    .child(divider)
                     .child(
                         div()
                             .flex()
@@ -1306,6 +1584,52 @@ impl Workspace {
                 }),
             ))
     }
+}
+
+/// The draggable rule between two panes of a split.
+///
+/// The visible line is one pixel; the element around it is wider so the pointer
+/// has something to grab, and it lights up on hover to say it can be moved. The
+/// two panes on either side identify which split is being resized, which is what
+/// keeps a nested split pointing at its own divider.
+fn divider_element(
+    axis: Axis,
+    first: &Layout,
+    second: &Layout,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let left = first.leaves().last().copied();
+    let right = second.leaves().first().copied();
+    let color = theme.border;
+
+    // `flex_shrink_0` keeps the divider at its real width. Without it the two
+    // halves plus the divider exceed the container and flex shrinks the only
+    // item that can give, leaving nothing to aim at.
+    let mut divider = div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .bg(color);
+
+    divider = match axis {
+        Axis::Horizontal => divider.w(px(3.0)).h_full().cursor_col_resize(),
+        Axis::Vertical => divider.h(px(3.0)).w_full().cursor_row_resize(),
+    };
+
+    divider
+        .relative()
+        .hover(move |this| this.bg(theme.ring))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+                if let (Some(left), Some(right)) = (left, right) {
+                    workspace.begin_resize(left, right, axis, event.position, cx);
+                }
+            }),
+        )
+        .into_any_element()
 }
 
 /// One tab: name, pane count, and a close affordance that only appears when
@@ -1639,11 +1963,7 @@ fn tab_title(pane: &Pane) -> Option<String> {
 }
 
 fn has_selection(workspace: &Workspace) -> bool {
-    workspace
-        .active_pane()
-        .and_then(|pane| pane.session.frame().rows.first())
-        .map(|row| row.cells.iter().any(|cell| cell.selected))
-        .unwrap_or(false)
+    workspace.selection
 }
 
 /// The grid size a freshly opened window should start with.

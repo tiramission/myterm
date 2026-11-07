@@ -23,6 +23,12 @@ pub struct GridStyle {
     pub background: Hsla,
     pub cursor: Hsla,
     pub selection: Hsla,
+    /// A low-contrast foreground for chrome drawn inside the grid, such as the
+    /// scrollbar. Using the caret color for this hid it against a pale grid.
+    pub muted: Hsla,
+    /// Whether the caret is in its visible blink phase. Ignored when the
+    /// terminal asked for a steady cursor.
+    pub cursor_visible: bool,
 }
 
 impl Default for GridStyle {
@@ -36,6 +42,8 @@ impl Default for GridStyle {
             background: Hsla::default(),
             cursor: Hsla::default(),
             selection: Hsla::default(),
+            muted: Hsla::default(),
+            cursor_visible: true,
         }
     }
 }
@@ -49,9 +57,10 @@ pub struct TerminalGrid {
     /// Written during prepaint with the cell count the element actually has
     /// room for, so the owner can size the pseudo console to match.
     dims: Rc<Cell<(u16, u16)>>,
-    /// Written during prepaint with the grid's position in window coordinates,
-    /// so the IME can anchor its candidate window to the caret.
-    window_origin: Rc<Cell<Point<Pixels>>>,
+    /// Written during prepaint with where the grid was drawn in window
+    /// coordinates: the IME anchors to it, the mouse resolves cells against it,
+    /// and a split drag measures its extent.
+    window_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The view that owns this grid, so the element can register itself as the
     /// platform's text input target while it paints.
     entity: Entity<Workspace>,
@@ -65,7 +74,7 @@ impl TerminalGrid {
         style: GridStyle,
         focused: bool,
         dims: Rc<Cell<(u16, u16)>>,
-        window_origin: Rc<Cell<Point<Pixels>>>,
+        window_bounds: Rc<Cell<Bounds<Pixels>>>,
         entity: Entity<Workspace>,
         focus: FocusHandle,
     ) -> Self {
@@ -75,7 +84,7 @@ impl TerminalGrid {
             style,
             focused,
             dims,
-            window_origin,
+            window_bounds,
             entity,
             focus,
         }
@@ -109,20 +118,16 @@ impl Element for TerminalGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let cols = self.frame.rows.first().map_or(0, |row| row.cells.len());
-        let rows = self.frame.rows.len();
-        let width = self.style.cell_width * cols as f32;
-        let height = self.style.cell_height * rows as f32;
-
+        // The grid fills its container and nothing more. Requesting the cell
+        // count as a minimum size would let a wide parser grid push the layout
+        // past the window, which quietly put anything drawn at the bottom edge
+        // - the scrollbar in particular - outside the visible area. `prepaint`
+        // reports how many cells actually fit, and the owner resizes to that.
         let layout_id = window.request_layout(
             Style {
                 size: gpui_kit::size(
                     Length::Definite(relative(1.0)),
                     Length::Definite(relative(1.0)),
-                ),
-                min_size: gpui_kit::size(
-                    Length::Definite(width.into()),
-                    Length::Definite(height.into()),
                 ),
                 ..Default::default()
             },
@@ -150,7 +155,7 @@ impl Element for TerminalGrid {
             .floor()
             .max(1.0);
         self.dims.set((cols as u16, rows as u16));
-        self.window_origin.set(bounds.origin);
+        self.window_bounds.set(bounds);
     }
 
     fn paint(
@@ -206,7 +211,7 @@ impl Element for TerminalGrid {
             for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
                 let bg = resolve(cell.style.bg, &palette, default_bg);
                 let bg = if cell.selected {
-                    blend(bg, style.selection)
+                    blend(bg, style.selection, 0.4)
                 } else if cell.style.inverse {
                     resolve(cell.style.fg, &palette, default_fg)
                 } else {
@@ -231,45 +236,19 @@ impl Element for TerminalGrid {
                     fg = resolve(cell.style.bg, &palette, default_bg);
                 }
                 if cell.style.faint {
-                    fg = blend(fg, style.background);
+                    fg = blend(fg, style.background, 0.5);
                 }
 
-                let run = TextRun {
-                    len: cell.text.len(),
-                    font: Font {
-                        weight: if cell.style.bold {
-                            FontWeight::BOLD
-                        } else {
-                            FontWeight::NORMAL
-                        },
-                        ..font.clone()
-                    },
-                    color: fg,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-
-                let line = window.text_system().shape_line(
-                    cell.text.clone().into(),
-                    style.font_size,
-                    &[run],
-                    None,
-                );
-
                 let cell_box = cell_bounds(origin, style, x, y);
-                let glyph_origin = point(
-                    cell_box.left(),
-                    cell_box.top() + style.baseline - line.ascent,
-                );
-
-                let _ = line.paint(
-                    glyph_origin,
-                    style.cell_height,
-                    TextAlign::Left,
-                    None,
+                paint_glyph(
                     window,
                     cx,
+                    &cell.text,
+                    fg,
+                    cell.style.bold,
+                    cell_box,
+                    style,
+                    &font,
                 );
             }
         }
@@ -315,9 +294,13 @@ impl Element for TerminalGrid {
 
         if self.focused {
             let cursor = self.frame.cursor;
-            if cursor.visible && cursor.in_viewport {
+            // A blinking cursor is hidden on alternate phases; a steady one is
+            // always drawn.
+            let show =
+                cursor.visible && cursor.in_viewport && (!cursor.blinking || style.cursor_visible);
+            if show {
                 let cell_box = cell_bounds(origin, style, cursor.x as usize, cursor.y as usize);
-                paint_cursor(window, cell_box, style, &self.frame);
+                paint_cursor(window, cx, cell_box, style, &self.frame, &font);
             }
         }
 
@@ -328,18 +311,20 @@ impl Element for TerminalGrid {
 /// Draws a thin indicator while the viewport is scrolled back.
 ///
 /// It only appears when there is history above or below, so a terminal showing
-/// its live output stays free of chrome.
+/// its live output stays free of chrome. The thumb is drawn as a pill rather
+/// than a square bar: at three pixels wide a rectangular thumb reads as a
+/// rendering artifact, while a rounded one reads as a control.
 fn paint_scrollbar(window: &mut Window, bounds: Bounds<Pixels>, style: GridStyle, frame: &Frame) {
     let bar = frame.scrollbar;
     if bar.total <= bar.len || bar.len == 0 {
         return;
     }
 
-    let width = px(3.0);
+    let width = px(4.0);
     let inset = px(2.0);
     let track_height = bounds.size.height - inset * 2.0;
     let thumb_height = (track_height * (bar.len as f32 / bar.total as f32))
-        .max(px(16.0))
+        .max(px(24.0))
         .min(track_height);
     let max_offset = (bar.total - bar.len) as f32;
     let progress = if max_offset > 0.0 {
@@ -349,41 +334,92 @@ fn paint_scrollbar(window: &mut Window, bounds: Bounds<Pixels>, style: GridStyle
     };
     let thumb_top = bounds.top() + inset + (track_height - thumb_height) * progress;
 
-    window.paint_quad(fill(
+    // A faint track shows where the viewport sits in the whole buffer, which a
+    // thumb alone cannot say when the history is long.
+    window.paint_quad(quad(
+        Bounds::new(
+            point(bounds.right() - width - inset, bounds.top() + inset),
+            size(width, track_height),
+        ),
+        Corners::all(width / 2.0),
+        style.muted.opacity(0.12),
+        px(0.0),
+        transparent_black(),
+        BorderStyle::default(),
+    ));
+
+    window.paint_quad(quad(
         Bounds::new(
             point(bounds.right() - width - inset, thumb_top),
             size(width, thumb_height),
         ),
-        style.cursor.opacity(0.35),
+        Corners::all(width / 2.0),
+        style.muted.opacity(0.7),
+        px(0.0),
+        transparent_black(),
+        BorderStyle::default(),
     ));
 }
 
-fn paint_cursor(window: &mut Window, bounds: Bounds<Pixels>, style: GridStyle, frame: &Frame) {
+/// Draws the caret in the shape the terminal asked for.
+///
+/// The block style inverts the cell rather than covering it: the cursor color
+/// goes down first, then the character is drawn again in the cell background
+/// color. A solid block would hide the character under the caret, which is the
+/// one cell the user is most likely to be reading.
+#[allow(clippy::too_many_arguments)]
+fn paint_cursor(
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    style: GridStyle,
+    frame: &Frame,
+    font: &Font,
+) {
     use vt::CursorStyle;
 
-    // A block cursor inverts the cell: paint the cursor color behind and the
-    // cell's own text over it. Drawing the glyph again is what makes the
-    // character readable instead of a solid block.
+    let radius = px(1.5);
+    let cell = frame
+        .rows
+        .get(frame.cursor.y as usize)
+        .and_then(|row| row.cells.get(frame.cursor.x as usize));
+
     match frame.cursor.style {
         CursorStyle::Bar => {
-            window.paint_quad(fill(
-                Bounds::new(bounds.origin, size(px(2.0), bounds.size.height)),
+            // Centred on the cell edge rather than flush against it, so the bar
+            // reads as a caret instead of a divider between two characters.
+            let width = px(2.0);
+            let inset = (style.cell_width - width) / 2.0;
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(bounds.left() + inset, bounds.top()),
+                    size(width, bounds.size.height),
+                ),
+                Corners::all(radius),
                 style.cursor,
+                px(0.0),
+                transparent_black(),
+                BorderStyle::default(),
             ));
         }
         CursorStyle::Underline => {
-            window.paint_quad(fill(
+            let height = px(2.0);
+            window.paint_quad(quad(
                 Bounds::new(
-                    point(bounds.left(), bounds.bottom() - px(2.0)),
-                    size(bounds.size.width, px(2.0)),
+                    point(bounds.left(), bounds.bottom() - height),
+                    size(bounds.size.width, height),
                 ),
+                Corners::all(radius),
                 style.cursor,
+                px(0.0),
+                transparent_black(),
+                BorderStyle::default(),
             ));
         }
         CursorStyle::BlockHollow => {
             window.paint_quad(quad(
                 bounds,
-                Corners::default(),
+                Corners::all(radius),
                 transparent_black(),
                 px(1.0),
                 style.cursor,
@@ -391,9 +427,89 @@ fn paint_cursor(window: &mut Window, bounds: Bounds<Pixels>, style: GridStyle, f
             ));
         }
         CursorStyle::Block => {
-            window.paint_quad(fill(bounds, style.cursor));
+            window.paint_quad(quad(
+                bounds,
+                Corners::all(radius),
+                style.cursor,
+                px(0.0),
+                transparent_black(),
+                BorderStyle::default(),
+            ));
+
+            // The character under the caret, in the color the cell's background
+            // would have been, so it stays readable on the filled block.
+            if let Some(cell) = cell {
+                if !cell.text.is_empty() && !cell.style.invisible {
+                    paint_glyph(
+                        window,
+                        cx,
+                        &cell.text,
+                        style.background,
+                        cell.style.bold,
+                        bounds,
+                        style,
+                        font,
+                    );
+                }
+            }
         }
     }
+}
+
+/// Shapes and paints one cell's text.
+///
+/// Extracted because the block cursor has to draw the same glyph a second time
+/// in the inverted color. Leaving it inline meant a solid block sat on top of
+/// the character and you could not read what the caret was over.
+#[allow(clippy::too_many_arguments)]
+fn paint_glyph(
+    window: &mut Window,
+    cx: &mut App,
+    text: &str,
+    color: Hsla,
+    bold: bool,
+    cell_box: Bounds<Pixels>,
+    style: GridStyle,
+    font: &Font,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let run = TextRun {
+        len: text.len(),
+        font: Font {
+            weight: if bold {
+                FontWeight::BOLD
+            } else {
+                FontWeight::NORMAL
+            },
+            ..font.clone()
+        },
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+
+    let line =
+        window
+            .text_system()
+            .shape_line(text.to_owned().into(), style.font_size, &[run], None);
+
+    let glyph_origin = point(
+        cell_box.left(),
+        cell_box.top() + style.baseline - line.ascent,
+    );
+
+    let _ = line.paint(
+        glyph_origin,
+        style.cell_height,
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 fn cell_bounds(origin: Point<Pixels>, style: GridStyle, x: usize, y: usize) -> Bounds<Pixels> {
@@ -425,12 +541,25 @@ fn rgb(color: vt::Rgb) -> Hsla {
 
 /// Lays `over` on top of `under` at half strength, for faint text and
 /// selection tint.
-fn blend(under: Hsla, over: Hsla) -> Hsla {
-    Hsla {
+/// Lays `over` on `under` at the given opacity.
+///
+/// The alpha is a parameter because the two callers want different things: a
+/// selection has to stay legible under text, while faint text only needs to be
+/// nudged toward the background. A single hardcoded value served neither.
+/// Lays `over` on `under` at the given opacity.
+///
+/// `Hsla::blend` puts its argument on top, so the order here matters: reading it
+/// as `under.blend(over)` is what makes the selection visible at all. Getting it
+/// backwards returns the background unchanged.
+///
+/// The alpha is a parameter because the two callers want different things: a
+/// selection has to stay legible under text, while faint text only needs to be
+/// nudged toward the background. A single hardcoded value served neither.
+fn blend(under: Hsla, over: Hsla, alpha: f32) -> Hsla {
+    under.blend(Hsla {
         h: over.h,
         s: over.s,
         l: over.l,
-        a: 0.55,
-    }
-    .blend(under)
+        a: alpha,
+    })
 }

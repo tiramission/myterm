@@ -196,6 +196,23 @@ impl Session {
         text
     }
 
+    /// Sets the selection from two viewport cells and refreshes the frame.
+    pub fn set_selection(&mut self, start: (u16, u32), end: (u16, u32)) {
+        self.term.set_selection(start, end);
+        self.capture();
+    }
+
+    /// Drops the selection and refreshes the frame.
+    pub fn clear_selection(&mut self) {
+        self.term.clear_selection();
+        self.capture();
+    }
+
+    /// The selected text, if anything is selected.
+    pub fn selected_text(&mut self) -> Option<String> {
+        self.term.selected_text()
+    }
+
     pub fn exit_code(&self) -> Option<i32> {
         self.exit
     }

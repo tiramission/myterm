@@ -87,6 +87,47 @@ impl Layout {
     }
 
     /// Visits every leaf id in layout order.
+    /// Sets the share of the split that directly separates `a` from `b`.
+    ///
+    /// Used by the divider drag. The pair is what identifies the node: the
+    /// deepest split whose two halves contain exactly one of the two panes is
+    /// the one the user grabbed, which stays correct when splits are nested.
+    pub fn resize_between(&mut self, a: u64, b: u64, ratio: f32) -> bool {
+        let Some(ratio) = Some(ratio.clamp(0.1, 0.9)) else {
+            return false;
+        };
+
+        match self {
+            Layout::Leaf(_) => false,
+            Layout::Split {
+                ratio: share,
+                first,
+                second,
+                ..
+            } => {
+                let first_has = first.contains(a) && second.contains(b);
+                let second_has = first.contains(b) && second.contains(a);
+                if first_has {
+                    *share = ratio;
+                    return true;
+                }
+                if second_has {
+                    *share = 1.0 - ratio;
+                    return true;
+                }
+                first.resize_between(a, b, ratio) || second.resize_between(a, b, ratio)
+            }
+        }
+    }
+
+    /// Whether this subtree holds `id`.
+    pub fn contains(&self, id: u64) -> bool {
+        match self {
+            Layout::Leaf(leaf) => *leaf == id,
+            Layout::Split { first, second, .. } => first.contains(id) || second.contains(id),
+        }
+    }
+
     pub fn leaves(&self) -> Vec<u64> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
@@ -310,4 +351,36 @@ mod tests {
             "nothing is left of the first pane"
         );
     }
+
+    #[test]
+    fn resizing_moves_only_the_split_between_the_pair() {
+        let mut layout = Layout::Leaf(1);
+        layout.split(1, 2, Axis::Horizontal);
+        layout.split(2, 3, Axis::Vertical);
+
+        // 1 and 2 share the outer horizontal split.
+        assert!(layout.resize_between(1, 2, 0.3));
+        assert!(layout.resize_between(2, 1, 0.3), "the pair is symmetric");
+
+        // 2 and 3 share the inner vertical split, not the outer one.
+        assert!(layout.resize_between(2, 3, 0.7));
+
+        // Panes that do not share a split are not resizable.
+        assert!(!layout.resize_between(1, 9, 0.5));
+    }
+
+    #[test]
+    fn the_share_stays_within_its_limits() {
+        let mut layout = Layout::Leaf(1);
+        layout.split(1, 2, Axis::Horizontal);
+
+        assert!(layout.resize_between(1, 2, 0.0));
+        assert!(layout.resize_between(1, 2, 1.0));
+
+        let Layout::Split { ratio, .. } = layout else {
+            panic!("still split");
+        };
+        assert!(ratio >= 0.1 && ratio <= 0.9, "got {ratio}");
+    }
 }
+
