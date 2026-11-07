@@ -39,6 +39,11 @@ const SPLIT_VERTICAL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBo
 /// scaled to the 10 px a title bar button wants.
 const WINDOW_MINIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>"#;
 const WINDOW_MAXIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>"#;
+
+/// Zoom a pane to fill the card; and the reverse.
+const ZOOM_IN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9"/><path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9"/><path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15"/><path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></svg>"#;
+const ZOOM_OUT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4"/><path d="M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4"/><path d="M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20"/><path d="M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/></svg>"#;
+
 const WINDOW_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
 const WINDOW_RESTORE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="4" y="8" width="12" height="12" rx="1.5"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16"/></svg>"#;
 
@@ -58,6 +63,12 @@ const THEME_MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 /// 38 px matches the caption Windows draws for itself, so the tabs sit where
 /// the eye expects a title to be rather than where a toolbar would go.
 const TITLE_BAR_HEIGHT: f32 = 38.0;
+
+/// Height of the strip naming a pane.
+const PANE_HEADER_HEIGHT: f32 = 32.0;
+
+/// Corner radius of a pane card.
+const PANE_RADIUS: f32 = 12.0;
 
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
 /// followed by the library's defaults for the rest.
@@ -291,6 +302,9 @@ pub struct Workspace {
     /// Whether the active pane currently has a selection, kept in step with the
     /// drag so copying does not have to scan every cell of the frame.
     selection: bool,
+    /// A pane shown on its own, filling the window. The rest of the split stays
+    /// as it was and comes back when the zoom is released.
+    zoomed: Option<u64>,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -315,6 +329,7 @@ impl Workspace {
             caret_visible: true,
             drag_anchor: None,
             selection: false,
+            zoomed: None,
             resize_drag: None,
             focus: cx.focus_handle(),
         }
@@ -641,6 +656,13 @@ impl Workspace {
                     cx.stop_propagation();
                     return;
                 }
+                "z" => {
+                    if let Some(id) = self.active_tab().map(|tab| tab.active) {
+                        self.toggle_zoom(id, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -870,6 +892,28 @@ impl Workspace {
         if let Some(text) = text {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    /// Shows `id` on its own, or returns to the whole split if it already is.
+    fn toggle_zoom(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.zoomed = if self.zoomed == Some(id) {
+            None
+        } else {
+            Some(id)
+        };
+        self.focus_pane(id, cx);
+    }
+
+    /// Closes `id`, which is the pane the header's close button belongs to.
+    fn close_pane_at(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.active = id;
+        }
+        // The zoom belongs to a pane, so it goes with it.
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
+        }
+        self.close_pane(cx);
     }
 
     /// Splits `id`, focusing it first if it was not already focused.
@@ -1208,6 +1252,16 @@ impl Workspace {
         let multi = tab.panes.len() > 1;
         let active = tab.active;
 
+        // A zoomed pane covers the split rather than replacing it, so releasing
+        // the zoom puts every pane back exactly where it was.
+        if let Some(id) = self.zoomed {
+            if tab.panes.contains_key(&id) {
+                return self
+                    .render_node(&Layout::Leaf(id), tab, style, &theme, multi, id, cx)
+                    .into_any_element();
+            }
+        }
+
         self.render_node(&tab.layout, tab, style, &theme, multi, active, cx)
             .into_any_element()
     }
@@ -1234,24 +1288,20 @@ impl Workspace {
                 let dims = pane.dims.clone();
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
+                let name = pane_label(pane);
+                let zoomed = self.zoomed == Some(id);
+                let show_header = multi || zoomed;
 
-                div()
+                let mut card = div()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .relative()
+                    .flex()
+                    .flex_col()
                     .overflow_hidden()
                     .group("pane")
-                    .rounded(px(10.0))
-                    .border_1()
-                    // Only a divided window needs to say which pane has the
-                    // keyboard; a lone pane is focused by definition, and ringing
-                    // it would spend the accent on nothing.
-                    .border_color(if focused && multi {
-                        theme.ring.opacity(0.55)
-                    } else {
-                        theme.border
-                    })
+                    .rounded(px(PANE_RADIUS))
                     .bg(style.background)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1275,70 +1325,74 @@ impl Workspace {
                     )
                     .on_scroll(cx.listener(move |workspace, event: &ScrollEvent, _, cx| {
                         workspace.handle_scroll(event, style, cx);
-                    }))
-                    // The grid fills the padded area, so text never touches the
-                    // window edge and the padding is part of the pane, not a
-                    // layout gap between panes.
-                    .child(div().absolute().inset(px(6.0)).child(TerminalGrid::new(
-                        ElementId::Name(format!("grid-{id}").into()),
-                        frame,
-                        style,
+                    }));
+
+                if show_header {
+                    card = card.child(pane_header(
+                        id,
+                        name,
                         focused,
-                        dims,
-                        bounds_cell,
-                        cx.entity(),
-                        self.focus.clone(),
-                    )))
-                    // Splitting again from inside the pane, without travelling
-                    // back up to the title bar. It only appears once there is
-                    // more than one pane: a lone terminal is already the size you
-                    // asked for, and the title bar covers that case.
-                    .when(multi, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(px(4.0))
-                                .right(px(4.0))
-                                .flex()
-                                .gap(px(2.0))
-                                .opacity(0.0)
-                                .group_hover("pane", |this| this.opacity(1.0))
-                                .child(pane_action(
-                                    "pane-split-right",
-                                    SPLIT_HORIZONTAL,
-                                    &theme,
-                                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                                        workspace.split_pane(id, Axis::Horizontal, window, cx);
-                                    }),
-                                ))
-                                .child(pane_action(
-                                    "pane-split-down",
-                                    SPLIT_VERTICAL,
-                                    &theme,
-                                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                                        workspace.split_pane(id, Axis::Vertical, window, cx);
-                                    }),
-                                )),
-                        )
-                    })
-                    .when_some(exit, |this, code| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom_0()
-                                .left_0()
-                                .right_0()
-                                .h(px(22.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .bg(theme.background)
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("进程已退出（代码 {code}）")),
-                        )
-                    })
-                    .into_any_element()
+                        zoomed,
+                        exit.is_some(),
+                        &theme,
+                        cx,
+                    ));
+                }
+
+                // The terminal takes the rest of the card. Insetting it keeps the
+                // text off the rounded corners and gives the block cursor a
+                // margin at the edge of the pane.
+                card = card.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .mx(px(6.0))
+                        .mb(px(6.0))
+                        .when(!show_header, |this| this.mt(px(6.0)))
+                        .child(TerminalGrid::new(
+                            ElementId::Name(format!("grid-{id}").into()),
+                            frame,
+                            style,
+                            focused,
+                            dims,
+                            bounds_cell,
+                            cx.entity(),
+                            self.focus.clone(),
+                        ))
+                        // A pane the user is not in recedes: the card's surface
+                        // lifts and the text fades behind a veil, so attention
+                        // follows the caret without a border having to shout.
+                        .when(multi && !focused, |this| {
+                            this.child(div().absolute().inset_0().bg(theme.background.opacity(
+                                if theme.mode == gpui_kit::component::ThemeMode::Light {
+                                    0.3
+                                } else {
+                                    0.42
+                                },
+                            )))
+                        }),
+                );
+
+                card.when_some(exit, |this, code| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .bottom(px(6.0))
+                            .left(px(6.0))
+                            .right(px(6.0))
+                            .h(px(22.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .bg(theme.muted)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("进程已退出（代码 {code}）")),
+                    )
+                })
+                .into_any_element()
             }
             Layout::Split {
                 axis,
@@ -1646,6 +1700,102 @@ fn divider_element(
             }),
         )
         .into_any_element()
+}
+
+/// A small control in a pane header.
+/// The strip at the top of a pane: what it is running, and what can be done to
+/// it.
+///
+/// It only appears once the window is divided. A lone terminal is already named
+/// by the tab above it, and repeating that name in a second bar would spend
+/// forty pixels saying nothing.
+fn pane_header(
+    id: u64,
+    name: String,
+    focused: bool,
+    zoomed: bool,
+    exited: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let dot = if exited {
+        theme.danger
+    } else if focused {
+        theme.ring
+    } else {
+        theme.border
+    };
+
+    div()
+        .flex_shrink_0()
+        .h(px(PANE_HEADER_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(7.0))
+        .pl(px(11.0))
+        .pr(px(5.0))
+        .child(div().size(px(6.0)).rounded(px(999.0)).bg(dot))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(if focused {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if focused {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .child(name),
+        )
+        .child(div().flex_1())
+        .child(
+            // The pane's own actions. They fade in with the pointer, the way a
+            // hover toolbar does, so the header is a label at rest and a set of
+            // controls when it is being used.
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(1.0))
+                .opacity(0.0)
+                .group_hover("pane", |this| this.opacity(1.0))
+                .child(pane_action(
+                    "pane-split-right",
+                    SPLIT_HORIZONTAL,
+                    theme,
+                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                        workspace.split_pane(id, Axis::Horizontal, window, cx);
+                    }),
+                ))
+                .child(pane_action(
+                    "pane-split-down",
+                    SPLIT_VERTICAL,
+                    theme,
+                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                        workspace.split_pane(id, Axis::Vertical, window, cx);
+                    }),
+                ))
+                .child(pane_action(
+                    "pane-zoom",
+                    if zoomed { ZOOM_OUT } else { ZOOM_IN },
+                    theme,
+                    cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                        workspace.toggle_zoom(id, cx);
+                    }),
+                ))
+                .child(pane_action(
+                    "pane-close",
+                    WINDOW_CLOSE,
+                    theme,
+                    cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                        workspace.close_pane_at(id, cx);
+                    }),
+                )),
+        )
 }
 
 /// A small split control floating inside a pane.
@@ -2014,6 +2164,24 @@ fn tab_title(pane: &Pane) -> Option<String> {
     } else {
         Some(name.to_owned())
     }
+}
+
+/// The name a pane shows in its header.
+///
+/// The shell's OSC title when it sets one, otherwise the program it was started
+/// with. Both end up with any path stripped, because a pane is named by what it
+/// is, not by where it lives.
+fn pane_label(pane: &Pane) -> String {
+    tab_title(pane).unwrap_or_else(|| {
+        // `Path` handles both separators, which matters on Windows where a
+        // program path arrives with backslashes.
+        let program = &pane.command.program;
+        let name = std::path::Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program);
+        name.trim_end_matches(".exe").to_owned()
+    })
 }
 
 fn has_selection(workspace: &Workspace) -> bool {
