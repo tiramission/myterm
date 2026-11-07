@@ -30,11 +30,20 @@ jobs:
       # filtering out workspace members, so a version bump does not count.
       # Adding `hashFiles('**/Cargo.lock')` defeated exactly that: the lockfile
       # records this workspace's own version, so every release wrote a cache
-      # under a key the next run never asked for, and restored nothing. The
-      # debug and release builds stay apart through `add-job-id-key`, which is
-      # what keeps one from evicting the other.
+      # under a key the next run never asked for, and restored nothing.
+      #
+      # `add-job-id-key` is off so the check and release jobs share one key.
+      # That is what lets the release job reach this cache at all: see the note
+      # there.
+      #
+      # Saving is limited to `main` because a cache is scoped to the ref that
+      # wrote it. Saving from a tag would create an entry only that tag can
+      # read, which is how this repository accumulated a copy per release.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -58,8 +67,24 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Restores the cache the check job wrote on `main`, and never saves one.
+      #
+      # Caches are scoped to the ref that created them: a release cache saved by
+      # tag v0.2.1 is invisible to v0.2.2, so every release used to miss, rebuild
+      # from nothing, and upload another 650 MB that the next release could not
+      # read either. The one cache visible from every ref is the default
+      # branch's, which is why this job matches its key instead of keeping a
+      # separate one per job.
+      #
+      # What it buys is the registry and the dependency sources; the release
+      # profile still compiles its own artifacts, since the cached target dir
+      # holds a debug build. What it stops is spending the repository's cache
+      # quota on entries that are unreachable by construction.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          add-job-id-key: false
+          save-if: false
 
       - name: Build
         run: cargo build --release --locked
