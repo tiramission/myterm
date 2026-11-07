@@ -3881,8 +3881,6 @@ dependencies = [
  "log",
  "pty",
  "raw-window-handle",
- "serde",
- "serde_json",
  "ureq",
  "vt",
 ]

@@ -1663,6 +1663,12 @@ impl Workspace {
         }
         match &self.update {
             Some(Ok(release)) => Some((format!("更新到 {}", release.version), true)),
+            // A failure stays clickable so the download can be retried without
+            // restarting; the message is the whole explanation, and a dead badge
+            // would leave the user with nothing to do about it.
+            Some(Err(message)) if message.starts_with("更新失败") => {
+                Some((message.clone(), true))
+            }
             Some(Err(message)) if !message.is_empty() => Some((message.clone(), false)),
             _ => None,
         }
@@ -1710,6 +1716,10 @@ impl Workspace {
             return;
         }
         let Some(Ok(release)) = self.update.clone() else {
+            // Nothing to install, or the last attempt failed and there is no
+            // release to retry with. Check again rather than doing nothing.
+            self.update = None;
+            self.check_for_update(cx);
             return;
         };
         self.updating = true;
@@ -1731,9 +1741,11 @@ impl Workspace {
                             cx.quit();
                             return;
                         }
-                        workspace.update = Some(Err("无法启动更新程序".to_owned()));
+                        workspace.update = Some(Err("更新失败：无法启动替换程序".to_owned()));
                     }
-                    Err(error) => workspace.update = Some(Err(error.to_string())),
+                    Err(error) => {
+                        workspace.update = Some(Err(format!("更新失败：{error}")));
+                    }
                 }
                 cx.notify();
             });

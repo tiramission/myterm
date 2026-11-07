@@ -8,10 +8,7 @@
 //! thing that works without a package manager, and the binary is small enough that
 //! it does not need to be anything cleverer.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
 
 /// Where releases are published.
 const REPO: &str = "tiramission/myterm";
@@ -55,57 +52,54 @@ impl std::fmt::Display for UpdateError {
     }
 }
 
-#[derive(Deserialize)]
-struct LatestRelease {
-    tag_name: String,
-    html_url: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-}
-
 /// Asks GitHub for the latest release.
 ///
-/// Blocking: the caller runs it off the UI thread. GitHub requires a
-/// `User-Agent`, and answers an unauthenticated request for a public repository
-/// without a token, so no credential is involved.
+/// Blocking: the caller runs it off the UI thread.
+///
+/// This reads the redirect that `releases/latest` answers with rather than the
+/// API. The API is rate limited to sixty requests an hour per address without a
+/// token, which a few restarts exhaust, and a terminal that cannot check for
+/// updates because of its own checking is a bad trade. The redirect is not rate
+/// limited, needs no credential, and carries the one thing needed: the tag.
 pub fn check() -> Result<Release, UpdateError> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let response = ureq::get(&url)
+    let url = format!("https://github.com/{REPO}/releases/latest");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .build()
+        .into();
+
+    let response = agent
+        .get(&url)
         .header("User-Agent", concat!("myterm/", env!("CARGO_PKG_VERSION")))
-        .header("Accept", "application/vnd.github+json")
         .call();
 
-    let mut response = match response {
-        Ok(response) => response,
-        // GitHub answers 404 for a repository with no releases, which is the
+    let location = match response {
+        Ok(response) => response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        // A repository with no releases does not redirect anywhere, which is the
         // normal state of a project that has not shipped yet.
         Err(ureq::Error::StatusCode(404)) => return Err(UpdateError::NoRelease),
         Err(error) => return Err(UpdateError::Network(error.to_string())),
     };
 
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| UpdateError::Network(error.to_string()))?;
+    let Some(location) = location else {
+        return Err(UpdateError::NoRelease);
+    };
 
-    let latest: LatestRelease = serde_json::from_str(&body)
-        .map_err(|error| UpdateError::Malformed(format!("release JSON: {error}")))?;
-
-    let asset = latest
-        .assets
-        .iter()
-        .find(|asset| asset.name == ASSET)
-        .ok_or_else(|| UpdateError::Malformed(format!("{ASSET} is not attached to the release")))?;
+    // The location ends in the tag: `.../releases/tag/v0.1.0`.
+    let tag = location
+        .rsplit('/')
+        .next()
+        .filter(|tag| !tag.is_empty())
+        .ok_or_else(|| UpdateError::Malformed(format!("unexpected redirect: {location}")))?;
 
     Ok(Release {
-        version: latest.tag_name.trim_start_matches('v').to_owned(),
-        download_url: asset.browser_download_url.clone(),
-        page_url: latest.html_url,
+        version: tag.trim_start_matches('v').to_owned(),
+        download_url: format!("https://github.com/{REPO}/releases/latest/download/{ASSET}"),
+        page_url: location,
     })
 }
 
@@ -157,11 +151,15 @@ pub fn download(release: &Release) -> Result<PathBuf, UpdateError> {
         .call()
         .map_err(|error| UpdateError::Network(error.to_string()))?;
 
-    let mut bytes = Vec::new();
-    response
+    // `read_to_end` on the body reader never returns here: the reader does not
+    // know where the body stops. `read_to_vec` does, but its default ceiling is
+    // ten megabytes and this binary is larger, so the limit is raised explicitly
+    // rather than left to fail once the app grows.
+    let bytes = response
         .body_mut()
-        .as_reader()
-        .read_to_end(&mut bytes)
+        .with_config()
+        .limit(256 * 1024 * 1024)
+        .read_to_vec()
         .map_err(|error| UpdateError::Network(error.to_string()))?;
 
     // A redirect to an HTML error page would otherwise be saved as if it were a
