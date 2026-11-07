@@ -74,6 +74,10 @@ const PANE_HEADER_HEIGHT: f32 = 32.0;
 /// Corner radius of a pane card.
 const PANE_RADIUS: f32 = 12.0;
 
+/// Space between two panes. The gap is the divider: nothing is drawn in it
+/// at rest, and the pointer is the only thing that shows it can be moved.
+const PANE_GAP: f32 = 10.0;
+
 /// Width of the pane list.
 const SIDEBAR_WIDTH: f32 = 214.0;
 
@@ -1356,6 +1360,11 @@ impl Workspace {
                     .overflow_hidden()
                     .group("pane")
                     .rounded(px(PANE_RADIUS))
+                    // The card needs an edge of its own: the gap between panes is
+                    // only a slightly different tone, and without a border the two
+                    // surfaces merge into one field with a seam nobody can find.
+                    .border_1()
+                    .border_color(theme.border)
                     .bg(style.background)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2035,14 +2044,17 @@ impl Workspace {
 
 /// The draggable gutter between two panes of a split.
 ///
-/// The panes are separated by a strip of chrome rather than a hairline. A
-/// terminal paints its own background, so a one-pixel rule between two panes of
-/// the same colour is nearly invisible; a strip of the title bar's tone reads as
-/// a deliberate division and makes the two panes feel like separate surfaces.
+/// The gap already reads as a seam: each pane is a card with its own hairline
+/// border, so two borders with space between them say "two things". What the gap
+/// cannot say by itself is that it can be moved, so that is all this adds — a
+/// grip that appears under the pointer, the same one the sidebar's edge uses.
 ///
-/// It is wide enough to grab, which a hairline is not, and it brightens on hover
-/// to say it can be moved. The two panes on either side identify which split is
-/// being resized, which is what keeps a nested split pointing at its own gutter.
+/// Drawing a third line down the middle was the earlier mistake: card border,
+/// seam, card border is three rules in a dozen pixels, which reads as a fence
+/// rather than a division.
+///
+/// The two panes on either side identify which split is being resized, which is
+/// what keeps a nested split pointing at its own gutter.
 fn divider_element(
     axis: Axis,
     first: &Layout,
@@ -2053,27 +2065,40 @@ fn divider_element(
     let left = first.leaves().last().copied();
     let right = second.leaves().first().copied();
 
-    const GUTTER: f32 = 10.0;
+    /// How long the grip is along the seam.
+    const GRIP: f32 = 26.0;
 
-    let mut grip = div().flex_shrink_0().bg(theme.title_bar);
+    let grip = div()
+        .when(axis == Axis::Horizontal, |this| this.w(px(3.0)).h(px(GRIP)))
+        .when(axis == Axis::Vertical, |this| this.h(px(3.0)).w(px(GRIP)))
+        .rounded(px(999.0))
+        .bg(theme.ring);
 
-    grip = match axis {
-        Axis::Horizontal => grip.w(px(GUTTER)).h_full().cursor_col_resize(),
-        Axis::Vertical => grip.h(px(GUTTER)).w_full().cursor_row_resize(),
+    let mut band = div()
+        .group("divider")
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            grip.opacity(0.0)
+                .group_hover("divider", |this| this.opacity(1.0)),
+        );
+
+    band = match axis {
+        Axis::Horizontal => band.w(px(PANE_GAP)).h_full().cursor_col_resize(),
+        Axis::Vertical => band.h(px(PANE_GAP)).w_full().cursor_row_resize(),
     };
 
-    // The gutter is the same tone as the surface behind it, so it is invisible
-    // until the pointer finds it and the accent says it can be moved.
-    grip.hover(move |this| this.bg(theme.ring.opacity(0.3)))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
-                if let (Some(left), Some(right)) = (left, right) {
-                    workspace.begin_resize(left, right, axis, event.position, cx);
-                }
-            }),
-        )
-        .into_any_element()
+    band.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+            if let (Some(left), Some(right)) = (left, right) {
+                workspace.begin_resize(left, right, axis, event.position, cx);
+            }
+        }),
+    )
+    .into_any_element()
 }
 
 /// The grab strip on the sidebar's trailing edge.
