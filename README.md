@@ -1,8 +1,8 @@
 # myterm
 
-一个 Windows 终端：NSH（Native Shell，Rust）+ [libghostty-rs](https://github.com/Uzaaft/libghostty-rs)（`libghostty-vt`，VT 解析与终端状态）。
+一个 Windows 终端：GPUI Kit 做界面，[libghostty-vt](https://lib.ghostty.org/vt/index.html) 1.0.0 的 C API 做 VT 解析。
 
-状态：**M0 技术验证完成**（[报告](docs/m0-report.md)）；**M1 可用**、**M2 的命令面板/右键菜单**、**M4 打包** 已完成并人工验证。设计文档：[docs/design.md](docs/design.md)。
+状态：**可运行**。终端渲染、键盘输入、多标签、分屏、滚轮回滚、配色与退出提示均已人工验证。设计见 [docs/design.md](docs/design.md)。
 
 ![myterm](icon.png)
 
@@ -11,76 +11,42 @@
 前置：
 
 - Windows 10 1809+ / Windows 11，MSVC 目标（`x86_64-pc-windows-msvc`）
-- Rust 1.90+（`libghostty-vt` 的 MSRV）
-- **Zig 0.17.x** 在 `PATH`（或设置 `ZIG`）——`libghostty-vt` 在构建期用 Zig 编译 Ghostty
+- Rust 1.90+
 - Visual Studio Build Tools（C++ 工作负载）与 Windows SDK
 
-```sh
-nsh check          # cargo check + TS 类型检查
-cargo test         # ConPTY → libghostty-vt → 帧 的端到端测试
-nsh run            # 打开窗口（= cargo run）
-nsh package --target windows   # 生成 .nsh/out/myterm/ 与 myterm.zip
-```
-
-首次构建会克隆固定 commit 的 Ghostty 并编译，约 1–2 分钟，Zig 缓存 ~340 MB。离线/可复现构建：
+不需要 CMake、Zig 或任何系统级依赖：`libghostty-vt` 的静态库已随仓库提供。
 
 ```sh
-GHOSTTY_SOURCE_DIR=<ghostty checkout> GHOSTTY_ZIG_SYSTEM_DIR=<zig package dir> cargo build
+cargo build -p app     # 构建
+cargo run -p app       # 打开窗口
+cargo test             # 布局与 VT 绑定的单元测试
 ```
-
-依赖按 git commit 锁定（`libghostty-vt` 仍是 pre-1.0）。注意：crates.io 的 `libghostty-vt 0.2.2` 固定的 Ghostty 要求 **Zig 0.15.2**；当前 git commit 要求 **Zig 0.17.x**。
-
-## 功能
-
-- **标签**：新建、关闭、切换；每个标签独立会话与回滚；标题跟随 shell 的 OSC 标题。
-- **配置文件**：发现 PowerShell 7 / Windows PowerShell / cmd / WSL / Git Bash；`+` 默认配置，`⌄` 选择。
-- **选择与剪贴板**：鼠标拖选、全选、复制、粘贴；右键菜单含复制/粘贴/全选/查找/关闭窗格。
-- **查找**（`Ctrl+Shift+F`）：搜索回滚缓冲，显示 `当前/总数`，`Enter`/`↑↓` 跳转，当前命中高亮，`Esc` 关闭。
-- **命令面板**（`Ctrl+Shift+P`）：按标题或英文关键字过滤，`Enter` 执行，含新建标签（按配置）、查找、复制、粘贴、全选、关闭、滚动。
-- **退出状态**：进程退出后顶部出现退出条（退出码、重新启动、关闭窗格），标签标记「已退出」。
-- **启动失败 / 空状态**：就地错误面板；关闭最后一个标签后显示新建入口。
-- **打包**：`nsh package --target windows` 生成带图标的单目录与 zip。
-
-### 快捷键
-
-| 命令 | 快捷键 |
-| --- | --- |
-| 新建标签（默认配置） | `Ctrl+Shift+T` |
-| 关闭标签 / 窗格 | `Ctrl+Shift+W` |
-| 下一个 / 上一个标签 | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| 跳到标签 1–9 | `Ctrl+1`…`Ctrl+9` |
-| 查找 / 下一个 / 上一个 | `Ctrl+Shift+F` / `Enter` / `Shift+Enter` |
-| 命令面板 | `Ctrl+Shift+P` |
-| 复制 / 粘贴 | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
-| 全选 | `Ctrl+Shift+U`（`Ctrl+Shift+A` 被输入法/输入框占用） |
-| 向上 / 向下回滚 | `Shift+PageUp` / `Shift+PageDown` |
-| `Ctrl+C` 等终端按键 | 原样发给 shell（由 libghostty 编码） |
 
 ## 结构
 
-```text
-src/lib.rs        AppState、标签栏、窗格、查找条、命令面板、右键菜单、快捷键
-src/grid.rs       单元格度量与 Canvas 绘制（背景段、文本、选区、光标）
-src/term.rs       VT 线程：Terminal + RenderState → 帧；选择/查找/滚动
-src/session.rs    ConPTY：读/写线程、resize、退出轮询、命令通道
-src/profiles.rs   配置文件发现
-src/keys.rs       NSH keystroke → libghostty key::Key/Mods
-tests/pty_vt.rs   ConPTY → 网格 的端到端测试
-tests/profiles.rs 配置文件发现的测试
+```
+crates/
+  vt-sys/   libghostty-vt 1.0.0 的裸 FFI 声明 + 预编译静态库
+  vt/       安全封装：所有权、错误、颜色、渲染状态、按键编码
+  pty/      ConPTY 进程与读写线程
+  app/      GPUI Kit 界面：标签、窗格、渲染、快捷键
 ```
 
-线程模型：PTY 读线程 → VT 线程（独占 `Terminal`，`!Send`）→ 最新帧 → UI 线程 Canvas。帧按 ~60 Hz 节流，未变化时不重绘。
+依赖只向下：`app → pty/vt → vt-sys`。`vt-sys` 之外没有 `unsafe`。
 
-输入：隐藏 `input()` 只负责键盘焦点与 IME；普通按键走 `on_key_press`（每次一个字符），组合键/特殊键走 `on_key` → `key::Encoder`；输入框设为 `paste_behavior(Report)`，粘贴由应用自己写 PTY。
+## 功能
 
-## 已知 NSH 限制
+- **终端渲染**：自定义 `Element` 按行迭代绘制，支持粗体、斜体、下划线、反显、隐藏、删除线与上划线；宽字符占两格。
+- **输入**：普通字符、功能键、方向键、`Ctrl` 组合键；按键编码交给解析器，因此 `application cursor keys` 等模式自动正确。
+- **标签**：新建（`Ctrl+Shift+T`）、关闭（`Ctrl+Shift+Q`）；标题跟随 shell 的 OSC 标题，路径会被截成文件名。
+- **分屏**：左右（`Ctrl+Shift+D`）、上下（`Ctrl+Shift+E`）、关闭窗格（`Ctrl+Shift+W`）、`Alt+方向键` 切换；嵌套分屏按比例分配。
+- **滚轮**：回滚视口，超出半屏自动回到底部；有历史时右侧显示细滚动条。
+- **配色**：ANSI 16 色与默认前景/背景注入解析器，因此查询颜色的程序得到与渲染一致的值。
+- **退出提示**：进程退出后在窗格底部显示退出码，保留最后一帧输出。
+- **剪贴板**：`Ctrl+C` 复制全部屏幕内容（有选区时），`Ctrl+V` 粘贴。
 
-- **右对齐布局不可用**：`justify_between` 的末项与 `absolute().right(..)` 不绘制。尺寸指示和退出条按钮因此行内左对齐。
-- **窗口下半部的同级视图不绘制**（M0 记录）：chrome 放顶部；浮层（命令面板、右键菜单）放在画布**之后**才能盖在终端上。
-- 通用视图没有滚轮事件：回滚用键盘。
+## 已知限制
 
-## 未完成
-
-- 分屏（M2）、设置页（M2）、右键「清空回滚缓冲」。
-- 滚轮回滚 / 平滑滚动（M3）、kitty graphics（M3）、系统通知（M3）、会话恢复（M3）。
-- 中文 IME 实机验证。
+- 鼠标拖选与查找尚未接入（`vt` 层已提供选区与搜索接口）。
+- IME 组字依赖 GPUI 平台的输入法通道，中文输入未做端到端验证。
+- 仅支持 Windows。
