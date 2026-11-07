@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -1267,6 +1268,7 @@ impl Render for Workspace {
 
         let mut body = div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             // The body is deliberately left unpainted. The title bar wants the
@@ -1363,7 +1365,9 @@ impl Render for Workspace {
                 .child(self.render_panes(tab, style, cx)),
         );
 
-        body.child(content)
+        body = body.child(content);
+
+        body
     }
 }
 
@@ -2072,6 +2076,9 @@ impl Workspace {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let active = self.active_tab;
         let maximized = window.is_maximized();
+        // The bar drops its split buttons once panes have their own; see the
+        // comment at their call site.
+        let multi = self.active_tab().is_some_and(|tab| tab.panes.len() > 1);
 
         // The bar is chrome: one step warmer than the grid, flat rather than
         // glossy, and separated from the panes by a single hairline. The app mark
@@ -2141,20 +2148,52 @@ impl Workspace {
             )
             // The list comes before the pane actions: it is a place to go, not
             // an action on the current pane.
-            .child(
-                icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
-                    cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                        workspace.split_active(Axis::Horizontal, window, cx);
-                    }),
-                ),
-            )
-            .child(
-                icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx).on_click(
-                    cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                        workspace.split_active(Axis::Vertical, window, cx);
-                    }),
-                ),
-            )
+            // Once there is more than one pane, every pane header carries its own
+            // split, zoom and close controls, so the title bar's copies are a
+            // second set of the same buttons pointing at a pane the user did not
+            // choose. They go away, and come back when there is one pane again —
+            // a single pane has no header to hold them.
+            .when(!multi, |this| {
+                this.child(
+                    icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
+                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                            workspace.split_active(Axis::Horizontal, window, cx);
+                        }),
+                    ),
+                )
+                .child(
+                    icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx).on_click(
+                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                            workspace.split_active(Axis::Vertical, window, cx);
+                        }),
+                    ),
+                )
+            })
+            // The version is a control rather than a line of text: it is the
+            // one place that answers "which build is this", which matters when
+            // the app updates itself and two machines can be a version apart.
+            //
+            // Its detail is a popover anchored to the button, not a modal. This
+            // is reference information: nothing here needs a decision, and
+            // dimming the terminal to show it would interrupt work to answer a
+            // passing question.
+            .child({
+                // Copied out before the closures below capture `theme`.
+                // Copied out before the closure below captures `theme`.
+                let card_theme = theme.clone();
+                let trigger = Button::new("about")
+                    .text()
+                    .compact()
+                    .label(format!("v{}", update::current_version()))
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground);
+
+                gpui_kit::component::popover::Popover::new("about-popover")
+                    .anchor(Anchor::TopRight)
+                    .offset(px(6.0))
+                    .trigger(trigger)
+                    .content(move |_, _, _| about_card(&card_theme))
+            })
             // The theme toggle shows the theme it switches to, not the one in
             // use, which is the convention every app with this control follows.
             .child(
@@ -2505,6 +2544,107 @@ fn pane_header(
                     }),
                 )),
         )
+}
+
+/// The about card: what this is, which build, and where it comes from.
+///
+/// Kept short on purpose. A version panel that lists every dependency is a
+/// debug screen; the useful facts are the version, the runtime, and the address
+/// of the project.
+///
+/// The version is the headline, not a row among equals: it is the one fact
+/// anyone opens this for, and the only one that changes between builds.
+///
+/// The surface, ring and shadow belong to the popover that hosts this, so the
+/// card contributes only its contents and its own width. Drawing a second
+/// background here would nest one sheet inside another.
+fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
+    let muted = theme.muted_foreground;
+    let faint = theme.border;
+    let accent = theme.ring;
+    let text = theme.foreground;
+
+    let row = move |label: &'static str, value: &'static str| {
+        div()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .justify_between()
+            .gap(px(32.0))
+            .w_full()
+            .child(div().text_size(px(11.5)).text_color(muted).child(label))
+            .child(div().text_size(px(11.5)).text_color(text).child(value))
+    };
+
+    div()
+        .w(px(268.0))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(icon_data(APP_MARK, 28.0, accent))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(text)
+                                .child("myterm"),
+                        )
+                        // The version rides with the name rather than in the
+                        // table below: it belongs to the product, and putting it
+                        // in the table would give it the same weight as the
+                        // toolkit it happens to use.
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(accent)
+                                .child(version_label()),
+                        ),
+                ),
+        )
+        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(9.0))
+                .mt(px(14.0))
+                .child(row("终端解析", "libghostty-vt 1.0.0"))
+                .child(row("界面框架", "GPUI Kit 0.9"))
+                .child(row("平台", "Windows")),
+        )
+        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
+        .child(
+            div()
+                .id("about-link")
+                .mt(px(12.0))
+                .text_size(px(11.0))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |this| this.text_color(accent))
+                .on_click(|_: &ClickEvent, _, cx| {
+                    cx.open_url("https://github.com/tiramission/myterm");
+                })
+                .child("github.com/tiramission/myterm"),
+        )
+        .into_any_element()
+}
+
+/// The version as a `&'static str`, so the rows above can take plain strings
+/// rather than each owning a `String`.
+fn version_label() -> &'static str {
+    // `current_version` is `env!`-derived, so this is one short string per
+    // process; the leak is deliberate and bounded.
+    Box::leak(format!("v{}", update::current_version()).into_boxed_str())
 }
 
 /// A small split control floating inside a pane.

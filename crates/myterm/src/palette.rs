@@ -30,6 +30,9 @@ struct Tokens {
     brand: u32,
     /// The accent at the opacity used for tints and washes.
     brand_soft: u32,
+    /// The scrim behind an overlay. Always darker than the surfaces under it,
+    /// in both modes: a scrim the colour of the background covers nothing.
+    scrim: u32,
     pill: u32,
     red: u32,
     amber: u32,
@@ -46,6 +49,7 @@ const DARK: Tokens = Tokens {
     text_3: 0x6f7768,
     brand: 0xc3ec74,
     brand_soft: 0x262b23,
+    scrim: 0x000000,
     pill: 0x262b23,
     red: 0xff6b6b,
     amber: 0xf5b84a,
@@ -62,6 +66,7 @@ const LIGHT: Tokens = Tokens {
     text_3: 0x8b9184,
     brand: 0x4f7d14,
     brand_soft: 0xeef0ea,
+    scrim: 0x1b1f18,
     pill: 0xeef0ea,
     red: 0xc02b2b,
     amber: 0x9a6b00,
@@ -84,6 +89,9 @@ pub struct Palette {
     pub text_3: Hsla,
     pub brand: Hsla,
     pub brand_soft: Hsla,
+    /// Black in dark mode, the deepest ink tone in light mode; the two need
+    /// different scrims to look equally dim over their own surfaces.
+    pub scrim: Hsla,
     pub pill: Hsla,
     pub red: Hsla,
     pub amber: Hsla,
@@ -109,6 +117,7 @@ impl Palette {
             text_3: hex(t.text_3),
             brand: hex(t.brand),
             brand_soft: hex(t.brand_soft),
+            scrim: hex(t.scrim),
             pill: hex(t.pill),
             red: hex(t.red),
             amber: hex(t.amber),
@@ -210,7 +219,10 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
 
     colors.popover = p.surface;
     colors.popover_foreground = p.text;
-    colors.overlay = p.bg;
+    // The scrim has to darken what is under it in both modes, so it is a near
+    // black rather than the background tone. Using `bg` here made it invisible
+    // over the very surface it was meant to cover.
+    colors.overlay = p.scrim.opacity(if p.dark { 0.58 } else { 0.34 });
     colors.group_box = p.bg_soft;
     colors.group_box_foreground = p.text;
     colors.description_list_label = p.surface;
