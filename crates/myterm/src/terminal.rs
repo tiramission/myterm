@@ -177,29 +177,35 @@ impl Session {
     }
 
     /// Writes raw bytes to the child.
-    pub fn write(&self, bytes: &[u8]) {
+    ///
+    /// Pasting is typing, so it pulls the viewport back to the live end for the
+    /// same reason a keystroke does.
+    pub fn write(&mut self, bytes: &[u8]) {
         self.pty.write(bytes);
+        self.term.scroll(vt::Scroll::Bottom);
+        self.capture();
     }
 
     /// Encodes and writes one key press.
+    ///
+    /// Typing pulls the viewport back to the live end. A user who scrolled up to
+    /// read something and then starts typing is typing at the bottom, and
+    /// leaving the view where it was means the characters they send are not on
+    /// screen — the shell echoes them into a region they cannot see.
     pub fn send_key(&mut self, input: vt::KeyInput<'_>) {
         let bytes = self.term.encode_key(input);
-        if !bytes.is_empty() {
-            self.pty.write(&bytes);
+        if bytes.is_empty() {
+            return;
         }
+        self.pty.write(&bytes);
+        self.term.scroll(vt::Scroll::Bottom);
+        self.capture();
     }
 
     /// Scrolls the viewport by `delta` rows (negative is older).
     pub fn scroll(&mut self, delta: isize) {
         self.term.scroll(vt::Scroll::Delta(delta));
         self.capture();
-    }
-
-    /// The plain text of the whole active screen.
-    pub fn select_all_text(&mut self) -> Option<String> {
-        let text = self.term.select_all_text();
-        self.capture();
-        text
     }
 
     /// Sets the selection from two viewport cells and refreshes the frame.

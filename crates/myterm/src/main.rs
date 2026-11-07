@@ -51,6 +51,10 @@ const ZOOM_OUT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 const WINDOW_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
 const WINDOW_RESTORE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="4" y="8" width="12" height="12" rx="1.5"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16"/></svg>"#;
 
+/// The close cross on a tab. Smaller and lighter than the window caption's,
+/// because it sits inside a 18-pixel circle rather than a full caption button.
+const TAB_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
+
 /// The app mark in the title bar: a prompt caret inside a window frame.
 ///
 /// Drawn inline because several icons from the bundled set render blank on this
@@ -347,6 +351,8 @@ pub struct Workspace {
     sidebar_width: f32,
     /// Present while the list's edge is being dragged.
     sidebar_drag: Option<SidebarDrag>,
+    /// Whether Tab has been claimed from the focus system. Registered once.
+    tab_claimed: bool,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -377,6 +383,7 @@ impl Workspace {
             updating: false,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
+            tab_claimed: false,
             resize_drag: None,
             focus: cx.focus_handle(),
         }
@@ -398,6 +405,7 @@ impl Workspace {
     /// Starts polling the shells, and focuses the grid once it exists.
     fn ensure_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_ticking(cx);
+        self.claim_tab_key(cx);
         // Once per run, and not on the first frame: the terminal should be
         // usable before anything asks the network a question.
         self.check_for_update(cx);
@@ -405,6 +413,50 @@ impl Workspace {
         if !self.focus.is_focused(window) {
             self.focus.focus(window, cx);
         }
+    }
+
+    /// Keeps Tab out of the focus system so the shell receives it.
+    ///
+    /// `gpui_base` binds Tab to focus traversal at the root, and that binding is
+    /// dispatched before `capture_key_down` runs. In a terminal Tab is a
+    /// character the shell has to receive — completion is built on it — so the
+    /// keystroke has to be claimed before bindings resolve.
+    ///
+    /// The interceptor is the only hook early enough for that. It is registered
+    /// once, and it declines the keystroke whenever the terminal is not the
+    /// focused element, so ordinary focus traversal still works in any future
+    /// dialog.
+    fn claim_tab_key(&mut self, cx: &mut Context<Self>) {
+        if self.tab_claimed {
+            return;
+        }
+        self.tab_claimed = true;
+
+        let focus = self.focus.clone();
+        let entity = cx.entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let keystroke = &event.keystroke;
+            if keystroke.key != "tab" || !focus.is_focused(window) {
+                return;
+            }
+            // Shift+Tab is the shell's reverse completion, so it goes to the
+            // pane as well. A control or alt chord is a shortcut, not a Tab.
+            if keystroke.modifiers.control || keystroke.modifiers.alt {
+                return;
+            }
+
+            let keystroke = keystroke.clone();
+            entity.update(cx, |workspace, cx| {
+                if let Some(input) = key_input(&keystroke)
+                    && let Some(pane) = workspace.active_pane_mut()
+                {
+                    pane.session.send_key(input);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Polls the terminals on a timer instead of on every paint.
@@ -678,6 +730,26 @@ impl Workspace {
         // App shortcuts come first: they must not reach the shell.
         if mods.control && mods.shift {
             match keystroke.key.as_str() {
+                // Copy and paste are `Ctrl+Shift+C` / `Ctrl+Shift+V`, not the
+                // bare chords. A terminal has to pass `Ctrl+C` and `Ctrl+V`
+                // through: `Ctrl+C` interrupts the foreground program, and
+                // `Ctrl+V` is quoted-insert in a readline shell. Taking them for
+                // the clipboard breaks the shell to serve the app.
+                "c" => {
+                    self.copy_selection(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "v" => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        && let Some(pane) = self.active_pane_mut()
+                    {
+                        pane.session.write(text.as_bytes());
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 "t" => {
                     self.new_tab(window, cx);
                     cx.stop_propagation();
@@ -738,23 +810,6 @@ impl Workspace {
                 cx.stop_propagation();
                 return;
             }
-        }
-
-        if mods.control && keystroke.key == "c" && has_selection(self) {
-            self.copy_selection(cx);
-            cx.stop_propagation();
-            return;
-        }
-
-        if mods.control && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                if let Some(pane) = self.active_pane_mut() {
-                    pane.session.write(text.as_bytes());
-                }
-                cx.notify();
-            }
-            cx.stop_propagation();
-            return;
         }
 
         if let Some(input) = key_input(keystroke) {
@@ -938,18 +993,18 @@ impl Workspace {
     }
 
     fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        // A drag leaves a real selection behind, so copy exactly that. With no
-        // selection the old behaviour is kept: copy the whole screen, which is
-        // what people reach for when they want the output they just ran.
-        let text = match self.selection {
-            true => self
-                .active_pane_mut()
-                .and_then(|pane| pane.session.selected_text()),
-            false => self
-                .active_pane_mut()
-                .and_then(|pane| pane.session.select_all_text()),
-        };
-        if let Some(text) = text {
+        // Only a real selection is copied. Copying the whole screen when nothing
+        // is selected looks like a convenience and is not one: a terminal's
+        // screen is mostly the prompt and output from commands the user has
+        // already dealt with, and pasting that somewhere is rarely what they
+        // meant. Selecting nothing and getting nothing is the honest answer.
+        if !self.selection {
+            return;
+        }
+        if let Some(text) = self
+            .active_pane_mut()
+            .and_then(|pane| pane.session.selected_text())
+        {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -2041,7 +2096,18 @@ impl Workspace {
                     .justify_center()
                     .size(px(26.0))
                     .window_control_area(WindowControlArea::Drag)
-                    .child(icon_data(APP_MARK, theme.ring)),
+                    .child(icon_data(APP_MARK, 16.0, theme.ring)),
+            )
+            // The list toggle sits beside the mark, on the same edge as the list
+            // it opens. On the far side it was a control whose subject was
+            // somewhere else, and once the list collapsed to a rail it was the
+            // only way back that did not involve finding the drag edge.
+            .child(
+                icon_button("toggle-sidebar", Glyph::Inline(SIDEBAR_ICON), &theme, cx)
+                    .when(self.sidebar_shown(), |this| this.bg(theme.muted))
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                        workspace.toggle_sidebar(cx);
+                    })),
             );
 
         // Tabs sit close together in a group, the way a pill row reads; the
@@ -2475,7 +2541,7 @@ fn pane_action(
         .cursor_pointer()
         .hover(move |this| this.bg(theme.muted))
         .on_click(on_click)
-        .child(icon_data(icon, theme.muted_foreground))
+        .child(icon_data(icon, 16.0, theme.muted_foreground))
 }
 
 /// One tab: name, pane count, and a close affordance that only appears when
@@ -2547,6 +2613,14 @@ fn tab_chip(
     }
 
     if closable {
+        // The cross is always drawn, faintly, rather than appearing on hover.
+        // Hover-only controls are invisible to anyone who does not already know
+        // they are there, and the previous attempt hid it behind `opacity(0.0)`
+        // plus `group_hover`, which never fired: the button had no hitbox to
+        // hover in the first place.
+        //
+        // The glyph is an inline SVG rather than `IconName::X`, whose bundled
+        // path draws blank here — an invisible button that still took clicks.
         chip = chip.child(
             div()
                 .id(("close-tab", index))
@@ -2555,15 +2629,9 @@ fn tab_chip(
                 .justify_center()
                 .size(px(18.0))
                 .rounded(px(999.0))
-                .opacity(0.0)
-                .group_hover("tab", |this| this.opacity(1.0))
-                .hover(|this| this.bg(theme.muted))
-                .child(
-                    gpui_kit::svg()
-                        .path(IconName::X.path())
-                        .size(px(12.0))
-                        .text_color(theme.muted_foreground),
-                )
+                .cursor_pointer()
+                .hover(move |this| this.bg(theme.muted))
+                .child(icon_data(TAB_CLOSE, 10.0, theme.muted_foreground))
                 .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     workspace.close_tab(index, cx);
@@ -2601,7 +2669,7 @@ fn icon_button(
     let color = theme.muted_foreground;
     let glyph = match icon.into() {
         Glyph::Asset(path) => icon_element(path, color),
-        Glyph::Inline(svg) => icon_data(svg, color),
+        Glyph::Inline(svg) => icon_data(svg, 16.0, color),
     };
 
     // Round, like every other control in the bar. A square icon button next to
@@ -2630,10 +2698,14 @@ fn icon_element(path: SharedString, color: Hsla) -> AnyElement {
 }
 
 /// Draws an inline SVG, for glyphs the bundled assets cannot provide.
-fn icon_data(svg: &'static [u8], color: Hsla) -> AnyElement {
+///
+/// The size is a parameter because the same drawing appears at different
+/// scales: a toolbar glyph is sixteen pixels, while the cross inside a tab has
+/// to be smaller than that or it fills the circle it sits in.
+fn icon_data(svg: &'static [u8], size: f32, color: Hsla) -> AnyElement {
     gpui_kit::component::Icon::default()
         .data(svg)
-        .with_size(px(16.0))
+        .with_size(px(size))
         .text_color(color)
         .into_any_element()
 }
@@ -2663,7 +2735,7 @@ fn window_button(
     // user is least likely to want.
     let glyph = match icon {
         Glyph::Asset(path) => icon_element(path, color),
-        Glyph::Inline(svg) => icon_data(svg, color),
+        Glyph::Inline(svg) => icon_data(svg, 16.0, color),
     };
 
     div()
@@ -2881,10 +2953,6 @@ fn pane_label(pane: &Pane) -> String {
             .unwrap_or(program);
         name.trim_end_matches(".exe").to_owned()
     })
-}
-
-fn has_selection(workspace: &Workspace) -> bool {
-    workspace.selection
 }
 
 /// The grid size a freshly opened window should start with.
