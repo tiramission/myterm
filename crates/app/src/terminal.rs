@@ -53,9 +53,20 @@ pub struct Session {
 impl Session {
     /// Starts `command` and returns a session sized to `cols`×`rows`.
     pub fn spawn(command: &Command, cols: u16, rows: u16) -> Result<Self, String> {
+        let pty = Pty::spawn(command, cols.max(2), rows.max(2))?;
+        Self::from_pty(pty, cols, rows)
+    }
+
+    /// Wraps an already-running pseudo console.
+    ///
+    /// Split out from [`Session::spawn`] because starting the console is by far
+    /// the slowest step — around 45 ms of the 50 ms total — while everything
+    /// here costs a fraction of a millisecond. That lets the caller open the
+    /// console on a background thread and finish the session on the UI thread,
+    /// so no frame is blocked for the duration.
+    pub fn from_pty(pty: Pty, cols: u16, rows: u16) -> Result<Self, String> {
         let cols = cols.max(2);
         let rows = rows.max(2);
-        let pty = Pty::spawn(command, cols, rows)?;
 
         // The parser answers device queries by writing to the PTY. The closure
         // runs inside `feed`, while the parser still borrows the terminal, so it

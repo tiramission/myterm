@@ -11,20 +11,26 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Sizable;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use grid_element::{GridStyle, TerminalGrid};
 use layout::{Axis, Direction, Layout, Rect};
-use pty::Command;
+use pty::{Command, Pty};
 use terminal::Session;
 use vt::Rgb;
 
-/// The 16 ANSI colors the app installs into every terminal.
+/// The split glyphs, drawn inline.
 ///
-/// These are presentation, so they live here rather than in the `vt` crate; the
-/// parser only needs them so escape sequences that query colors answer with the
-/// same values the renderer draws. Entries 16–255 stay at the library default.
+/// The bundled `columns-2` and `rows-2` assets paint nothing on this platform,
+/// so the shapes come from data instead: a frame with one dividing line, which
+/// is what a split does.
+const SPLIT_HORIZONTAL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>"#;
+const SPLIT_VERTICAL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 12h18"/></svg>"#;
+
+/// The 16 ANSI colors the app installs into every terminal.
 const ANSI: [Rgb; 16] = [
     Rgb::new(0x1c, 0x1f, 0x26),
     Rgb::new(0xe0, 0x5c, 0x5c),
@@ -65,21 +71,55 @@ struct Pane {
 }
 
 impl Pane {
-    fn new(command: &Command, cols: u16, rows: u16) -> Result<Self, String> {
-        let mut session = Session::spawn(command, cols, rows)?;
+    /// Starts a shell in a new pane.
+    ///
+    /// The colors come from the caller rather than from a constant here, so the
+    /// grid the parser reports and the grid the theme draws are always the same
+    /// values.
+    fn new(
+        command: &Command,
+        cols: u16,
+        rows: u16,
+        theme: &gpui_kit::component::Theme,
+    ) -> Result<Self, String> {
+        let session = Session::spawn(command, cols, rows)?;
+        Ok(Self::from_session(session, command, cols, rows, theme))
+    }
+
+    /// Builds a pane around a session that is already running.
+    ///
+    /// The console can then be opened on a background thread and the pane
+    /// finished here, which keeps the UI thread off the 45 ms start-up.
+    fn from_session(
+        mut session: Session,
+        command: &Command,
+        cols: u16,
+        rows: u16,
+        theme: &gpui_kit::component::Theme,
+    ) -> Self {
         session.set_colors(
-            Rgb::new(0xc8, 0xcc, 0xd4),
-            Rgb::new(0x14, 0x16, 0x1b),
-            None,
+            to_rgb(theme.foreground),
+            to_rgb(theme.background),
+            Some(to_rgb(theme.caret)),
             &palette(),
         );
-        Ok(Self {
+        Self {
             session,
             command: command.clone(),
             grid: (cols, rows),
             dims: Rc::new(Cell::new((cols, rows))),
-        })
+        }
     }
+}
+
+/// Converts a theme color to the byte triplet the parser stores.
+fn to_rgb(color: Hsla) -> Rgb {
+    let rgba: Rgba = color.into();
+    Rgb::new(
+        (rgba.r * 255.0).round() as u8,
+        (rgba.g * 255.0).round() as u8,
+        (rgba.b * 255.0).round() as u8,
+    )
 }
 
 /// One tab: a title, the panes it holds, and how they are arranged.
@@ -95,18 +135,31 @@ struct Tab {
 }
 
 impl Tab {
-    fn new(command: &Command, cols: u16, rows: u16) -> Result<Self, String> {
-        let pane = Pane::new(command, cols, rows)?;
+    /// Builds a tab around a pseudo console that is already running.
+    fn from_pty(
+        pty: Pty,
+        command: &Command,
+        cols: u16,
+        rows: u16,
+        theme: &gpui_kit::component::Theme,
+    ) -> Result<Self, String> {
+        let session = Session::from_pty(pty, cols, rows)?;
+        Ok(Self::from_pane(Pane::from_session(
+            session, command, cols, rows, theme,
+        )))
+    }
+
+    fn from_pane(pane: Pane) -> Self {
         let mut panes = BTreeMap::new();
         panes.insert(1, pane);
 
-        Ok(Self {
+        Self {
             title: "终端".to_owned(),
             panes,
             layout: Layout::Leaf(1),
             active: 1,
             next_id: 2,
-        })
+        }
     }
 
     fn active_pane(&self) -> Option<&Pane> {
@@ -118,9 +171,20 @@ impl Tab {
     }
 
     /// Splits the active pane, moving focus into the new one.
-    fn split(&mut self, axis: Axis, cols: u16, rows: u16) -> Result<(), String> {
+    /// Splits the active pane around a pseudo console that is already running.
+    fn split_with_pty(
+        &mut self,
+        axis: Axis,
+        pty: Pty,
+        cols: u16,
+        rows: u16,
+        theme: &gpui_kit::component::Theme,
+    ) -> Result<(), String> {
+        let command = self.command_snapshot();
+        let session = Session::from_pty(pty, cols, rows)?;
+        let pane = Pane::from_session(session, &command, cols, rows, theme);
+
         let id = self.next_id;
-        let pane = Pane::new(&self.command_snapshot(), cols, rows)?;
         self.next_id += 1;
         self.panes.insert(id, pane);
 
@@ -171,42 +235,41 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Builds an empty workspace. The caller installs the first tab, because its
+    /// shell is spawned before the event loop exists.
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let command = pty_command::default_profile();
         let _ = window;
 
         Self {
             tabs: Vec::new(),
             active_tab: 0,
-            command,
+            command: pty_command::default_profile(),
             ticking: false,
             error: None,
             focus: cx.focus_handle(),
         }
     }
 
-    /// Creates the first tab. Deferred to the first render because starting a
-    /// pseudo console inside `open_window` re-enters the app while the window is
-    /// still being built.
+    /// Installs the pane spawned before start-up as the first tab.
+    fn adopt(&mut self, pane: Pane) {
+        let mut panes = BTreeMap::new();
+        panes.insert(1, pane);
+        self.tabs = vec![Tab {
+            title: "终端".to_owned(),
+            panes,
+            layout: Layout::Leaf(1),
+            active: 1,
+            next_id: 2,
+        }];
+    }
+
+    /// Starts polling the shells, and focuses the grid once it exists.
     fn ensure_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tabs.is_empty() || self.error.is_some() {
-            return;
-        }
-
-        let (cols, rows) = initial_grid(window);
-        match Tab::new(&self.command, cols, rows) {
-            Ok(tab) => self.tabs.push(tab),
-            Err(message) => self.error = Some(message),
-        }
-
-        // Focusing during render races the frame being built, so it is deferred
-        // to just after the first paint, when the element exists in the tree.
-        let focus = self.focus.clone();
-        window.defer(cx, move |window, cx| {
-            focus.focus(window, cx);
-        });
-
         self.start_ticking(cx);
+
+        if !self.focus.is_focused(window) {
+            self.focus.focus(window, cx);
+        }
     }
 
     /// Polls the terminals on a timer instead of on every paint.
@@ -225,15 +288,17 @@ impl Workspace {
                     .timer(Duration::from_millis(16))
                     .await;
 
-                let alive = this
-                    .update(cx, |workspace, cx| {
-                        if workspace.poll() {
-                            cx.notify();
-                        }
-                    })
-                    .is_ok();
+                // `update` already holds the app borrow, so the poll result comes
+                // out of the closure and the repaint is requested in a second,
+                // separate update. Calling `notify` inside the first one re-enters
+                // the app and drops the frame.
+                //
+                let changed = match this.update(cx, |workspace, _| workspace.poll()) {
+                    Ok(changed) => changed,
+                    Err(_) => break,
+                };
 
-                if !alive {
+                if changed && this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
             }
@@ -336,17 +401,40 @@ impl Workspace {
         }
     }
 
+    /// Opens a new tab. The console is opened off the UI thread for the same
+    /// reason a split is.
     fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (cols, rows) = initial_grid(window);
-        match Tab::new(&self.command, cols, rows) {
-            Ok(tab) => {
-                self.tabs.push(tab);
-                self.active_tab = self.tabs.len() - 1;
-                self.error = None;
-            }
-            Err(message) => self.error = Some(message),
-        }
-        cx.notify();
+        let command = self.command.clone();
+        let entity = cx.entity();
+        cx.spawn(async move |_, cx| {
+            let pty = cx
+                .background_executor()
+                .spawn(async move { Pty::spawn(&command, cols, rows) })
+                .await;
+
+            entity.update(cx, |workspace, cx| {
+                let pty = match pty {
+                    Ok(pty) => pty,
+                    Err(message) => {
+                        workspace.error = Some(message);
+                        cx.notify();
+                        return;
+                    }
+                };
+                let theme = gpui_kit::component::Theme::global(cx).clone();
+                match Tab::from_pty(pty, &workspace.command, cols, rows, &theme) {
+                    Ok(tab) => {
+                        workspace.tabs.push(tab);
+                        workspace.active_tab = workspace.tabs.len() - 1;
+                        workspace.error = None;
+                    }
+                    Err(message) => workspace.error = Some(message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -477,11 +565,13 @@ impl Workspace {
     }
 
     /// Splits the focused pane and moves focus into the new one.
+    ///
+    /// Starting a pseudo console takes tens of milliseconds, which is long
+    /// enough for the frame timer to fire while the input handler still holds the
+    /// app borrow. The work is therefore queued with `defer`, so it runs after
+    /// the current event is fully dispatched.
     fn split_active(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
         let (cols, rows) = self.grid_dims(window, cx);
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
 
         // A split halves the pane, so the new shell starts at half the grid and
         // is corrected by the next prepaint rather than starting oversized.
@@ -494,11 +584,39 @@ impl Workspace {
             Axis::Horizontal => rows,
         };
 
-        match tab.split(axis, cols, rows) {
-            Ok(()) => self.error = None,
-            Err(message) => self.error = Some(message),
-        }
-        cx.notify();
+        // Opening a pseudo console takes around 45 ms. Doing that on the UI thread
+        // blocks the frame, and any frame requested during the wait re-enters the
+        // app borrow the update holds. The console is therefore opened on a
+        // background thread and only the cheap session wrapping happens here.
+        let command = self.command.clone();
+        let entity = cx.entity();
+        cx.spawn(async move |_, cx| {
+            let pty = cx
+                .background_executor()
+                .spawn(async move { Pty::spawn(&command, cols, rows) })
+                .await;
+
+            entity.update(cx, |workspace, cx| {
+                let pty = match pty {
+                    Ok(pty) => pty,
+                    Err(message) => {
+                        workspace.error = Some(message);
+                        cx.notify();
+                        return;
+                    }
+                };
+                let theme = gpui_kit::component::Theme::global(cx).clone();
+                let Some(tab) = workspace.active_tab_mut() else {
+                    return;
+                };
+                match tab.split_with_pty(axis, pty, cols, rows, &theme) {
+                    Ok(()) => workspace.error = None,
+                    Err(message) => workspace.error = Some(message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Moves focus to the pane in `direction`.
@@ -627,9 +745,7 @@ impl Workspace {
                     .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .when(multi && focused, |this| {
-                        this.border_1().border_color(theme.ring)
-                    })
+                    .bg(style.background)
                     .when(!focused, |this| {
                         this.cursor_pointer().on_mouse_down(
                             MouseButton::Left,
@@ -641,13 +757,29 @@ impl Workspace {
                     .on_scroll(cx.listener(move |workspace, event: &ScrollEvent, _, cx| {
                         workspace.handle_scroll(event, style, cx);
                     }))
-                    .child(TerminalGrid::new(
+                    // The grid fills the padded area, so text never touches the
+                    // window edge and the padding is part of the pane, not a
+                    // layout gap between panes.
+                    .child(div().absolute().inset(px(6.0)).child(TerminalGrid::new(
                         ElementId::Name(format!("grid-{id}").into()),
                         frame,
                         style,
                         focused,
                         dims,
-                    ))
+                    )))
+                    // Focus is shown inside the pane rather than as a border, so
+                    // gaining focus never shifts the text by a pixel.
+                    .when(multi && focused, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.0))
+                                .bg(theme.ring),
+                        )
+                    })
                     .when_some(exit, |this, code| {
                         this.child(
                             div()
@@ -673,7 +805,15 @@ impl Workspace {
                 first,
                 second,
             } => {
-                let mut container = div().flex_1().min_w_0().min_h_0().flex();
+                // A one-pixel gap shows the division without drawing a border on
+                // either side, which keeps each pane's grid aligned to its box.
+                let mut container = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .gap(px(1.0))
+                    .bg(theme.border);
                 container = match axis {
                     Axis::Horizontal => container.flex_row(),
                     Axis::Vertical => container.flex_col(),
@@ -692,9 +832,13 @@ impl Workspace {
                 let first_share = (ratio.clamp(0.1, 0.9) * 1000.0).round();
                 let second_share = 1000.0 - first_share;
 
+                // The wrapper carries the basis, and it is itself a flex container so
+                // the pane inside can fill it. Without that the pane has no box to
+                // stretch into and collapses to nothing.
                 container
                     .child(
                         div()
+                            .flex()
                             .flex_basis(relative(first_share / 1000.0))
                             .min_w_0()
                             .min_h_0()
@@ -702,6 +846,7 @@ impl Workspace {
                     )
                     .child(
                         div()
+                            .flex()
                             .flex_basis(relative(second_share / 1000.0))
                             .min_w_0()
                             .min_h_0()
@@ -742,6 +887,12 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// Draws the tab strip and the pane controls.
+    ///
+    /// The strip carries three levels of meaning and each gets one signal:
+    /// which tab is open (a filled surface), how many panes it holds (a count
+    /// beside the name), and what else can be done (icon buttons on the trailing
+    /// edge, separated from the tabs by empty space rather than a rule).
     fn render_tabs(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let active = self.active_tab;
@@ -750,114 +901,210 @@ impl Workspace {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(36.0))
-            .px_2()
-            .gap_1()
+            .h(px(38.0))
+            .pl_2()
+            .pr_1()
+            .gap(px(2.0))
+            // The strip is a shade off the grid so the tabs sit in it rather than
+            // floating on the terminal background. The selected tab then reads as
+            // the one that connects down into the grid.
+            .bg(theme.muted)
             .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.title_bar);
+            .border_color(theme.border);
 
         for (index, tab) in self.tabs.iter().enumerate() {
             let selected = index == active;
             let title = tab.title.clone();
             let pane_count = tab.panes.len();
+            let closable = self.tabs.len() > 1;
 
-            strip = strip.child(
-                div()
-                    .id(("tab", index))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .h(px(26.0))
-                    .px_3()
-                    .rounded(px(6.0))
-                    .when(selected, |this| this.bg(theme.background))
-                    .when(!selected, |this| this.bg(theme.transparent))
-                    .text_sm()
-                    .text_color(if selected {
-                        theme.foreground
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .hover(|this| this.bg(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                        workspace.active_tab = index;
-                        cx.notify();
-                    }))
-                    .child(title)
-                    .when(pane_count > 1, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(pane_count.to_string()),
-                        )
-                    }),
-            );
+            strip = strip.child(tab_chip(
+                index, title, pane_count, selected, closable, &theme, cx,
+            ));
         }
 
+        strip = strip.child(div().w(px(4.0)));
+        strip = strip.child(icon_button("new-tab", IconName::Plus, &theme, cx).on_click(
+            cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                workspace.new_tab(window, cx);
+            }),
+        ));
+
+        // The pane actions sit at the far edge: they act on the current tab, not
+        // on the tab list, and grouping them with the tabs would say otherwise.
         strip
-            .child(
-                div()
-                    .id("new-tab")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(26.0))
-                    .rounded(px(6.0))
-                    .text_color(theme.muted_foreground)
-                    .hover(|this| this.bg(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                        workspace.new_tab(window, cx);
-                    }))
-                    .child("+"),
-            )
-            // Splitting is also on the toolbar, because a shortcut alone leaves the
-            // feature undiscoverable and untestable without a keyboard.
             .child(div().flex_1())
             .child(
-                div()
-                    .id("split-h")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(24.0))
-                    .px_2()
-                    .rounded(px(6.0))
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .hover(|this| this.bg(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
+                    cx.listener(|workspace, _: &ClickEvent, window, cx| {
                         workspace.split_active(Axis::Horizontal, window, cx);
-                    }))
-                    .child("左右分屏"),
+                    }),
+                ),
             )
             .child(
-                div()
-                    .id("split-v")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(24.0))
-                    .px_2()
-                    .rounded(px(6.0))
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .hover(|this| this.bg(theme.accent))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx).on_click(
+                    cx.listener(|workspace, _: &ClickEvent, window, cx| {
                         workspace.split_active(Axis::Vertical, window, cx);
-                    }))
-                    .child("上下分屏"),
+                    }),
+                ),
             )
     }
 }
 
-/// Converts a GPUI keystroke into the parser's key input.
+/// One tab: name, pane count, and a close affordance that only appears when
+/// there is more than one tab to fall back to.
+fn tab_chip(
+    index: usize,
+    title: String,
+    pane_count: usize,
+    selected: bool,
+    closable: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let text_color = if selected {
+        theme.foreground
+    } else {
+        theme.muted_foreground
+    };
+
+    let mut chip = div()
+        .id(("tab", index))
+        .group("tab")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .pl_3()
+        .pr(if closable { px(4.0) } else { px(12.0) })
+        .rounded(px(7.0))
+        .when(selected, |this| this.bg(theme.secondary_active))
+        .text_sm()
+        .text_color(text_color)
+        .cursor_pointer()
+        .hover(move |this| {
+            // Hovering an inactive tab previews what selecting it does; hovering
+            // the active tab must not lighten it, which would read as a second
+            // state it does not have.
+            if selected {
+                this
+            } else {
+                this.bg(theme.accent).text_color(theme.foreground)
+            }
+        })
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            workspace.active_tab = index;
+            cx.notify();
+        }))
+        .child(
+            div()
+                .max_w(px(180.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(title),
+        );
+
+    if pane_count > 1 {
+        chip = chip.child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(pane_count.to_string()),
+        );
+    }
+
+    if closable {
+        chip = chip.child(
+            div()
+                .id(("close-tab", index))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(18.0))
+                .rounded(px(4.0))
+                .opacity(0.0)
+                .group_hover("tab", |this| this.opacity(1.0))
+                .hover(|this| this.bg(theme.accent))
+                .child(
+                    gpui_kit::svg()
+                        .path(IconName::X.path())
+                        .size(px(12.0))
+                        .text_color(theme.muted_foreground),
+                )
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    workspace.close_tab(index, cx);
+                })),
+        );
+    }
+
+    chip
+}
+
+/// A glyph a toolbar button can draw.
+enum Glyph {
+    /// A path into the bundled icon assets.
+    Asset(SharedString),
+    /// SVG bytes, for shapes the bundled set does not render reliably.
+    Inline(&'static [u8]),
+}
+
+impl From<IconName> for Glyph {
+    fn from(name: IconName) -> Self {
+        Self::Asset(name.path())
+    }
+}
+
+/// A square icon-only button, sized for a toolbar row.
+///
+/// Icon-only controls carry no visible label, so the caller must pass an id that
+/// also reads as a name.
+fn icon_button(
+    id: &'static str,
+    icon: impl Into<Glyph>,
+    theme: &gpui_kit::component::Theme,
+    _cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    let color = theme.muted_foreground;
+    let glyph = match icon.into() {
+        Glyph::Asset(path) => icon_element(path, color),
+        Glyph::Inline(svg) => icon_data(svg, color),
+    };
+
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(26.0))
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .hover(move |this| this.bg(theme.accent))
+        .child(glyph)
+}
+
+/// Draws a 24×24 icon by path, at a fixed size.
+///
+/// Kept in one place so every toolbar glyph shares the same optical size.
+fn icon_element(path: SharedString, color: Hsla) -> AnyElement {
+    gpui_kit::svg()
+        .path(path)
+        .size(px(16.0))
+        .text_color(color)
+        .into_any_element()
+}
+
+/// Draws an inline SVG, for glyphs the bundled assets cannot provide.
+fn icon_data(svg: &'static [u8], color: Hsla) -> AnyElement {
+    gpui_kit::component::Icon::default()
+        .data(svg)
+        .with_size(px(16.0))
+        .text_color(color)
+        .into_any_element()
+}
+
 fn key_input(keystroke: &Keystroke) -> Option<vt::KeyInput<'_>> {
     let key = map_key(&keystroke.key)?;
     let mut mods = 0u16;
@@ -1016,10 +1263,30 @@ fn initial_grid(window: &Window) -> (u16, u16) {
 fn main() {
     env_logger::init();
 
+    // The first shell is started before the event loop exists. A pseudo console
+    // takes about 50 ms to come up, and `App::run` keeps the app borrowed for
+    // all of `on_finish_launching`, so doing this later re-enters the borrow as
+    // soon as the window asks for its first frame.
+    let command = pty_command::default_profile();
+
+    // The pane needs the palette the window will end up with, and the theme is
+    // only installed later in `gpui_kit::init`, so the dark colors are resolved
+    // directly from the theme crate here.
+    let mut theme = gpui_kit::component::Theme::default();
+    theme.colors = (*gpui_kit::component::ThemeColor::dark()).clone();
+    let (mut first_pane, startup_error) = match Pane::new(&command, 120, 40, &theme) {
+        Ok(pane) => (Some(pane), None),
+        Err(message) => (None, Some(message)),
+    };
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
+
+            // A terminal is read as light-on-dark: the grid, the shell colors and
+            // the chrome should agree, so the app starts in the dark theme.
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
@@ -1033,8 +1300,17 @@ fn main() {
                 ..Default::default()
             };
 
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Workspace::new(window, cx))
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let pane = first_pane.take();
+                let error = startup_error.clone();
+                cx.new(|cx| {
+                    let mut workspace = Workspace::new(window, cx);
+                    match pane {
+                        Some(pane) => workspace.adopt(pane),
+                        None => workspace.error = error,
+                    }
+                    workspace
+                })
             })
             .expect("failed to open window");
         });
