@@ -18,19 +18,23 @@ jobs:
     name: Build and test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      # No `key` input. The action already derives one from the rustc version,
+      # the target, the job, and the external dependencies in `Cargo.lock` —
+      # filtering out workspace members, so a version bump does not count.
+      # Adding `hashFiles('**/Cargo.lock')` defeated exactly that: the lockfile
+      # records this workspace's own version, so every release wrote a cache
+      # under a key the next run never asked for, and restored nothing. The
+      # debug and release builds stay apart through `add-job-id-key`, which is
+      # what keeps one from evicting the other.
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          # The vendored static library is 12 MB and never changes, so keying the
-          # cache on the lockfile keeps rebuilds short without it going stale.
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Format
         run: cargo fmt --all --check
@@ -49,15 +53,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
         run: cargo build --release --locked
@@ -70,7 +72,7 @@ jobs:
           Copy-Item target/release/myterm.exe myterm.exe
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: myterm.exe
           # The updater reads the tag, so a release without one is invisible to
