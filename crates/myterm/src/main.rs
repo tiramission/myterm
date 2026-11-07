@@ -1,6 +1,16 @@
 //! The application shell: a single window with a tab strip, one or more panes,
 //! and the key handling that drives them.
 
+// Without this the executable links as a console program, and Windows hands it a
+// console window before the first frame is drawn — a black box behind the app
+// that a double-click should never produce.
+//
+// Only in release: a debug build keeps its console, because that is where its
+// logs and panics go. The shipped binary has no use for either, and the one
+// stdout-dependent path (`--uninstall`) reports through the log rather than
+// through the console it would otherwise inherit.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod grid_element;
 mod install;
 mod layout;
