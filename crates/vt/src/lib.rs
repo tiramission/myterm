@@ -520,7 +520,38 @@ impl Terminal {
     }
 
     /// Formats the current selection as plain text.
+    ///
+    /// A formatter with no selection formats the whole screen, so the
+    /// selection has to be read off the terminal and handed over explicitly.
+    /// Skipping that step is why copying used to put the entire screen on the
+    /// clipboard no matter which cells were highlighted.
     fn format_selection(&mut self) -> Option<String> {
+        let mut selection = sys::GhosttySelection {
+            start: sys::GhosttyGridRef {
+                node: std::ptr::null_mut(),
+                x: 0,
+                y: 0,
+            },
+            end: sys::GhosttyGridRef {
+                node: std::ptr::null_mut(),
+                x: 0,
+                y: 0,
+            },
+            rectangle: false,
+        };
+
+        let has_selection = unsafe {
+            check(sys::ghostty_terminal_get(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_DATA_SELECTION,
+                &mut selection as *mut _ as *mut c_void,
+            ))
+            .is_ok()
+        };
+        if !has_selection {
+            return None;
+        }
+
         let mut formatter: sys::GhosttyFormatter = std::ptr::null_mut();
         let ok = unsafe {
             sys::ghostty_formatter_terminal_new(std::ptr::null(), &mut formatter, self.raw)
@@ -535,6 +566,22 @@ impl Terminal {
                 formatter,
                 sys::GHOSTTY_FORMATTER_OPT_EMIT,
                 &emit as *const _ as *const c_void,
+            );
+
+            let _ = sys::ghostty_formatter_set(
+                formatter,
+                sys::GHOSTTY_FORMATTER_OPT_SELECTION,
+                &selection as *const _ as *const c_void,
+            );
+
+            // Copied text joins lines that the terminal wrapped: the wrap is a
+            // property of the window width, not of the text the program wrote,
+            // and pasting a paragraph broken at the old width is never useful.
+            let unwrap = true;
+            let _ = sys::ghostty_formatter_set(
+                formatter,
+                sys::GHOSTTY_FORMATTER_OPT_UNWRAP,
+                &unwrap as *const _ as *const c_void,
             );
 
             let mut ptr: *mut u8 = std::ptr::null_mut();

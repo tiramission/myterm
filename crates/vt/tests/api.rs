@@ -219,3 +219,59 @@ fn key_encoding_produces_expected_sequences() {
     });
     assert_eq!(ctrl_c, b"\x03", "Ctrl+C should encode as ETX");
 }
+
+/// Copying must return only the highlighted cells.
+///
+/// A formatter with no selection formats the whole screen, so this is the test
+/// that catches a copy which silently ignores the selection and puts every line
+/// the user did not pick on the clipboard.
+#[test]
+fn selected_text_returns_only_the_selected_cells() {
+    let mut term = Terminal::new(30, 4, None).expect("terminal");
+    term.feed(b"first line\r\nsecond line\r\nthird line");
+
+    // Columns 0..=4 of the second row: "secon".
+    assert!(
+        term.set_selection((0, 1), (4, 1)),
+        "setting a selection should succeed"
+    );
+
+    let text = term.selected_text().expect("selection text");
+    assert_eq!(text, "secon");
+
+    assert!(
+        !text.contains("first") && !text.contains("third"),
+        "only the selected row should be copied, got {text:?}"
+    );
+}
+
+/// A selection that spans rows comes back as those rows, in order.
+///
+/// A linear selection includes the whole of every row between its two ends:
+/// only the first and last row are cut at the column. That is what a reader
+/// means by highlighting from one line to another.
+#[test]
+fn selected_text_spans_rows() {
+    let mut term = Terminal::new(30, 4, None).expect("terminal");
+    term.feed(b"aaa\r\nbbb\r\nccc");
+
+    assert!(term.set_selection((1, 0), (1, 2)), "selection");
+
+    let text = term.selected_text().expect("selection text");
+    assert_eq!(text, "aa\nbbb\ncc");
+}
+
+/// Clearing the selection leaves nothing to copy.
+#[test]
+fn cleared_selection_has_no_text() {
+    let mut term = Terminal::new(30, 4, None).expect("terminal");
+    term.feed(b"hello");
+
+    assert!(term.set_selection((0, 0), (4, 0)), "selection");
+    term.clear_selection();
+
+    assert!(
+        term.selected_text().is_none(),
+        "a cleared selection should not format as text"
+    );
+}
