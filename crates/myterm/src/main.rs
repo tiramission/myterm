@@ -2178,15 +2178,19 @@ impl Workspace {
             // dimming the terminal to show it would interrupt work to answer a
             // passing question.
             .child({
-                // Copied out before the closures below capture `theme`.
                 // Copied out before the closure below captures `theme`.
                 let card_theme = theme.clone();
+                let mark = theme.muted_foreground;
+                // The trigger is the app mark, not the number. A version string
+                // sitting in the bar reads as a status readout and invites the
+                // eye to compare it every time; the build number is something to
+                // look up, not something to monitor.
                 let trigger = Button::new("about")
                     .text()
                     .compact()
-                    .label(format!("v{}", update::current_version()))
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_foreground);
+                    .tooltip("关于 myterm")
+                    .accessibility_label("关于 myterm")
+                    .child(icon_data(APP_MARK, 16.0, mark));
 
                 gpui_kit::component::popover::Popover::new("about-popover")
                     .anchor(Anchor::TopRight)
