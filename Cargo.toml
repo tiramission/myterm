@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/myterm", "crates/pty", "crates/vt", "crates/vt-sys"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+vt = { path = "crates/vt" }
+pty = { path = "crates/pty" }
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

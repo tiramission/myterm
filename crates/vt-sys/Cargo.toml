@@ -1,0 +1,10 @@
+[package]
+name = "vt-sys"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+links = "ghostty-vt-static"
+
+[lib]
+name = "vt_sys"
+path = "src/lib.rs"

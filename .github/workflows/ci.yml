@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures: the project has kept a clean build, and a CI that
+  # tolerates them is how that stops being true.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # No `key` input. The action already derives one from the rustc version,
+      # the target, the job, and the external dependencies in `Cargo.lock` —
+      # filtering out workspace members, so a version bump does not count.
+      # Adding `hashFiles('**/Cargo.lock')` defeated exactly that: the lockfile
+      # records this workspace's own version, so every release wrote a cache
+      # under a key the next run never asked for, and restored nothing.
+      #
+      # `key: debug` says which build this cache holds. The release job keeps no
+      # cache at all, so this is the only profile cached in the repository.
+      #
+      # Saving is limited to `main` because a cache is scoped to the ref that
+      # wrote it: saving on a tag would create an entry only that tag can read,
+      # which is how this repository once accumulated a copy per release.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: debug
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  release:
+    name: Release
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # No cache. The release profile cannot reuse the check job's debug
+      # artifacts, and a cache written on a tag is invisible to every other tag,
+      # so a release cache could only ever be maintained by a separate job on
+      # the default branch — which is more machinery than one build per release
+      # is worth. ripgrep, helix and uv all ship releases without caching for
+      # the same reason.
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Stage the asset
+        shell: pwsh
+        run: |
+          # The updater looks for exactly this name in the release assets, so the
+          # name is part of the interface and not a detail.
+          Copy-Item target/release/myterm.exe myterm.exe
+
+      - name: Publish
+        uses: softprops/action-gh-release@v3
+        with:
+          files: myterm.exe
+          # The updater reads the tag, so a release without one is invisible to
+          # every installed copy.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
