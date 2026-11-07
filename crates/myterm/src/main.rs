@@ -2142,13 +2142,6 @@ impl Workspace {
             // The list comes before the pane actions: it is a place to go, not
             // an action on the current pane.
             .child(
-                icon_button("toggle-sidebar", Glyph::Inline(SIDEBAR_ICON), &theme, cx)
-                    .when(self.sidebar_shown(), |this| this.bg(theme.muted))
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                        workspace.toggle_sidebar(cx);
-                    })),
-            )
-            .child(
                 icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx).on_click(
                     cx.listener(|workspace, _: &ClickEvent, window, cx| {
                         workspace.split_active(Axis::Horizontal, window, cx);
