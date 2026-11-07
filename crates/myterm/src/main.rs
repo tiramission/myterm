@@ -2008,47 +2008,81 @@ impl Workspace {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut list = div().flex().flex_col().gap(px(1.0)).px(px(6.0)).pb(px(8.0));
+        // The list sits under either the heading or the title bar itself, so it
+        // brings its own top gap rather than inheriting one from a header that
+        // may not be there.
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .px(px(6.0))
+            .pt(px(6.0))
+            .pb(px(8.0));
         // One answer for "which pane is current", shared with the grid.
         let current = self.effective_active();
+        // With a single tab there is nothing to group, so the header would just
+        // repeat the one word underneath it. It appears when it starts doing the
+        // job it exists for: telling one group from another.
+        let show_tab_headers = self.tabs.len() > 1;
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
 
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(26.0))
-                    .px(px(7.0))
-                    .mt(px(4.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(if current_tab {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(tab.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(tab.panes.len().to_string()),
-                    ),
-            );
+            // A tab header is a label, not a row. It is smaller and quieter than
+            // the panes it names, and it carries the accent bar that says which
+            // tab the window is showing — the pane rows below are all the same
+            // shape, so colour alone is not enough to mark the group.
+            if show_tab_headers {
+                list = list.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(24.0))
+                        .pl(px(7.0))
+                        .pr(px(7.0))
+                        .when(tab_index > 0, |this| this.mt(px(8.0)))
+                        .child(
+                            div()
+                                .w(px(2.0))
+                                .h(px(11.0))
+                                .rounded(px(999.0))
+                                .when(current_tab, |this| this.bg(theme.ring)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(10.5))
+                                .text_color(if current_tab {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground.opacity(0.75)
+                                })
+                                // Tabs are named after what runs in them, so
+                                // several tabs of the same shell all arrive with
+                                // the same name. The position is what actually
+                                // tells them apart, so it leads.
+                                .child(format!("{} {}", tab_index + 1, tab.title)),
+                        )
+                        // The count only earns its place when there is more than
+                        // one pane to count; "1" beside a single row is noise.
+                        .when(tab.panes.len() > 1, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.muted_foreground.opacity(0.7))
+                                    .child(tab.panes.len().to_string()),
+                            )
+                        }),
+                );
+            }
 
-            for (id, pane) in &tab.panes {
+            for (position, (id, pane)) in tab.panes.iter().enumerate() {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
@@ -2097,18 +2131,35 @@ impl Workspace {
                                 } else {
                                     theme.muted_foreground
                                 })
-                                .child(pane_label(pane)),
+                                .child(if tab.panes.len() > 1 {
+                                    // Panes of the same shell all carry the same
+                                    // name, so inside a group of several the
+                                    // position is the only thing that differs.
+                                    format!("{} {}", position + 1, pane_label(pane))
+                                } else {
+                                    pane_label(pane)
+                                }),
                         )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.muted_foreground.opacity(0.85))
-                                .child(status.label()),
-                        ),
+                        .when_some(status.label(), |this, label| {
+                            this.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.muted_foreground.opacity(0.8))
+                                    .child(label),
+                            )
+                        }),
                 );
             }
         }
 
+        // The list holds tabs, so its heading and its button both say tab. The
+        // title bar already offers a pane split; a second plus here that did the
+        // same thing would be one control with two doors.
+        //
+        // The heading only appears once there are several tabs to head. With one
+        // tab it would label a list of one, and the title bar already says which
+        // tab is open — the row is better spent on the list itself.
         let header = div()
             .flex()
             .flex_row()
@@ -2116,21 +2167,22 @@ impl Workspace {
             .h(px(TITLE_BAR_HEIGHT))
             .pl(px(13.0))
             .pr(px(6.0))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("窗格"),
-            )
-            .child(
-                icon_button("side-new", IconName::Plus, theme, cx).on_click(cx.listener(
-                    |workspace, _: &ClickEvent, window, cx| {
-                        workspace.new_tab(window, cx);
-                    },
-                )),
-            );
+            .when(self.tabs.len() > 1, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .text_size(px(10.5))
+                        .text_color(theme.muted_foreground)
+                        .child("标签"),
+                )
+                .child(
+                    icon_button("side-new", IconName::Plus, theme, cx).on_click(cx.listener(
+                        |workspace, _: &ClickEvent, window, cx| {
+                            workspace.new_tab(window, cx);
+                        },
+                    )),
+                )
+            });
 
         let width = self.sidebar_width;
         let rail = width < RAIL_THRESHOLD;
@@ -3389,11 +3441,17 @@ enum PaneStatus {
 }
 
 impl PaneStatus {
-    fn label(self) -> &'static str {
+    /// The text a row shows beside the name, if any.
+    ///
+    /// `Idle` is deliberately silent. It is what a pane is most of the time, so
+    /// printing it on every row spends a column to say nothing — and a column
+    /// that is usually the same word stops being read at all. The two states
+    /// worth the pixels are the ones that differ from it.
+    fn label(self) -> Option<&'static str> {
         match self {
-            Self::Working => "输出中",
-            Self::Idle => "空闲",
-            Self::Exited => "已退出",
+            Self::Working => Some("输出中"),
+            Self::Idle => None,
+            Self::Exited => Some("已退出"),
         }
     }
 }
