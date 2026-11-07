@@ -49,6 +49,9 @@ pub struct TerminalGrid {
     /// Written during prepaint with the cell count the element actually has
     /// room for, so the owner can size the pseudo console to match.
     dims: Rc<Cell<(u16, u16)>>,
+    /// Written during prepaint with the grid's position in window coordinates,
+    /// so the IME can anchor its candidate window to the caret.
+    window_origin: Rc<Cell<Point<Pixels>>>,
     /// The view that owns this grid, so the element can register itself as the
     /// platform's text input target while it paints.
     entity: Entity<Workspace>,
@@ -62,6 +65,7 @@ impl TerminalGrid {
         style: GridStyle,
         focused: bool,
         dims: Rc<Cell<(u16, u16)>>,
+        window_origin: Rc<Cell<Point<Pixels>>>,
         entity: Entity<Workspace>,
         focus: FocusHandle,
     ) -> Self {
@@ -71,6 +75,7 @@ impl TerminalGrid {
             style,
             focused,
             dims,
+            window_origin,
             entity,
             focus,
         }
@@ -145,6 +150,7 @@ impl Element for TerminalGrid {
             .floor()
             .max(1.0);
         self.dims.set((cols as u16, rows as u16));
+        self.window_origin.set(bounds.origin);
     }
 
     fn paint(

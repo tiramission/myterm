@@ -124,6 +124,10 @@ struct Pane {
     grid: (u16, u16),
     /// Filled by the grid element during prepaint with the cells that fit.
     dims: Rc<Cell<(u16, u16)>>,
+    /// Where the grid landed in window coordinates, filled by the same prepaint.
+    /// The IME needs window coordinates to place its candidate window, and the
+    /// grid is the only thing that knows where it was drawn.
+    origin: Rc<Cell<Point<Pixels>>>,
 }
 
 impl Pane {
@@ -159,6 +163,7 @@ impl Pane {
             command: command.clone(),
             grid: (cols, rows),
             dims: Rc::new(Cell::new((cols, rows))),
+            origin: Rc::new(Cell::new(point(px(0.0), px(0.0)))),
         }
     }
 
@@ -300,6 +305,9 @@ pub struct Workspace {
     /// Cell metrics from the last frame, kept so the IME can anchor its
     /// candidate window without measuring the font again.
     cached_style: GridStyle,
+    /// The caret cell the IME was last told about, so a move can push a fresh
+    /// position instead of waiting for the next composition to start.
+    ime_cursor: (u16, u16),
     focus: FocusHandle,
 }
 
@@ -316,6 +324,7 @@ impl Workspace {
             ticking: false,
             error: None,
             cached_style: GridStyle::default(),
+            ime_cursor: (0, 0),
             focus: cx.focus_handle(),
         }
     }
@@ -439,18 +448,25 @@ impl Workspace {
     /// same metrics the grid paints with. It is only a hint to the platform, so
     /// an approximation near the caret is enough: the candidate list follows the
     /// text being typed, not an exact glyph position.
+    /// Where the IME candidate window should point, in window coordinates.
+    ///
+    /// The grid reports where it was painted during prepaint; the caret cell is
+    /// added to that. Returning pane-local coordinates would leave the candidate
+    /// window pinned near the window's top-left corner instead of following the
+    /// text being typed.
     fn ime_anchor(&self) -> Bounds<Pixels> {
         let Some(pane) = self.active_pane() else {
             return Bounds::new(point(px(0.0), px(0.0)), size(px(1.0), px(1.0)));
         };
         let cursor = pane.session.frame().cursor;
         let style = self.cached_style;
+        let origin = pane.origin.get();
+
+        let width = style.cell_width * f32::from(cursor.x);
+        let height = style.cell_height * f32::from(cursor.y);
 
         Bounds::new(
-            point(
-                style.cell_width * f32::from(cursor.x),
-                style.cell_height * f32::from(cursor.y),
-            ),
+            point(origin.x + width, origin.y + height),
             size(style.cell_width, style.cell_height),
         )
     }
@@ -776,7 +792,15 @@ impl EntityInputHandler for Workspace {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        None
+        // A terminal has no document to select in, but the platform still asks
+        // for the caret before it will place an IME candidate window: the
+        // Windows backend reads this range, feeds it to `bounds_for_range` and
+        // only then moves the window. Answering `None` here left the candidate
+        // list pinned in one spot no matter where the prompt was.
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
     }
 
     fn marked_text_range(
@@ -851,6 +875,21 @@ impl Render for Workspace {
         }
         let style = self.grid_style(window, cx);
         self.cached_style = style;
+
+        // The platform only asks for the caret position when a composition
+        // starts, which is too late to help: by then the candidate window is
+        // already placed. Watching the caret here means a prompt that moves to a
+        // new line pushes a fresh position before the user types anything.
+        let cursor = self
+            .active_pane()
+            .map(|pane| pane.session.frame().cursor)
+            .map(|cursor| (cursor.x, cursor.y))
+            .unwrap_or((0, 0));
+        if cursor != self.ime_cursor {
+            self.ime_cursor = cursor;
+            window.invalidate_character_coordinates();
+        }
+
         let theme = gpui_kit::component::Theme::global(cx).clone();
 
         let mut body = div()
@@ -926,6 +965,7 @@ impl Workspace {
                 let id = *id;
                 let frame = pane.session.frame().clone();
                 let dims = pane.dims.clone();
+                let origin = pane.origin.clone();
                 let exit = pane.session.exit_code();
 
                 div()
@@ -955,6 +995,7 @@ impl Workspace {
                         style,
                         focused,
                         dims,
+                        origin,
                         cx.entity(),
                         self.focus.clone(),
                     )))
