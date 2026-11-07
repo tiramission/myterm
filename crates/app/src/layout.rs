@@ -93,7 +93,7 @@ impl Layout {
     /// deepest split whose two halves contain exactly one of the two panes is
     /// the one the user grabbed, which stays correct when splits are nested.
     pub fn resize_between(&mut self, a: u64, b: u64, ratio: f32) -> bool {
-        let Some(ratio) = Some(ratio.clamp(0.1, 0.9)) else {
+        let Some(ratio) = Some(ratio.clamp(0.05, 0.95)) else {
             return false;
         };
 
@@ -380,6 +380,6 @@ mod tests {
         let Layout::Split { ratio, .. } = layout else {
             panic!("still split");
         };
-        assert!(ratio >= 0.1 && ratio <= 0.9, "got {ratio}");
+        assert!(ratio >= 0.05 && ratio <= 0.95, "got {ratio}");
     }
 }

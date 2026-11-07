@@ -109,9 +109,8 @@ struct Pane {
     /// Filled by the grid element during prepaint with the cells that fit.
     dims: Rc<Cell<(u16, u16)>>,
     /// Where the grid landed in window coordinates, filled by the same prepaint.
-    /// The IME needs it to place its candidate window, the mouse needs it to
-    /// resolve a pointer to a cell, and a split drag needs the extent to turn a
-    /// pointer position into a ratio.
+    /// The IME needs it to place its candidate window and the mouse needs it to
+    /// resolve a pointer to a cell.
     bounds: Rc<Cell<Bounds<Pixels>>>,
 }
 
@@ -757,51 +756,54 @@ impl Workspace {
 
     /// Starts dragging the divider between `left` and `right`.
     ///
-    /// The span the divider travels is measured from the two panes' recorded
-    /// bounds rather than from the split's own box, because only the panes know
-    /// where they were actually painted.
+    /// `span` is the extent the divider travels, measured by the caller from the
+    /// union of both halves. Measuring between the two panes touching the seam
+    /// would be wrong in a nested split, where those panes are only part of their
+    /// halves.
+    ///
+    /// The gap itself is excluded from the share. Flex hands out the space left
+    /// after the gaps, so a ratio computed over the gap included sits about ten
+    /// pixels off — which is what made the divider trail the pointer instead of
+    /// following it.
     fn begin_resize(
         &mut self,
         left: u64,
         right: u64,
         axis: Axis,
         position: Point<Pixels>,
+        span: (Bounds<Pixels>, Bounds<Pixels>),
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        let (Some(l), Some(r)) = (tab.panes.get(&left), tab.panes.get(&right)) else {
-            return;
-        };
-        let (lb, rb) = (l.bounds.get(), r.bounds.get());
+        let (first, second) = span;
+        let gap = PANE_GAP;
 
-        let (start, span) = match axis {
+        let (start, extent, origin) = match axis {
             Axis::Horizontal => (
                 position.x.as_f32(),
-                rb.right().as_f32() - lb.left().as_f32(),
+                second.right().as_f32() - first.left().as_f32() - gap,
+                first.left().as_f32(),
             ),
             Axis::Vertical => (
                 position.y.as_f32(),
-                rb.bottom().as_f32() - lb.top().as_f32(),
+                second.bottom().as_f32() - first.top().as_f32() - gap,
+                first.top().as_f32(),
             ),
         };
-        if span <= 0.0 {
+        if extent <= 0.0 {
             return;
         }
 
-        let ratio = match axis {
-            Axis::Horizontal => (position.x.as_f32() - lb.left().as_f32()) / span,
-            Axis::Vertical => (position.y.as_f32() - lb.top().as_f32()) / span,
-        };
+        // The pointer sits in the middle of the gap, so half of it belongs to each
+        // side: subtracting it puts the divider under the pointer.
+        let ratio = (start - origin - gap / 2.0) / extent;
 
         self.resize_drag = Some(ResizeDrag {
             left,
             right,
             axis,
             start,
-            span,
-            ratio: ratio.clamp(0.1, 0.9),
+            span: extent,
+            ratio: ratio.clamp(0.05, 0.95),
         });
         cx.notify();
     }
@@ -821,7 +823,7 @@ impl Workspace {
         };
         // A share of the whole span rather than an absolute offset, so the same
         // drag code works at any window size and inside a nested split.
-        let ratio = (drag.ratio + (now - drag.start) / drag.span).clamp(0.1, 0.9);
+        let ratio = (drag.ratio + (now - drag.start) / drag.span).clamp(0.05, 0.95);
         let (left, right) = (drag.left, drag.right);
 
         if let Some(tab) = self.active_tab_mut() {
@@ -1479,7 +1481,7 @@ impl Workspace {
                 // The ratio is applied as a flex basis so the engine distributes
                 // the remaining space; a literal width would not account for a
                 // neighbouring split.
-                let first_share = (ratio.clamp(0.1, 0.9) * 1000.0).round();
+                let first_share = (ratio.clamp(0.05, 0.95) * 1000.0).round();
                 let second_share = 1000.0 - first_share;
 
                 // The divider is a real flex child rather than a gap: a gap
@@ -1487,7 +1489,8 @@ impl Workspace {
                 // adjustment a terminal user makes constantly. It stays one
                 // pixel wide, but a wider transparent area around it gives the
                 // pointer something to hit.
-                let divider = divider_element(*axis, first, second, theme, cx);
+                let dragging = self.resize_drag.is_some();
+                let divider = divider_element(*axis, first, second, tab, dragging, theme, cx);
 
                 // The wrapper carries the basis, and it is itself a flex container so
                 // the pane inside can fill it. Without that the pane has no box to
@@ -1733,11 +1736,12 @@ impl Workspace {
                             workspace.select_tab(tab_index, cx);
                             workspace.focus_pane(id, cx);
                         }))
-                        .child(div().size(px(6.0)).rounded(px(999.0)).bg(match status {
-                            PaneStatus::Working => theme.ring,
-                            PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
-                            PaneStatus::Exited => theme.danger,
-                        }))
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded(px(999.0))
+                                .bg(dot_color(status, selected, theme)),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -1823,7 +1827,7 @@ impl Workspace {
             // The edge is the control: it is where a pointer already goes when
             // it wants to resize a column, and dragging it to the narrow end is
             // how the list collapses into the rail.
-            .child(sidebar_handle(theme, cx))
+            .child(sidebar_handle(theme, self.sidebar_drag.is_some(), cx))
             .into_any_element()
     }
 
@@ -1871,11 +1875,12 @@ impl Workspace {
                             workspace.select_tab(tab_index, cx);
                             workspace.focus_pane(id, cx);
                         }))
-                        .child(div().size(px(7.0)).rounded(px(999.0)).bg(match status {
-                            PaneStatus::Working => theme.ring,
-                            PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
-                            PaneStatus::Exited => theme.danger,
-                        })),
+                        .child(
+                            div()
+                                .size(px(7.0))
+                                .rounded(px(999.0))
+                                .bg(dot_color(status, selected, theme)),
+                        ),
                 );
             }
 
@@ -2049,21 +2054,23 @@ impl Workspace {
 /// cannot say by itself is that it can be moved, so that is all this adds — a
 /// grip that appears under the pointer, the same one the sidebar's edge uses.
 ///
-/// Drawing a third line down the middle was the earlier mistake: card border,
-/// seam, card border is three rules in a dozen pixels, which reads as a fence
-/// rather than a division.
-///
-/// The two panes on either side identify which split is being resized, which is
-/// what keeps a nested split pointing at its own gutter.
+/// The grip stays put while the drag runs. `group_hover` alone drops it the moment
+/// the pointer leaves the eight-pixel band, which is exactly when the user is
+/// watching it.
 fn divider_element(
     axis: Axis,
     first: &Layout,
     second: &Layout,
+    tab: &Tab,
+    dragging: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let left = first.leaves().last().copied();
     let right = second.leaves().first().copied();
+
+    // The extent the divider travels, as the union of both halves.
+    let halves = (subtree_bounds(tab, first), subtree_bounds(tab, second));
 
     /// How long the grip is along the seam.
     const GRIP: f32 = 26.0;
@@ -2072,7 +2079,12 @@ fn divider_element(
         .when(axis == Axis::Horizontal, |this| this.w(px(3.0)).h(px(GRIP)))
         .when(axis == Axis::Vertical, |this| this.h(px(3.0)).w(px(GRIP)))
         .rounded(px(999.0))
-        .bg(theme.ring);
+        .bg(theme.ring)
+        .when(dragging, |this| this.opacity(1.0))
+        .when(!dragging, |this| {
+            this.opacity(0.0)
+                .group_hover("divider", |this| this.opacity(1.0))
+        });
 
     let mut band = div()
         .group("divider")
@@ -2080,10 +2092,7 @@ fn divider_element(
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            grip.opacity(0.0)
-                .group_hover("divider", |this| this.opacity(1.0)),
-        );
+        .child(grip);
 
     band = match axis {
         Axis::Horizontal => band.w(px(PANE_GAP)).h_full().cursor_col_resize(),
@@ -2093,21 +2102,79 @@ fn divider_element(
     band.on_mouse_down(
         MouseButton::Left,
         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
-            if let (Some(left), Some(right)) = (left, right) {
-                workspace.begin_resize(left, right, axis, event.position, cx);
-            }
+            let (Some(left), Some(right)) = (left, right) else {
+                return;
+            };
+            let (Some(first), Some(second)) = halves else {
+                return;
+            };
+            workspace.begin_resize(left, right, axis, event.position, (first, second), cx);
         }),
     )
     .into_any_element()
 }
 
+/// The box a pane's card occupies, in window coordinates.
+///
+/// Derived from the grid's box plus the inset the card gives it — the header and
+/// the padding — rather than recorded separately. The grid is the only element
+/// that reliably knows where it was painted, and the inset is a constant.
+///
+/// A split drag has to measure against the card, not the grid: using the grid put
+/// the divider a header-height away from the pointer.
+fn card_bounds(tab: &Tab, id: u64) -> Option<Bounds<Pixels>> {
+    let pane = tab.panes.get(&id)?;
+    let grid = pane.bounds.get();
+    if grid.size.width <= px(0.0) || grid.size.height <= px(0.0) {
+        return None;
+    }
+
+    // The grid is inset by the padding on three sides and by the header as well
+    // when the window is divided.
+    let header = if tab.panes.len() > 1 || tab.active == id {
+        PANE_HEADER_HEIGHT
+    } else {
+        0.0
+    };
+    let inset = 6.0;
+    let left = grid.left() - px(inset);
+    let top = grid.top() - px(inset + header);
+    let right = grid.right() + px(inset);
+    let bottom = grid.bottom() + px(inset);
+
+    Some(Bounds::new(
+        point(left, top),
+        size(right - left, bottom - top),
+    ))
+}
+
+/// The union of every card's box in a subtree, in window coordinates.
+fn subtree_bounds(tab: &Tab, layout: &Layout) -> Option<Bounds<Pixels>> {
+    let mut union: Option<Bounds<Pixels>> = None;
+    for id in layout.leaves() {
+        let bounds = card_bounds(tab, id)?;
+        union = Some(match union {
+            None => bounds,
+            Some(current) => {
+                let left = current.left().min(bounds.left());
+                let top = current.top().min(bounds.top());
+                let right = current.right().max(bounds.right());
+                let bottom = current.bottom().max(bounds.bottom());
+                Bounds::new(point(left, top), size(right - left, bottom - top))
+            }
+        });
+    }
+    union
+}
+
 /// The grab strip on the sidebar's trailing edge.
 ///
 /// It straddles the seam rather than sitting beside it, so the pointer finds it
-/// exactly where the two columns meet. A short grip fades in on hover, the same
-/// signal the split divider gives.
+/// exactly where the two columns meet. A short grip fades in on hover, and stays
+/// while the width is being dragged — the same rule the split divider follows.
 fn sidebar_handle(
     theme: &gpui_kit::component::Theme,
+    dragging: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let grip = theme.muted_foreground;
@@ -2134,8 +2201,11 @@ fn sidebar_handle(
                 .my(px(8.0))
                 .rounded(px(999.0))
                 .bg(grip)
-                .opacity(0.0)
-                .group_hover("sidebar", |this| this.opacity(0.35)),
+                .when(dragging, |this| this.opacity(0.5))
+                .when(!dragging, |this| {
+                    this.opacity(0.0)
+                        .group_hover("sidebar", |this| this.opacity(0.35))
+                }),
         )
 }
 
@@ -2155,13 +2225,15 @@ fn pane_header(
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let dot = if exited {
-        theme.danger
-    } else if focused {
-        theme.ring
-    } else {
-        theme.border
-    };
+    let dot = dot_color(
+        if exited {
+            PaneStatus::Exited
+        } else {
+            PaneStatus::Idle
+        },
+        focused,
+        theme,
+    );
 
     div()
         .flex_shrink_0()
@@ -2611,6 +2683,9 @@ fn tab_title(pane: &Pane) -> Option<String> {
 /// in the last moment, idle when it has not, and exited when the process is
 /// gone. That covers a shell, a build and a test watcher without asking any of
 /// them to cooperate.
+/// What a pane is doing. `Copy` so a row can ask for its colour and its label
+/// without threading a reference through both.
+#[derive(Clone, Copy)]
 enum PaneStatus {
     Working,
     Idle,
@@ -2632,6 +2707,20 @@ fn pane_status(pane: &Pane) -> PaneStatus {
         Some(_) => PaneStatus::Exited,
         None if pane.session.idle_for() < Duration::from_millis(1200) => PaneStatus::Working,
         None => PaneStatus::Idle,
+    }
+}
+
+/// The colour of a pane's status dot.
+///
+/// One rule for every dot in the app. Focus outranks status because the dot sits
+/// where the eye already is; a pane that has exited outranks both, because a dead
+/// shell is the one thing worth interrupting for.
+fn dot_color(status: PaneStatus, focused: bool, theme: &gpui_kit::component::Theme) -> Hsla {
+    match status {
+        PaneStatus::Exited => theme.danger,
+        _ if focused => theme.ring,
+        PaneStatus::Working => theme.ring,
+        PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
     }
 }
 
