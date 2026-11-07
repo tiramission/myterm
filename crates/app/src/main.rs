@@ -77,6 +77,14 @@ const PANE_RADIUS: f32 = 12.0;
 /// Width of the pane list.
 const SIDEBAR_WIDTH: f32 = 214.0;
 
+/// Narrowest the list gets: a column of dots with room to aim at.
+const RAIL_WIDTH: f32 = 56.0;
+
+const MAX_SIDEBAR_WIDTH: f32 = 420.0;
+
+/// Below this the list is too narrow for names, so it draws as a rail.
+const RAIL_THRESHOLD: f32 = 118.0;
+
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
 /// followed by the library's defaults for the rest.
 fn palette(mode: gpui_kit::component::ThemeMode) -> [Rgb; 256] {
@@ -269,6 +277,14 @@ impl Tab {
     }
 }
 
+/// A sidebar edge being dragged.
+struct SidebarDrag {
+    /// Pointer position when the drag began, in window coordinates.
+    start: f32,
+    /// The width at that moment.
+    width: f32,
+}
+
 /// A split being dragged.
 struct ResizeDrag {
     /// The panes on either side of the divider, in visual order.
@@ -315,6 +331,12 @@ pub struct Workspace {
     /// What the user asked for. `None` means "decide by how much there is to
     /// list", which is what keeps a single terminal free of a list of one.
     sidebar_choice: Option<bool>,
+    /// How wide the list is. Width is the whole state: below the rail width the
+    /// list draws as a strip of dots, which is how it collapses without a second
+    /// control to learn.
+    sidebar_width: f32,
+    /// Present while the list's edge is being dragged.
+    sidebar_drag: Option<SidebarDrag>,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -341,6 +363,8 @@ impl Workspace {
             selection: false,
             zoomed: None,
             sidebar_choice: None,
+            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_drag: None,
             resize_drag: None,
             focus: cx.focus_handle(),
         }
@@ -1181,17 +1205,20 @@ impl Render for Workspace {
             // few pixels of the grip, so the move and release are handled at the
             // root, which is under the pointer for the whole gesture.
             .on_mouse_move(cx.listener(|workspace, event: &MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left)
-                    && let Some(drag) = &workspace.resize_drag
-                {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+                if let Some(drag) = &workspace.resize_drag {
                     let axis = drag.axis;
                     workspace.extend_resize(axis, event.position, cx);
                 }
+                workspace.extend_sidebar_resize(event.position, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|workspace, _: &MouseUpEvent, _, _| {
                     workspace.resize_drag = None;
+                    workspace.sidebar_drag = None;
                 }),
             );
 
@@ -1539,6 +1566,30 @@ impl Workspace {
 }
 
 impl Workspace {
+    /// Starts dragging the list's edge.
+    fn begin_sidebar_resize(&mut self, position: Point<Pixels>) {
+        self.sidebar_drag = Some(SidebarDrag {
+            start: position.x.as_f32(),
+            width: self.sidebar_width,
+        });
+    }
+
+    /// Follows the pointer, snapping to the rail at the narrow end.
+    fn extend_sidebar_resize(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = &self.sidebar_drag else {
+            return;
+        };
+
+        let width =
+            (drag.width + (position.x.as_f32() - drag.start)).clamp(RAIL_WIDTH, MAX_SIDEBAR_WIDTH);
+        // Releasing past the rail width leaves it there rather than springing
+        // back: dragging to the narrow end is how the list is collapsed.
+        if (width - self.sidebar_width).abs() > 0.5 {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
     /// Whether the sidebar is on screen.
     ///
     /// With no explicit choice it follows how much there is to list: a list of
@@ -1680,25 +1731,104 @@ impl Workspace {
                 )),
             );
 
+        let width = self.sidebar_width;
+        let rail = width < RAIL_THRESHOLD;
+
+        let column = if rail {
+            self.render_rail(theme, cx)
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(
+                    div()
+                        .id("side-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(list),
+                )
+                .into_any_element()
+        };
+
         div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(width))
             .flex_shrink_0()
             .h_full()
+            .relative()
+            .group("sidebar")
             .flex()
             .flex_col()
             .bg(theme.title_bar)
             .border_r_1()
             .border_color(theme.border)
-            .child(header)
-            .child(
-                div()
-                    .id("side-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(list),
-            )
+            .child(column)
+            // The edge is the control: it is where a pointer already goes when
+            // it wants to resize a column, and dragging it to the narrow end is
+            // how the list collapses into the rail.
+            .child(sidebar_handle(theme, cx))
             .into_any_element()
+    }
+
+    /// The list with its names dropped: one dot per pane, grouped by tab.
+    ///
+    /// This is what the sidebar becomes at its narrowest. The status stays
+    /// visible — that is the part worth the pixels — and clicking a dot still
+    /// goes to its pane.
+    fn render_rail(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rail = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.0))
+            .py(px(10.0));
+
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let current_tab = tab_index == self.active_tab;
+            for (id, pane) in &tab.panes {
+                let id = *id;
+                let selected = current_tab && id == tab.active;
+                let status = pane_status(pane);
+                let selected_bg = theme.background;
+                let hover_bg = theme.muted;
+
+                rail = rail.child(
+                    div()
+                        .id(("rail-pane", id))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(30.0))
+                        .rounded(px(8.0))
+                        .cursor_pointer()
+                        .when(selected, |this| this.bg(selected_bg))
+                        .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
+                        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.active_tab = tab_index;
+                            workspace.focus_pane(id, cx);
+                        }))
+                        .child(div().size(px(7.0)).rounded(px(999.0)).bg(match status {
+                            PaneStatus::Working => theme.ring,
+                            PaneStatus::Idle => theme.border,
+                            PaneStatus::Exited => theme.danger,
+                        })),
+                );
+            }
+
+            // A hairline between groups, so two tabs do not read as one list.
+            if tab_index + 1 < self.tabs.len() {
+                rail = rail.child(div().w(px(16.0)).h(px(1.0)).my(px(3.0)).bg(theme.border));
+            }
+        }
+
+        rail.into_any_element()
     }
 
     /// Draws the title bar: window drag area, tabs, and window controls.
@@ -1896,6 +2026,44 @@ fn divider_element(
             }),
         )
         .into_any_element()
+}
+
+/// The grab strip on the sidebar's trailing edge.
+///
+/// It straddles the seam rather than sitting beside it, so the pointer finds it
+/// exactly where the two columns meet. A short grip fades in on hover, the same
+/// signal the split divider gives.
+fn sidebar_handle(
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let grip = theme.muted_foreground;
+
+    div()
+        .id("side-handle")
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right(px(0.0))
+        .w(px(6.0))
+        .flex()
+        .justify_center()
+        .cursor_col_resize()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|workspace, event: &MouseDownEvent, _, _| {
+                workspace.begin_sidebar_resize(event.position);
+            }),
+        )
+        .child(
+            div()
+                .w(px(2.0))
+                .my(px(8.0))
+                .rounded(px(999.0))
+                .bg(grip)
+                .opacity(0.0)
+                .group_hover("sidebar", |this| this.opacity(0.35)),
+        )
 }
 
 /// A small control in a pane header.
