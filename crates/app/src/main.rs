@@ -619,6 +619,8 @@ impl Workspace {
             return;
         }
         self.tabs.remove(index);
+        // The zoom names a pane id, and ids are only unique within a tab.
+        self.zoomed = None;
         if self.tabs.is_empty() {
             self.active_tab = 0;
         } else if self.active_tab >= self.tabs.len() {
@@ -1522,14 +1524,36 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Switches to `index`, dropping state that belongs to the tab being left.
+    ///
+    /// Pane ids restart at 1 in every tab, so a zoom left behind would be read
+    /// as an id in the new tab and cover the wrong pane.
+    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() || index == self.active_tab {
+            return;
+        }
+        self.active_tab = index;
+        self.zoomed = None;
+        cx.notify();
+    }
+
     /// Moves focus to `id`.
     fn focus_pane(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(tab) = self.active_tab_mut()
-            && tab.panes.contains_key(&id)
-        {
-            tab.active = id;
-            cx.notify();
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if !tab.panes.contains_key(&id) {
+            return;
         }
+        tab.active = id;
+
+        // A zoomed pane covers the others, so focusing a different one has to
+        // release the zoom: otherwise the sidebar highlights a pane the window is
+        // not showing, and typing goes somewhere invisible.
+        if self.zoomed.is_some_and(|zoomed| zoomed != id) {
+            self.zoomed = None;
+        }
+        cx.notify();
     }
 
     /// Switches between the light and dark themes.
@@ -1663,7 +1687,12 @@ impl Workspace {
 
                 list = list.child(
                     div()
-                        .id(("side-pane", id))
+                        // Pane ids restart at 1 in every tab, so the row has to carry the
+                        // tab too: without it two rows share an id and only one of
+                        // them can be hit or highlighted.
+                        .id(ElementId::Name(
+                            format!("side-pane-{tab_index}-{id}").into(),
+                        ))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -1675,12 +1704,12 @@ impl Workspace {
                         .when(selected, |this| this.bg(selected_bg))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                            workspace.active_tab = tab_index;
+                            workspace.select_tab(tab_index, cx);
                             workspace.focus_pane(id, cx);
                         }))
                         .child(div().size(px(6.0)).rounded(px(999.0)).bg(match status {
                             PaneStatus::Working => theme.ring,
-                            PaneStatus::Idle => theme.border,
+                            PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
                             PaneStatus::Exited => theme.danger,
                         }))
                         .child(
@@ -1801,7 +1830,9 @@ impl Workspace {
 
                 rail = rail.child(
                     div()
-                        .id(("rail-pane", id))
+                        .id(ElementId::Name(
+                            format!("rail-pane-{tab_index}-{id}").into(),
+                        ))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1811,12 +1842,12 @@ impl Workspace {
                         .when(selected, |this| this.bg(selected_bg))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                            workspace.active_tab = tab_index;
+                            workspace.select_tab(tab_index, cx);
                             workspace.focus_pane(id, cx);
                         }))
                         .child(div().size(px(7.0)).rounded(px(999.0)).bg(match status {
                             PaneStatus::Working => theme.ring,
-                            PaneStatus::Idle => theme.border,
+                            PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
                             PaneStatus::Exited => theme.danger,
                         })),
                 );
@@ -2128,7 +2159,7 @@ fn pane_header(
                 .opacity(0.0)
                 .group_hover("pane", |this| this.opacity(1.0))
                 .child(pane_action(
-                    "pane-split-right",
+                    ("pane-split-right", id),
                     SPLIT_HORIZONTAL,
                     theme,
                     cx.listener(move |workspace, _: &ClickEvent, window, cx| {
@@ -2136,7 +2167,7 @@ fn pane_header(
                     }),
                 ))
                 .child(pane_action(
-                    "pane-split-down",
+                    ("pane-split-down", id),
                     SPLIT_VERTICAL,
                     theme,
                     cx.listener(move |workspace, _: &ClickEvent, window, cx| {
@@ -2144,7 +2175,7 @@ fn pane_header(
                     }),
                 ))
                 .child(pane_action(
-                    "pane-zoom",
+                    ("pane-zoom", id),
                     if zoomed { ZOOM_OUT } else { ZOOM_IN },
                     theme,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -2152,7 +2183,7 @@ fn pane_header(
                     }),
                 ))
                 .child(pane_action(
-                    "pane-close",
+                    ("pane-close", id),
                     WINDOW_CLOSE,
                     theme,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -2167,8 +2198,11 @@ fn pane_header(
 /// Smaller than [`icon_button`] and tinted like chrome rather than like content,
 /// because it covers terminal text: it has to be reachable without becoming part
 /// of what the terminal is saying.
+/// `id` is scoped to the pane: every header carries the same four buttons, and
+/// element ids have to be unique across the whole tree, or only the first one
+/// registers a hitbox and the rest are inert.
 fn pane_action(
-    id: &'static str,
+    id: impl Into<ElementId>,
     icon: &'static [u8],
     theme: &gpui_kit::component::Theme,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -2232,8 +2266,7 @@ fn tab_chip(
             }
         })
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-            workspace.active_tab = index;
-            cx.notify();
+            workspace.select_tab(index, cx);
         }))
         .child(
             div()
