@@ -415,6 +415,37 @@ fn shell_link(_path: &Path, _exe: &Path) -> Result<(), InstallError> {
 
 /// Writes the `Uninstall` entry Settings reads.
 ///
+/// Brings the registry entry's version up to the running build.
+///
+/// The updater replaces the executable and nothing else, so without this an
+/// installed copy that has updated itself keeps reporting the version it was
+/// first installed at: Settings → Apps would show 0.3.0 forever while the
+/// program is on 0.3.7. Called on startup rather than during the update,
+/// because the process doing the updating still carries the old version in its
+/// own `CARGO_PKG_VERSION` — only the new build knows the new number.
+///
+/// Does nothing when the app is not installed, or when the entry is already
+/// current, so the common case costs one registry read and no writes.
+pub fn sync_registry_version() {
+    if !is_installed() {
+        return;
+    }
+
+    let current = env!("CARGO_PKG_VERSION");
+    if read_registry_string(UNINSTALL_KEY, "DisplayVersion").as_deref() == Some(current) {
+        return;
+    }
+
+    let Some(exe) = installed_exe() else {
+        return;
+    };
+    if let Err(error) = write_uninstall_entry(&exe) {
+        // A failed version refresh is not worth interrupting anything over: the
+        // entry still uninstalls correctly, it just shows a stale number.
+        log::debug!("could not refresh the registry version: {error}");
+    }
+}
+
 /// The four values that matter: what to show, who published it, where it lives,
 /// and what to run to remove it. `DisplayIcon` is what gives the entry its
 /// picture instead of a blank square.
@@ -745,5 +776,102 @@ mod end_to_end {
         assert!(!desktop_shortcut().expect("path").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Reads a string value, or `None` when the key or value is missing.
+#[cfg(target_os = "windows")]
+fn read_registry_string(key: &str, name: &str) -> Option<String> {
+    use std::ffi::c_void;
+
+    const HKEY_CURRENT_USER: *mut c_void = 0x8000_0001u32 as isize as *mut c_void;
+    const RRF_RT_REG_SZ: u32 = 0x0000_0002;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            key: *mut c_void,
+            subkey: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+
+    let subkey: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+    let value: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // A version string is short; 512 bytes is far more than any of these values
+    // can need and keeps the call to a single buffer with no resize dance.
+    let mut buffer = [0u16; 256];
+    let mut size = std::mem::size_of_val(&buffer) as u32;
+
+    // SAFETY: both strings are NUL-terminated and outlive the call; the buffer
+    // is sized as declared and `size` is its byte length.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr() as *mut c_void,
+            &mut size,
+        )
+    };
+    if status != 0 || size < 2 {
+        return None;
+    }
+
+    // `size` is in bytes and includes the terminating NUL.
+    let len = (size as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buffer[..len]))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_registry_string(_key: &str, _name: &str) -> Option<String> {
+    None
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod version_tests {
+    use super::*;
+
+    /// Reading a value back is what makes the version check possible at all.
+    #[test]
+    fn a_string_value_can_be_read_back() {
+        let key = r"Software\myterm-test\read-back";
+        set_registry_string(key, "DisplayVersion", "1.2.3").expect("write");
+        assert_eq!(
+            read_registry_string(key, "DisplayVersion").as_deref(),
+            Some("1.2.3")
+        );
+        remove_key(key);
+    }
+
+    /// A missing value is `None`, not an error: an entry written by an older
+    /// build may predate a field, and the caller treats that as "needs writing".
+    #[test]
+    fn a_missing_value_reads_as_none() {
+        let key = r"Software\myterm-test\missing";
+        set_registry_string(key, "DisplayName", "myterm").expect("write");
+        assert_eq!(read_registry_string(key, "DisplayVersion"), None);
+        remove_key(key);
+    }
+
+    fn remove_key(key: &str) {
+        use std::ffi::c_void;
+        const HKEY_CURRENT_USER: *mut c_void = 0x8000_0001u32 as isize as *mut c_void;
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn RegDeleteKeyW(key: *mut c_void, subkey: *const u16) -> i32;
+        }
+        let subkey: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: NUL-terminated string outlives the call.
+        unsafe {
+            RegDeleteKeyW(HKEY_CURRENT_USER, subkey.as_ptr());
+        }
     }
 }

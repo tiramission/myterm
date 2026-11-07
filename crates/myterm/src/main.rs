@@ -426,6 +426,13 @@ impl Workspace {
     fn ensure_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_ticking(cx);
         self.claim_tab_key(cx);
+        // An installed copy that has updated itself still carries the version it
+        // was installed at in the registry, because the updater only replaces
+        // the executable. The running build knows the real number, so it fixes
+        // the entry on the way up. A no-op unless the app is installed and the
+        // stored version disagrees.
+        install::sync_registry_version();
+
         // Once per run, and not on the first frame: the terminal should be
         // usable before anything asks the network a question.
         self.check_for_update(cx);
