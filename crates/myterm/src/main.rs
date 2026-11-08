@@ -2035,228 +2035,139 @@ impl Workspace {
             .pb(px(8.0));
         // One answer for "which pane is current", shared with the grid.
         let current = self.effective_active();
-        // A list of one pane has nothing to choose between, so it stops being a
-        // list. What replaces it says what to do next — the alternative is a
-        // single row stranded in a tall empty column, which reads as a panel
-        // that failed to fill rather than one that has nothing to show.
-        let panes: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
-        let single_pane = panes == 1;
-        // With a single tab there is nothing to group, so the header would just
-        // repeat the one word underneath it. It appears when it starts doing the
-        // job it exists for: telling one group from another.
-        let show_tab_headers = self.tabs.len() > 1;
-
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
 
-            // A tab header is a label, not a row. It is smaller and quieter than
-            // the panes it names, and the current one is marked by its own
-            // weight and colour rather than a bar beside it: a leading edge
-            // adds a second edge to a column that already aligns on its text.
-            if show_tab_headers && !single_pane {
-                list = list.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .h(px(24.0))
-                        .pl(px(7.0))
-                        .pr(px(7.0))
-                        .when(tab_index > 0, |this| this.mt(px(8.0)))
-                        .child(
+            // Every tab gets one line, and only a tab holding several panes gets
+            // lines under it. That represents each tab exactly once — a
+            // single-pane tab is its own line rather than a label above an
+            // identical row — while still leaving the groups readable.
+            //
+            // The line is a label, not a row: smaller and quieter than the panes
+            // it names, and the current one is marked by its own weight and
+            // colour rather than a bar beside it. A leading edge adds a second
+            // edge to a column that already aligns on its text.
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(24.0))
+                    .pl(px(7.0))
+                    .pr(px(7.0))
+                    .when(tab_index > 0, |this| this.mt(px(8.0)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.5))
+                            .font_weight(if current_tab {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if current_tab {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground.opacity(0.75)
+                            })
+                            .child(tab.title.clone()),
+                    )
+                    // The count only earns its place when there is more than one
+                    // pane to count; "1" beside a single line is noise.
+                    .when(tab.panes.len() > 1, |this| {
+                        this.child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(10.5))
-                                .font_weight(if current_tab {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .text_color(if current_tab {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground.opacity(0.75)
-                                })
-                                // Tabs are named after what runs in them, so
-                                // several tabs of the same shell all arrive with
-                                // the same name. The position is what actually
-                                // tells them apart, so it leads.
-                                .child(format!("{} {}", tab_index + 1, tab.title)),
+                                .text_size(px(10.0))
+                                .text_color(theme.muted_foreground.opacity(0.7))
+                                .child(tab.panes.len().to_string()),
                         )
-                        // The count only earns its place when there is more than
-                        // one pane to count; "1" beside a single row is noise.
-                        .when(tab.panes.len() > 1, |this| {
-                            this.child(
+                    }),
+            );
+
+            // A single pane needs no row of its own: the tab line above is it.
+            if tab.panes.len() > 1 {
+                for (id, pane) in &tab.panes {
+                    let id = *id;
+                    let selected = current == Some((tab_index, id));
+                    let status = pane_status(pane);
+                    // Captured by the listeners below, which outlive this borrow.
+                    let hover_bg = theme.muted;
+                    let selected_bg = theme.background;
+
+                    list = list.child(
+                        div()
+                            // Pane ids restart at 1 in every tab, so the row has to carry the
+                            // tab too: without it two rows share an id and only one of
+                            // them can be hit or highlighted.
+                            .id(ElementId::Name(
+                                format!("side-pane-{tab_index}-{id}").into(),
+                            ))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(7.0))
+                            .h(px(28.0))
+                            .px(px(8.0))
+                            .rounded(px(CHIP_RADIUS))
+                            .cursor_pointer()
+                            .when(selected, |this| this.bg(selected_bg))
+                            .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
+                            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                                workspace.select_tab(tab_index, cx);
+                                workspace.focus_pane(id, cx);
+                            }))
+                            .child(
                                 div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.muted_foreground.opacity(0.7))
-                                    .child(tab.panes.len().to_string()),
+                                    .size(px(6.0))
+                                    .rounded(px(999.0))
+                                    .bg(dot_color(status, selected, theme)),
                             )
-                        }),
-                );
-            }
-
-            for (position, (id, pane)) in
-                tab.panes
-                    .iter()
-                    .enumerate()
-                    .take(if single_pane { 0 } else { usize::MAX })
-            {
-                let id = *id;
-                let selected = current == Some((tab_index, id));
-                let status = pane_status(pane);
-                // Captured by the listeners below, which outlive this borrow.
-                let hover_bg = theme.muted;
-                let selected_bg = theme.background;
-
-                list = list.child(
-                    div()
-                        // Pane ids restart at 1 in every tab, so the row has to carry the
-                        // tab too: without it two rows share an id and only one of
-                        // them can be hit or highlighted.
-                        .id(ElementId::Name(
-                            format!("side-pane-{tab_index}-{id}").into(),
-                        ))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(7.0))
-                        .h(px(28.0))
-                        .px(px(8.0))
-                        .rounded(px(CHIP_RADIUS))
-                        .cursor_pointer()
-                        .when(selected, |this| this.bg(selected_bg))
-                        .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
-                        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                            workspace.select_tab(tab_index, cx);
-                            workspace.focus_pane(id, cx);
-                        }))
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded(px(999.0))
-                                .bg(dot_color(status, selected, theme)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(12.0))
-                                .text_color(if selected {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(if tab.panes.len() > 1 {
-                                    // Panes of the same shell all carry the same
-                                    // name, so inside a group of several the
-                                    // position is the only thing that differs.
-                                    format!("{} {}", position + 1, pane_label(pane))
-                                } else {
-                                    pane_label(pane)
-                                }),
-                        )
-                        .when_some(status.label(), |this, label| {
-                            this.child(
+                            .child(
                                 div()
-                                    .flex_shrink_0()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.muted_foreground.opacity(0.8))
-                                    .child(label),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(12.0))
+                                    .text_color(if selected {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(pane_label(pane)),
                             )
-                        }),
-                );
-            }
-        }
-
-        // One pane has nothing to list, so the column says what to do about it
-        // instead of showing a row that selects itself. The hints are the two
-        // ways out: another pane beside this one, or another tab entirely.
-        if single_pane {
-            let pane = self
-                .tabs
-                .get(self.active_tab)
-                .and_then(|tab| tab.panes.values().next());
-            // The one pane is by definition the current one, but its status is
-            // not: the dot is the only place the column can say whether the
-            // shell is busy or gone.
-            let status = pane.map(pane_status).unwrap_or(PaneStatus::Idle);
-            list = list
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .mx(px(7.0))
-                        .mt(px(2.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(7.0))
-                                .child(
+                            .when_some(status.label(), |this, label| {
+                                this.child(
                                     div()
-                                        .size(px(6.0))
-                                        .rounded(px(999.0))
-                                        .bg(dot_color(status, true, theme)),
+                                        .flex_shrink_0()
+                                        .text_size(px(10.0))
+                                        .text_color(theme.muted_foreground.opacity(0.8))
+                                        .child(label),
                                 )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.foreground)
-                                        .child(pane.map(pane_label).unwrap_or_default()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.muted_foreground.opacity(0.8))
-                                .child("只有一个窗格"),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .mx(px(7.0))
-                        .mt(px(14.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted_foreground.opacity(0.7))
-                                .child("Ctrl+Shift+D 左右分屏"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted_foreground.opacity(0.7))
-                                .child("Ctrl+Shift+T 新建标签"),
-                        ),
-                );
+                            }),
+                    );
+                }
+            }
         }
 
-        // The list holds tabs, so its heading and its button both say tab. The
-        // title bar already offers a pane split; a second plus here that did the
-        // same thing would be one control with two doors.
+        // A section label, not a heading with actions. The title bar already
+        // carries the plus that opens a tab, and one action should have one door.
         //
-        // The heading only appears once there are several tabs to head. With one
-        // tab it would label a list of one, and the title bar already says which
-        // tab is open — the row is better spent on the list itself.
+        // It names what the list holds, so it changes with the list: several tabs
+        // means the rows are grouped and the tab is the unit; one tab means the
+        // rows are panes. Either way the column has a top edge to align its rows
+        // against, which is what stops a short list from looking unfinished.
+        let section = if self.tabs.len() > 1 {
+            "标签"
+        } else {
+            "窗格"
+        };
         let header = div()
             .flex()
             .flex_row()
@@ -2264,22 +2175,13 @@ impl Workspace {
             .h(px(TITLE_BAR_HEIGHT))
             .pl(px(13.0))
             .pr(px(6.0))
-            .when(self.tabs.len() > 1, |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .text_size(px(10.5))
-                        .text_color(theme.muted_foreground)
-                        .child("标签"),
-                )
-                .child(
-                    icon_button("side-new", IconName::Plus, theme, cx).on_click(cx.listener(
-                        |workspace, _: &ClickEvent, window, cx| {
-                            workspace.new_tab(window, cx);
-                        },
-                    )),
-                )
-            });
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted_foreground)
+                    .child(section),
+            );
 
         let width = self.sidebar_width;
         let rail = width < RAIL_THRESHOLD;
@@ -2449,7 +2351,12 @@ impl Workspace {
             let selected = index == active;
             let title = tab.title.clone();
             let pane_count = tab.panes.len();
-            let closable = self.tabs.len() > 1;
+            // The cross belongs to the tab you are looking at. On every tab it
+            // turns the strip into a row of identical-looking buttons, and the
+            // one you might hit by accident is the one you did not mean to
+            // close. Closing another tab is still one click away: select it,
+            // then close it.
+            let closable = selected && self.tabs.len() > 1;
 
             tabs = tabs.child(tab_chip(
                 index, title, pane_count, selected, closable, &theme, cx,
@@ -3191,7 +3098,9 @@ fn tab_chip(
         // two radii for one shape reads as two shapes.
         .rounded(px(CHIP_RADIUS))
         .when(selected, |this| this.bg(theme.background))
-        .text_sm()
+        // Smaller than body text. A tab is a label for a place, not a line of
+        // content, and the strip has to stay quiet next to the pane headers.
+        .text_size(px(12.0))
         .text_color(text_color)
         .cursor_pointer()
         .hover(move |this| {
