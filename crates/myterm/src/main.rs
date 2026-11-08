@@ -1319,10 +1319,20 @@ impl Render for Workspace {
             .relative()
             .flex()
             .flex_col()
-            // The body is deliberately left unpainted. The title bar wants the
-            // Mica backdrop to show through it, and the grid paints its own
-            // opaque background, so a fill here would only hide the material
-            // and make the bar look flat.
+            // One chrome surface, painted here so it continues under the title
+            // bar and the sidebar without a seam.
+            //
+            // This used to be left unpainted on the theory that Mica would show
+            // through it. Mica is not available on this backend — the window is
+            // an opaque DirectComposition surface — so the fill only ever hid
+            // the window background, which is the same white the pane cards
+            // paint. That left the cards floating on nothing, held apart by a
+            // hairline that was doing all the work.
+            //
+            // Painting it the tone the bar and the sidebar already wear makes
+            // the three regions one surface, and the cards separate from it by
+            // tone alone. Three hairlines go away and none is missed.
+            .bg(theme.title_bar)
             .text_color(theme.foreground)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::handle_key))
@@ -1483,11 +1493,11 @@ impl Workspace {
                     .overflow_hidden()
                     .group("pane")
                     .rounded(px(PANE_RADIUS))
-                    // The card needs an edge of its own: the gap between panes is
-                    // only a slightly different tone, and without a border the two
-                    // surfaces merge into one field with a seam nobody can find.
-                    .border_1()
-                    .border_color(theme.border)
+                    // No edge of its own. The card is the one white surface on a
+                    // warm ground, and the tone difference is what says "this is
+                    // the work" — a hairline on top of it was a second way of
+                    // saying the same thing, and the ground it sat on used to be
+                    // white too, which is why the line had to be there at all.
                     .bg(style.background)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2214,8 +2224,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(theme.title_bar)
-            .border_r_1()
-            .border_color(theme.border)
             .child(column)
             // The edge is the control: it is where a pointer already goes when
             // it wants to resize a column, and dragging it to the narrow end is
@@ -2316,8 +2324,6 @@ impl Workspace {
             .pr(px(6.0))
             .gap(px(6.0))
             .bg(theme.title_bar)
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .flex()
@@ -2342,11 +2348,25 @@ impl Workspace {
                     })),
             )
             // The mark and the list belong to the window; the tabs are the work.
-            .child(bar_divider(&theme));
+            // They are separated by a wider gap rather than a rule: the mark and
+            // the toggle are one thing (the window), the tabs are another (the
+            // work), and the difference in kind is already visible in their
+            // shapes.
+            ;
 
         // Tabs sit close together in a group, the way a pill row reads; the
         // spacing between them is smaller than the spacing to anything else.
-        let mut tabs = div().flex().flex_row().items_center().gap(px(4.0));
+        //
+        // The gap to the mark cluster is wider than the gap inside the group,
+        // which is what says "these belong together" now that the hairline that
+        // used to say it is gone. A line and a gap are two ways to draw the same
+        // boundary, and the app has enough lines without this one.
+        let mut tabs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .ml(px(6.0));
         for (index, tab) in self.tabs.iter().enumerate() {
             let selected = index == active;
             let title = tab.title.clone();
@@ -2411,13 +2431,18 @@ impl Workspace {
                 )
             })
             // The app's own controls: the build, the theme, and any pending
-            // update. A hairline separates them from the pane actions, because
-            // the two sets answer different questions and an even gap would say
-            // they belong together.
-            .child(bar_divider(&theme))
+            // update. They answer a different question from the pane actions, so
+            // they sit further along the bar — separated by the gap rather than
+            // by a rule, which would be a fourth line in a row that already has
+            // the pane edges and the card corners.
             // The version is a control rather than a line of text: it is the
             // one place that answers "which build is this", which matters when
             // the app updates itself and two machines can be a version apart.
+            // Where the hairline used to be. The boundary is the same — the
+            // window's controls on one side, the app's on the other — but it is
+            // drawn with space instead of a rule, because the bar already has
+            // the pane edges and the card corners to carry.
+            .child(div().w(px(8.0)).h_full())
             //
             // Its detail is a popover anchored to the button, not a modal. This
             // is reference information: nothing here needs a decision, and
@@ -3187,22 +3212,6 @@ impl From<IconName> for Glyph {
 ///
 /// Icon-only controls carry no visible label, so the caller must pass an id that
 /// also reads as a name.
-/// A hairline between groups of controls in the title bar.
-///
-/// Groups are separated by space and a rule rather than by a wider gap alone:
-/// a gap says "not adjacent", a rule says "a different set", and the bar has
-/// three sets in it (tabs, pane actions, app controls).
-fn bar_divider(theme: &gpui_kit::component::Theme) -> impl IntoElement {
-    div()
-        .w(px(1.0))
-        .h(px(16.0))
-        .mx(px(4.0))
-        // The bar's own hairline is the pane edge, too faint to read as a
-        // separator between controls; this is the same ink at a strength that
-        // survives being one pixel wide.
-        .bg(theme.muted_foreground.opacity(0.22))
-}
-
 fn icon_button(
     id: &'static str,
     icon: impl Into<Glyph>,
