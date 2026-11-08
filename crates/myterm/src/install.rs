@@ -16,6 +16,15 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
+/// `CREATE_NO_WINDOW`: a child console process runs without being given a
+/// console window.
+///
+/// The app itself is a GUI-subsystem program, so a `cmd` it starts would
+/// otherwise allocate a console of its own — which is exactly the black box a
+/// user sees flash past when they ask for the app to be removed.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Where an installed copy lives.
 ///
 /// `%LOCALAPPDATA%\Programs` is the convention for a per-user install: it needs
@@ -153,6 +162,13 @@ pub fn uninstall() -> Result<(), InstallError> {
     // removes itself. `rmdir /s /q` is used rather than `del` because the
     // directory itself has to go, and it tolerates the file being locked for
     // the first moment after exit.
+    //
+    // It is run with `CREATE_NO_WINDOW`. An earlier version went through
+    // `cmd /c start "" /min`, which not only flashed a console at the user but
+    // frequently failed to find the script at all — `start` resolves the command
+    // through its own search, and a batch file handed to it from a GUI process
+    // is not reliably found. Running the script directly under `cmd /c` with no
+    // window is both quieter and correct.
     let script = std::env::temp_dir().join("myterm-uninstall.cmd");
     let body = format!(
         "@echo off\r\n\
@@ -164,16 +180,38 @@ pub fn uninstall() -> Result<(), InstallError> {
     std::fs::write(&script, body)
         .map_err(|error| InstallError::Io(format!("write uninstall script: {error}")))?;
 
-    std::process::Command::new("cmd")
-        .arg("/c")
-        .arg("start")
-        .arg("")
-        .arg("/min")
-        .arg(&script)
-        .spawn()
+    spawn_hidden(&script)
         .map_err(|error| InstallError::Io(format!("start uninstall script: {error}")))?;
 
     Ok(())
+}
+
+/// Runs `cmd /c <script>` without letting it allocate a console.
+///
+/// The deferred script is the last thing an uninstall does, and it outlives the
+/// process that wrote it. Left to itself, `cmd` started from a GUI-subsystem
+/// program creates a console of its own — which is the black box that flashes
+/// past a user who only asked for the app to be removed.
+#[cfg(target_os = "windows")]
+fn spawn_hidden(script: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("cmd")
+        .arg("/c")
+        .arg(script)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+}
+
+/// No such flag exists off Windows, where the program is not a GUI-subsystem
+/// one in the first place.
+#[cfg(not(target_os = "windows"))]
+fn spawn_hidden(script: &Path) -> std::io::Result<()> {
+    std::process::Command::new("cmd")
+        .arg("/c")
+        .arg(script)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Starts the installed copy and lets the caller quit.
