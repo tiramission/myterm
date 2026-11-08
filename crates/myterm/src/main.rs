@@ -96,6 +96,11 @@ const PANE_HEADER_HEIGHT: f32 = 32.0;
 /// Corner radius of a pane card.
 const PANE_RADIUS: f32 = 12.0;
 
+/// Corner radius of a small card — a tab, a sidebar row. The pane card is
+/// larger and takes its own, but every 28 px-high card in the app wears this
+/// one, so the rounded rectangle means the same thing wherever it appears.
+const CHIP_RADIUS: f32 = 10.0;
+
 /// Space between two panes. The gap is the divider: nothing is drawn in it
 /// at rest, and the pointer is the only thing that shows it can be moved.
 const PANE_GAP: f32 = 10.0;
@@ -2030,6 +2035,12 @@ impl Workspace {
             .pb(px(8.0));
         // One answer for "which pane is current", shared with the grid.
         let current = self.effective_active();
+        // A list of one pane has nothing to choose between, so it stops being a
+        // list. What replaces it says what to do next — the alternative is a
+        // single row stranded in a tall empty column, which reads as a panel
+        // that failed to fill rather than one that has nothing to show.
+        let panes: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+        let single_pane = panes == 1;
         // With a single tab there is nothing to group, so the header would just
         // repeat the one word underneath it. It appears when it starts doing the
         // job it exists for: telling one group from another.
@@ -2039,10 +2050,10 @@ impl Workspace {
             let current_tab = tab_index == self.active_tab;
 
             // A tab header is a label, not a row. It is smaller and quieter than
-            // the panes it names, and it carries the accent bar that says which
-            // tab the window is showing — the pane rows below are all the same
-            // shape, so colour alone is not enough to mark the group.
-            if show_tab_headers {
+            // the panes it names, and the current one is marked by its own
+            // weight and colour rather than a bar beside it: a leading edge
+            // adds a second edge to a column that already aligns on its text.
+            if show_tab_headers && !single_pane {
                 list = list.child(
                     div()
                         .flex()
@@ -2055,19 +2066,17 @@ impl Workspace {
                         .when(tab_index > 0, |this| this.mt(px(8.0)))
                         .child(
                             div()
-                                .w(px(2.0))
-                                .h(px(11.0))
-                                .rounded(px(999.0))
-                                .when(current_tab, |this| this.bg(theme.ring)),
-                        )
-                        .child(
-                            div()
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(px(10.5))
+                                .font_weight(if current_tab {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                })
                                 .text_color(if current_tab {
                                     theme.foreground
                                 } else {
@@ -2092,7 +2101,12 @@ impl Workspace {
                 );
             }
 
-            for (position, (id, pane)) in tab.panes.iter().enumerate() {
+            for (position, (id, pane)) in
+                tab.panes
+                    .iter()
+                    .enumerate()
+                    .take(if single_pane { 0 } else { usize::MAX })
+            {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
@@ -2114,7 +2128,7 @@ impl Workspace {
                         .gap(px(7.0))
                         .h(px(28.0))
                         .px(px(8.0))
-                        .rounded(px(7.0))
+                        .rounded(px(CHIP_RADIUS))
                         .cursor_pointer()
                         .when(selected, |this| this.bg(selected_bg))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
@@ -2161,6 +2175,79 @@ impl Workspace {
                         }),
                 );
             }
+        }
+
+        // One pane has nothing to list, so the column says what to do about it
+        // instead of showing a row that selects itself. The hints are the two
+        // ways out: another pane beside this one, or another tab entirely.
+        if single_pane {
+            let pane = self
+                .tabs
+                .get(self.active_tab)
+                .and_then(|tab| tab.panes.values().next());
+            // The one pane is by definition the current one, but its status is
+            // not: the dot is the only place the column can say whether the
+            // shell is busy or gone.
+            let status = pane.map(pane_status).unwrap_or(PaneStatus::Idle);
+            list = list
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .mx(px(7.0))
+                        .mt(px(2.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(7.0))
+                                .child(
+                                    div()
+                                        .size(px(6.0))
+                                        .rounded(px(999.0))
+                                        .bg(dot_color(status, true, theme)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.foreground)
+                                        .child(pane.map(pane_label).unwrap_or_default()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted_foreground.opacity(0.8))
+                                .child("只有一个窗格"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .mx(px(7.0))
+                        .mt(px(14.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(theme.muted_foreground.opacity(0.7))
+                                .child("Ctrl+Shift+D 左右分屏"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(theme.muted_foreground.opacity(0.7))
+                                .child("Ctrl+Shift+T 新建标签"),
+                        ),
+                );
         }
 
         // The list holds tabs, so its heading and its button both say tab. The
@@ -3099,8 +3186,10 @@ fn tab_chip(
         .pr(if closable { px(5.0) } else { px(11.0) })
         // A tab is a card, not a pill. The fully rounded ends read as a
         // button beside the bar's round icon controls, and the tab is a
-        // container for a name rather than a thing to press.
-        .rounded(px(8.0))
+        // container for a name rather than a thing to press. The radius is
+        // shared with the sidebar's pane row: both are the same small card, and
+        // two radii for one shape reads as two shapes.
+        .rounded(px(CHIP_RADIUS))
         .when(selected, |this| this.bg(theme.background))
         .text_sm()
         .text_color(text_color)
