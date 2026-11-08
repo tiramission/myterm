@@ -19,7 +19,7 @@ mod pty_command;
 mod terminal;
 mod update;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -31,7 +31,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use grid_element::{GridStyle, TerminalGrid};
+use grid_element::{GridStyle, ImageCache, TerminalGrid};
 use layout::{Axis, Direction, Layout, Rect};
 use pty::{Command, Pty};
 use terminal::Session;
@@ -388,6 +388,12 @@ pub struct Workspace {
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
     focus: FocusHandle,
+    /// Uploaded textures for the images the terminals have drawn.
+    ///
+    /// Held here rather than in the grid elements because those are rebuilt
+    /// every frame, and a cache that lived one frame would re-upload every
+    /// image on every repaint.
+    images: Rc<RefCell<ImageCache>>,
 }
 
 impl Workspace {
@@ -421,6 +427,7 @@ impl Workspace {
             tab_claimed: false,
             resize_drag: None,
             focus: cx.focus_handle(),
+            images: Rc::new(RefCell::new(ImageCache::default())),
         }
     }
 
@@ -1278,6 +1285,9 @@ impl EntityInputHandler for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything is painted, so the textures this frame asks for are
+        // known before the ones it does not are dropped.
+        self.images.borrow_mut().begin_frame();
         self.ensure_started(window, cx);
         self.sync_grid_sizes(window, cx);
 
@@ -1555,6 +1565,8 @@ impl Workspace {
                             bounds_cell,
                             cx.entity(),
                             self.focus.clone(),
+                            self.images.clone(),
+                            id,
                         ))
                         // A pane the user is not in recedes: the card's surface
                         // lifts and the text fades behind a veil, so attention

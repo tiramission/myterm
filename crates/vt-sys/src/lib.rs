@@ -43,6 +43,15 @@ pub type GhosttySearch = *mut c_void;
 pub type GhosttySelectionGesture = *mut c_void;
 /// An opaque selection gesture event.
 pub type GhosttySelectionGestureEvent = *mut c_void;
+/// The image storage of a terminal's active screen.
+///
+/// Borrowed from the terminal with `GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS`; the
+/// terminal owns it, so it is never freed here.
+pub type GhosttyKittyGraphics = *mut c_void;
+/// One image held by the storage. Borrowed, never freed.
+pub type GhosttyKittyGraphicsImage = *mut c_void;
+/// An iterator over the image placements a render state reports.
+pub type GhosttyRenderStateImageIterator = *mut c_void;
 
 /// A selected range of cells.
 #[repr(C)]
@@ -289,6 +298,54 @@ pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR: i32 = 6;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED: i32 = 7;
 pub const GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING: i32 = 8;
 
+// Image placements reported by a render state. Read with
+// `ghostty_render_state_image_get` while an image iterator is on a placement.
+pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR: i32 = 22;
+pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION: i32 = 23;
+
+/// Which protocol an image came from.
+pub const GHOSTTY_IMAGE_PROTOCOL_KITTY: i32 = 0;
+
+/// The layer an image is drawn in.
+pub const GHOSTTY_IMAGE_LAYER_BELOW_TEXT: i32 = 0;
+pub const GHOSTTY_IMAGE_LAYER_ABOVE_TEXT: i32 = 1;
+
+// One placement, read one key at a time.
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL: i32 = 1;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID: i32 = 2;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION: i32 = 3;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER: i32 = 4;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_Z: i32 = 5;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL: i32 = 6;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW: i32 = 7;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS: i32 = 8;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS: i32 = 9;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X: i32 = 10;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y: i32 = 11;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH: i32 = 12;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT: i32 = 13;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X: i32 = 14;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y: i32 = 15;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH: i32 = 16;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT: i32 = 17;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_PLACEMENT_ID: i32 = 18;
+pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND: i32 = 19;
+
+// One stored image, read with `ghostty_kitty_graphics_image_get`.
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_ID: i32 = 1;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH: i32 = 3;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT: i32 = 4;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT: i32 = 5;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS: i32 = 7;
+pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION: i32 = 9;
+
+/// Pixel formats a stored Kitty image can report. PNG never appears: payloads
+/// are decoded to RGBA before storage.
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGB: i32 = 0;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_RGBA: i32 = 1;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA: i32 = 3;
+pub const GHOSTTY_KITTY_IMAGE_FORMAT_GRAY: i32 = 4;
+
 pub const GHOSTTY_TERMINAL_DATA_COLS: i32 = 1;
 pub const GHOSTTY_TERMINAL_DATA_ROWS: i32 = 2;
 pub const GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE: i32 = 7;
@@ -298,6 +355,8 @@ pub const GHOSTTY_TERMINAL_DATA_TOTAL_ROWS: i32 = 14;
 pub const GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
 /// The terminal's current selection, as a `GhosttySelection`.
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: i32 = 31;
+/// The terminal's Kitty graphics image storage, as a `GhosttyKittyGraphics`.
+pub const GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS: i32 = 30;
 
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: i32 = 1;
 pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: i32 = 2;
@@ -434,6 +493,30 @@ unsafe extern "C" {
         out_cells: *mut GhosttyRenderStateRowCells,
     ) -> GhosttyResult;
     pub fn ghostty_render_state_row_cells_free(cells: GhosttyRenderStateRowCells);
+    pub fn ghostty_render_state_image_iterator_new(
+        allocator: *const GhosttyAllocator,
+        out_iterator: *mut GhosttyRenderStateImageIterator,
+    ) -> GhosttyResult;
+    pub fn ghostty_render_state_image_iterator_free(iterator: GhosttyRenderStateImageIterator);
+    /// Moves to the next placement; false once there are none left.
+    pub fn ghostty_render_state_image_iterator_next(
+        iterator: GhosttyRenderStateImageIterator,
+    ) -> bool;
+    pub fn ghostty_render_state_image_get(
+        iterator: GhosttyRenderStateImageIterator,
+        data: i32,
+        out: *mut c_void,
+    ) -> GhosttyResult;
+    /// Looks an image up in the terminal's Kitty graphics storage.
+    pub fn ghostty_kitty_graphics_image(
+        graphics: GhosttyKittyGraphics,
+        image_id: u32,
+    ) -> GhosttyKittyGraphicsImage;
+    pub fn ghostty_kitty_graphics_image_get(
+        image: GhosttyKittyGraphicsImage,
+        data: i32,
+        out: *mut c_void,
+    ) -> GhosttyResult;
     pub fn ghostty_render_state_row_cells_next(cells: GhosttyRenderStateRowCells) -> bool;
     pub fn ghostty_render_state_row_cells_get(
         cells: GhosttyRenderStateRowCells,

@@ -4,11 +4,24 @@
 //! tick, fed into the parser, and the resulting rows are cached so painting
 //! never has to talk to the parser.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pty::{Command, Pty};
-use vt::{Cursor, RenderState, Rgb, Row, Scrollbar, Terminal};
+use vt::{Cursor, Image, ImagePlacement, RenderState, Rgb, Row, Scrollbar, Terminal};
+
+/// One image the terminal has drawn, ready to paint.
+///
+/// The placement says where it goes; the pixels are kept beside it because they
+/// belong to the terminal and are only promised until it is next modified. A
+/// frame is a snapshot, so it carries its own copy — shared, so a frame that has
+/// not changed does not copy the pixels again.
+#[derive(Clone, Debug)]
+pub struct FrameImage {
+    pub placement: ImagePlacement,
+    pub image: Arc<Image>,
+}
 
 /// A snapshot of what to draw.
 #[derive(Clone, Debug)]
@@ -20,6 +33,8 @@ pub struct Frame {
     pub palette: [Rgb; 256],
     pub scrollbar: Scrollbar,
     pub title: String,
+    /// Images to draw, in draw order: below the text first, then above it.
+    pub images: Vec<FrameImage>,
 }
 
 impl Default for Frame {
@@ -32,6 +47,7 @@ impl Default for Frame {
             palette: [Rgb::default(); 256],
             scrollbar: Scrollbar::default(),
             title: String::new(),
+            images: Vec::new(),
         }
     }
 }
@@ -52,6 +68,13 @@ pub struct Session {
     /// When the program last wrote anything. What the sidebar shows as
     /// "working" is simply output that arrived a moment ago.
     last_output: Instant,
+    /// Pixels of every image the terminal currently holds, keyed by image id and
+    /// stamped with the generation they were read at.
+    ///
+    /// The generation is what keeps this cheap. A program that sends an image
+    /// and then keeps typing does not change it, so the pixels are read once and
+    /// shared by every frame after that.
+    image_pixels: HashMap<u32, (u64, Arc<Image>)>,
 }
 
 impl Session {
@@ -99,6 +122,7 @@ impl Session {
             exit: None,
             pending_write,
             last_output: Instant::now(),
+            image_pixels: HashMap::new(),
         };
         session.capture();
         Ok(session)
@@ -155,7 +179,54 @@ impl Session {
             palette: colors.palette,
             scrollbar: self.term.scrollbar(),
             title: self.term.title().to_owned(),
+            images: self.collect_images(),
         };
+    }
+
+    /// Resolves every placement the render state reports into pixels.
+    ///
+    /// The pixels are read from the terminal, which only promises they stay put
+    /// until it is next modified — so they are copied out here, once, and then
+    /// shared by every frame until the generation moves.
+    fn collect_images(&mut self) -> Vec<FrameImage> {
+        let placements = self.state.images();
+        let mut images = Vec::with_capacity(placements.len());
+
+        for placement in placements {
+            let cached = self
+                .image_pixels
+                .get(&placement.image_id)
+                .filter(|(generation, _)| *generation == placement.generation);
+            let image = match cached {
+                Some((_, image)) => Arc::clone(image),
+                None => {
+                    let Some(image) = self.term.kitty_image(placement.image_id) else {
+                        // The render state skips placements whose pixels have not
+                        // arrived, so this is a terminal that dropped the image
+                        // between reporting it and now.
+                        continue;
+                    };
+                    let image = Arc::new(image);
+                    self.image_pixels.insert(
+                        placement.image_id,
+                        (placement.generation, Arc::clone(&image)),
+                    );
+                    image
+                }
+            };
+            images.push(FrameImage { placement, image });
+        }
+
+        // Anything the terminal no longer reports has no reason to stay: an
+        // animation that has moved on would otherwise accumulate every frame it
+        // has ever shown.
+        let live: Vec<u32> = images
+            .iter()
+            .map(|image| image.placement.image_id)
+            .collect();
+        self.image_pixels.retain(|id, _| live.contains(id));
+
+        images
     }
 
     /// The current frame.

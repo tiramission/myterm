@@ -619,6 +619,29 @@ impl Terminal {
         &self.title
     }
 
+    /// Reads one image out of the terminal's Kitty graphics storage.
+    ///
+    /// `None` when there is no image with that id, or when its pixels have not
+    /// finished arriving. The pixels are copied out, because the library only
+    /// promises they stay put until the terminal is next modified.
+    pub fn kitty_image(&self, image_id: u32) -> Option<image::Image> {
+        // SAFETY: a null storage yields a null image, which `from_storage`
+        // checks; the handle is borrowed from this terminal and stays valid for
+        // as long as the borrow does.
+        unsafe {
+            let mut storage: sys::GhosttyKittyGraphics = std::ptr::null_mut();
+            let ok = sys::ghostty_terminal_get(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                &mut storage as *mut _ as *mut c_void,
+            );
+            if crate::check(ok).is_err() || storage.is_null() {
+                return None;
+            }
+            image::Image::from_storage(storage, image_id)
+        }
+    }
+
     /// Re-reads the title from the terminal. The returned pointer is only valid
     /// until the next mutating call, so it is copied out here.
     pub fn refresh_title(&mut self) {
@@ -738,6 +761,8 @@ pub struct RenderState {
     raw: sys::GhosttyRenderState,
     rows: sys::GhosttyRenderStateRowIterator,
     cells: sys::GhosttyRenderStateRowCells,
+    /// Refilled from every update and walked by `images`.
+    images: image::ImageIterator,
 }
 
 impl RenderState {
@@ -764,7 +789,24 @@ impl RenderState {
             return Err(Error::OutOfMemory);
         }
 
-        Ok(Self { raw, rows, cells })
+        let images = match image::ImageIterator::new() {
+            Ok(images) => images,
+            Err(error) => {
+                unsafe {
+                    sys::ghostty_render_state_row_cells_free(cells);
+                    sys::ghostty_render_state_row_iterator_free(rows);
+                    sys::ghostty_render_state_free(raw);
+                }
+                return Err(error);
+            }
+        };
+
+        Ok(Self {
+            raw,
+            rows,
+            cells,
+            images,
+        })
     }
 
     /// Refreshes the snapshot from the terminal.
@@ -891,6 +933,21 @@ impl RenderState {
             }
         }
     }
+
+    /// Every image placement the terminal currently reports, in draw order.
+    ///
+    /// Sorted by layer and then z-index, which is the order a renderer wants:
+    /// anything below the text first, so what is drawn above it covers what is
+    /// underneath. The library reports them in storage order, which is not the
+    /// same thing.
+    ///
+    /// Call this after [`RenderState::update`], in the same pass that reads the
+    /// rows: the placements are only valid until the next update.
+    pub fn images(&mut self) -> Vec<image::ImagePlacement> {
+        self.images
+            .placements(self.raw)
+            .unwrap_or_else(|_| Vec::new())
+    }
 }
 
 /// Reads the cell the `cells` iterator currently points at.
@@ -1009,6 +1066,7 @@ pub const MODS_ALT: u16 = sys::GHOSTTY_MODS_ALT;
 pub const MODS_SUPER: u16 = sys::GHOSTTY_MODS_SUPER;
 
 /// Key codes for [`KeyInput::key`]. Names follow the C enum.
+mod image;
 pub mod key {
     use vt_sys as sys;
 
@@ -1107,4 +1165,5 @@ pub mod key {
     }
 }
 
+pub use image::*;
 pub use key::*;

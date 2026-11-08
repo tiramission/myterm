@@ -5,8 +5,10 @@
 //! `Element` that paints backgrounds, glyphs, decorations and the cursor, and
 //! leaves layout to `window.request_layout`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::*;
 
@@ -69,13 +71,19 @@ pub struct TerminalGrid {
     /// platform's text input target while it paints.
     entity: Entity<Workspace>,
     focus: FocusHandle,
+    /// Textures for images the terminal has drawn. Shared with every other
+    /// grid in the window so a frame that has not changed is not re-uploaded.
+    images: Rc<RefCell<ImageCache>>,
+    /// Distinguishes this grid's images from another pane's in the shared cache.
+    pane_id: u64,
 }
 
 impl TerminalGrid {
-    /// Eight parameters is one more than the lint likes, and they are all
-    /// needed: the grid has to reach the window, the workspace, and the focus
-    /// handle, and each is a different kind of thing. Bundling them into a
-    /// struct would move the spelling without making the call clearer.
+    /// Ten parameters is well past what the lint likes, and they are all
+    /// needed: the grid has to reach the window, the workspace, the focus
+    /// handle, the terminal its frame came from, and the cache its images are
+    /// uploaded into. Each is a different kind of thing, and bundling them would
+    /// move the spelling without making the call clearer.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<ElementId>,
@@ -86,6 +94,8 @@ impl TerminalGrid {
         window_bounds: Rc<Cell<Bounds<Pixels>>>,
         entity: Entity<Workspace>,
         focus: FocusHandle,
+        images: Rc<RefCell<ImageCache>>,
+        pane_id: u64,
     ) -> Self {
         Self {
             id: id.into(),
@@ -96,6 +106,8 @@ impl TerminalGrid {
             window_bounds,
             entity,
             focus,
+            images,
+            pane_id,
         }
     }
 }
@@ -233,6 +245,19 @@ impl Element for TerminalGrid {
             }
         }
 
+        // Pass one and a half: images that sit under the text. They go after the
+        // cell backgrounds, which would otherwise cover them, and before the
+        // glyphs, which are meant to stay readable on top.
+        paint_images(
+            window,
+            bounds,
+            style,
+            &self.frame,
+            self.pane_id,
+            &self.images,
+            vt::ImageLayer::BelowText,
+        );
+
         // Pass two: glyphs.
         for (y, row) in rows.iter().enumerate() {
             for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
@@ -312,6 +337,16 @@ impl Element for TerminalGrid {
                 paint_cursor(window, cx, cell_box, style, &self.frame, &font);
             }
         }
+
+        paint_images(
+            window,
+            bounds,
+            style,
+            &self.frame,
+            self.pane_id,
+            &self.images,
+            vt::ImageLayer::AboveText,
+        );
 
         paint_scrollbar(window, bounds, style, &self.frame);
     }
@@ -572,4 +607,152 @@ fn blend(under: Hsla, over: Hsla, alpha: f32) -> Hsla {
         l: over.l,
         a: alpha,
     })
+}
+
+/// Uploaded textures for the images a terminal has drawn.
+///
+/// Keyed by pane, image and generation. The generation is what makes the key
+/// worth having: a program can send new pixels under the same image id, and the
+/// library bumps the generation when it does, so a cache keyed on the id alone
+/// would keep showing the old picture.
+///
+/// The cache lives in the workspace and is shared by every grid, because a grid
+/// element is rebuilt each frame and anything it owned would be re-uploaded
+/// from scratch every time.
+#[derive(Default)]
+pub struct ImageCache {
+    entries: HashMap<(u64, u32, u64), Arc<RenderImage>>,
+    /// Keys the frame being painted has asked for. Everything else is dropped
+    /// afterwards, so a terminal that has moved on from an image does not keep
+    /// its texture alive.
+    live: HashSet<(u64, u32, u64)>,
+}
+
+impl ImageCache {
+    /// Starts a frame.
+    ///
+    /// Drops the textures the previous frame did not ask for, then clears the
+    /// set of keys in use. Both halves happen here because painting is the only
+    /// thing that fills the set, and there is no hook after it — so the set from
+    /// the last paint is read at the start of the next one.
+    ///
+    /// Doing it in one place also means a frame that paints nothing at all, such
+    /// as a window with no images anywhere, costs one empty retain.
+    pub fn begin_frame(&mut self) {
+        self.entries.retain(|key, _| self.live.contains(key));
+        self.live.clear();
+    }
+
+    /// The texture for one placement, uploading the pixels if they are new.
+    fn texture(
+        &mut self,
+        key: (u64, u32, u64),
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_pixel: usize,
+    ) -> Option<Arc<RenderImage>> {
+        self.live.insert(key);
+        if let Some(found) = self.entries.get(&key) {
+            return Some(found.clone());
+        }
+
+        let texture = upload(pixels, width, height, bytes_per_pixel)?;
+        self.entries.insert(key, texture.clone());
+        Some(texture)
+    }
+}
+
+/// Turns stored pixels into a texture.
+///
+/// `RenderImage` wants BGRA, and the terminal stores RGB, RGBA or greyscale, so
+/// the pixels are widened to four channels and the colour ones have their first
+/// and last swapped. There is no decoding left to do: the library has already
+/// turned PNG payloads into RGBA and inflated compressed ones.
+fn upload(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+) -> Option<Arc<RenderImage>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let expected = width as usize * height as usize * bytes_per_pixel;
+    if pixels.len() < expected {
+        return None;
+    }
+
+    let mut bgra = Vec::with_capacity(width as usize * height as usize * 4);
+    for pixel in pixels[..expected].chunks_exact(bytes_per_pixel) {
+        match bytes_per_pixel {
+            4 => {
+                bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+            }
+            3 => bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]),
+            2 => bgra.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]),
+            _ => bgra.extend_from_slice(&[pixel[0], pixel[0], pixel[0], 255]),
+        }
+    }
+
+    // The buffer is typed RGBA but holds BGRA, which is what the renderer reads.
+    // This is the same swap the framework's own image loader performs.
+    let buffer = image::ImageBuffer::from_raw(width, height, bgra)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+/// Draws the images one placement list asks for, in one layer.
+///
+/// The list is already sorted by layer and then z-index, so the caller paints
+/// the two layers in two passes. A single pass would let an above-text image be
+/// covered by a later below-text one.
+fn paint_images(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    style: GridStyle,
+    frame: &Frame,
+    pane_id: u64,
+    cache: &Rc<RefCell<ImageCache>>,
+    layer: vt::ImageLayer,
+) {
+    let origin = bounds.origin;
+    let mut cache = cache.borrow_mut();
+
+    for entry in frame
+        .images
+        .iter()
+        .filter(|entry| entry.placement.layer == layer)
+    {
+        let placement = &entry.placement;
+        let image = &entry.image;
+
+        let key = (pane_id, placement.image_id, placement.generation);
+        let texture = match cache.texture(
+            key,
+            &image.pixels,
+            image.width,
+            image.height,
+            image.format.bytes_per_pixel(),
+        ) {
+            Some(texture) => texture,
+            None => continue,
+        };
+
+        // Cell coordinates place the top-left corner and the pixel offset moves
+        // it inside that cell. Either can be negative, which is how a placement
+        // that starts off screen is reported.
+        let left =
+            origin.x + style.cell_width * placement.col as f32 + px(placement.offset_x as f32);
+        let top =
+            origin.y + style.cell_height * placement.row as f32 + px(placement.offset_y as f32);
+        let image_bounds = Bounds::new(
+            point(left, top),
+            size(px(placement.width as f32), px(placement.height as f32)),
+        );
+
+        // The grid's own bounds clip the image, so a placement that runs past
+        // the edge of the pane is cut off there rather than spilling into the
+        // next one — the same reason the cells are only drawn as far as they fit.
+        let _ = window.paint_image(bounds, image_bounds, Corners::default(), texture, 0, false);
+    }
 }
