@@ -781,22 +781,22 @@ fn paint_images(
         // A placement says how many cells it covers, and the program picks that
         // count by dividing its own height by the cell height the terminal
         // reported. The two do not always agree — `chafa` asks a 128×128 image
-        // for 13×7 cells, which in this grid is 104×158 — so filling the
-        // rectangle would stretch a square picture into a tall one. Fitting the
-        // image's own aspect inside the rectangle keeps it looking like itself,
-        // and centring it keeps it inside the cells the terminal reserved.
+        // for 13×7 cells — so filling the rectangle would stretch a square
+        // picture into a tall one. Fitting the image's own aspect inside the
+        // rectangle keeps it looking like itself.
+        //
+        // It is anchored at the top left rather than centred. The rectangle
+        // tends to be taller than the image, and centring it put a band of empty
+        // space between the prompt that started the image and the image itself,
+        // which read as the terminal having skipped a line. Anchoring keeps the
+        // picture directly under the command that produced it; the leftover rows
+        // are simply what the program reserved and did not fill.
         let source_w = placement.source_width.max(1) as f32;
         let source_h = placement.source_height.max(1) as f32;
         let fit = (cell_rect.size.width.as_f32() / source_w)
             .min(cell_rect.size.height.as_f32() / source_h);
         let drawn = size(px(source_w * fit), px(source_h * fit));
-        let image_bounds = Bounds::new(
-            point(
-                cell_rect.origin.x + (cell_rect.size.width - drawn.width) / 2.0,
-                cell_rect.origin.y + (cell_rect.size.height - drawn.height) / 2.0,
-            ),
-            drawn,
-        );
+        let image_bounds = Bounds::new(cell_rect.origin, drawn);
 
         // Clipped to both the cell rectangle and the pane, so a placement that
         // runs past either is cut off rather than spilling over the text or the

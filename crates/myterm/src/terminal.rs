@@ -171,6 +171,7 @@ impl Session {
         self.state.for_each_row(|row| rows.push(row));
 
         let images = self.collect_images();
+
         self.term.refresh_title();
         self.frame = Frame {
             rows,

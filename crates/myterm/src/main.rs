@@ -133,6 +133,10 @@ struct Pane {
     /// The grid size the pane was last sized to, so a resize is only sent when
     /// the computed cell count actually changes.
     grid: (u16, u16),
+    /// The cell size in pixels last sent to the terminal, for the same reason.
+    /// Kept beside the count because a font change moves the pixels without
+    /// moving the count.
+    cell: (u32, u32),
     /// Filled by the grid element during prepaint with the cells that fit.
     dims: Rc<Cell<(u16, u16)>>,
     /// Where the grid landed in window coordinates, filled by the same prepaint.
@@ -173,6 +177,9 @@ impl Pane {
             session,
             command: command.clone(),
             grid: (cols, rows),
+            // Unknown until the first frame measures the font; zero means "not
+            // yet", which forces the first sync to send a real size.
+            cell: (0, 0),
             dims: Rc::new(Cell::new((cols, rows))),
             bounds: Rc::new(Cell::new(Bounds::new(
                 point(px(0.0), px(0.0)),
@@ -621,17 +628,22 @@ impl Workspace {
     /// Sizes every pane to the grid its element reported it can hold.
     fn sync_grid_sizes(&mut self, window: &Window, cx: &App) {
         let style = self.grid_style(window, cx);
+        let cell = (
+            style.cell_width.as_f32().round() as u32,
+            style.cell_height.as_f32().round() as u32,
+        );
         for tab in &mut self.tabs {
             for pane in tab.panes.values_mut() {
                 let dims = pane.dims.get();
-                if pane.grid != dims {
+                // The cell size is part of the check, not just the cell count.
+                // A font or zoom change moves the same grid to a different pixel
+                // size, and that is what the terminal reports to a program that
+                // asks how big it is — a graphics program sizes its image and
+                // its row count from that.
+                if pane.grid != dims || pane.cell != cell {
                     pane.grid = dims;
-                    pane.session.resize(
-                        dims.0,
-                        dims.1,
-                        style.cell_width.as_f32().round() as u32,
-                        style.cell_height.as_f32().round() as u32,
-                    );
+                    pane.cell = cell;
+                    pane.session.resize(dims.0, dims.1, cell.0, cell.1);
                 }
             }
         }

@@ -219,9 +219,25 @@ pub struct Terminal {
     rows: u16,
     /// Boxed so the pointer handed to the library stays valid; the library
     /// stores the address, so this must not move after installation.
-    write_pty: Option<Box<WritePty>>,
+    hooks: Box<Hooks>,
     encoder: KeyEncoder,
     title: String,
+}
+
+/// What the library reaches back into through `GHOSTTY_TERMINAL_OPT_USERDATA`.
+///
+/// One struct rather than two pointers, because the library has a single
+/// userdata slot and more than one callback wants it.
+struct Hooks {
+    /// Where the parser's answers go, so a program can hear them. `None` in
+    /// tests and anywhere the terminal has no program behind it.
+    write: Option<WritePty>,
+    /// What to report when a program asks how big the terminal is.
+    ///
+    /// This matters more than it looks: a graphics program sizes its cells from
+    /// the cell size it is told, and if it is told nothing it guesses — which is
+    /// how an image ends up reserving the wrong number of rows.
+    size: sys::GhosttySizeReportSize,
 }
 
 impl Terminal {
@@ -237,14 +253,23 @@ impl Terminal {
             raw,
             cols,
             rows,
-            write_pty: None,
+            hooks: Box::new(Hooks {
+                write: write_pty,
+                size: sys::GhosttySizeReportSize {
+                    rows,
+                    columns: cols,
+                    // Unknown until the owner measures the font and resizes.
+                    // Reporting zero would make a program divide by it, so the
+                    // callback suppresses the answer instead; see the trampoline.
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+            }),
             encoder: KeyEncoder::new()?,
             title: String::new(),
         };
 
-        if let Some(cb) = write_pty {
-            terminal.install_write_pty(cb)?;
-        }
+        terminal.install_hooks()?;
 
         // A blinking caret is the convention for an interactive prompt, and
         // libghostty defaults to a steady one. This only sets the default that
@@ -262,13 +287,13 @@ impl Terminal {
         Ok(terminal)
     }
 
-    fn install_write_pty(&mut self, cb: WritePty) -> Result<()> {
-        // Double boxing keeps the trait-object fat pointer address stable while
-        // the library holds on to it. `userdata` points at the same box, which
-        // is what the trampoline dereferences.
-        let mut boxed: Box<WritePty> = Box::new(cb);
-        let userdata = &mut *boxed as *mut WritePty as *mut c_void;
-        self.write_pty = Some(boxed);
+    /// Points the library at this terminal's hooks.
+    ///
+    /// `hooks` is a `Box`, so its address is stable for the terminal's whole
+    /// life — which is what the library needs, because it keeps the pointer
+    /// rather than a copy.
+    fn install_hooks(&mut self) -> Result<()> {
+        let userdata = &mut *self.hooks as *mut Hooks as *mut c_void;
 
         unsafe {
             check(sys::ghostty_terminal_set(
@@ -280,6 +305,13 @@ impl Terminal {
                 self.raw,
                 sys::GHOSTTY_TERMINAL_OPT_WRITE_PTY,
                 write_pty_trampoline as *const c_void,
+            ))?;
+            // Answers `CSI 14/16/18/19 t`. A graphics program asks these to
+            // learn the cell size; with no answer it guesses, and guesses wrong.
+            check(sys::ghostty_terminal_set(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_OPT_SIZE,
+                size_trampoline as *const c_void,
             ))?;
         }
 
@@ -298,15 +330,26 @@ impl Terminal {
     pub fn resize(&mut self, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        if cols == self.cols && rows == self.rows {
-            return;
-        }
-        self.cols = cols;
-        self.rows = rows;
+
+        // The size the terminal reports has to follow the cell metrics too, not
+        // just the cell count: a font change moves the same grid to a different
+        // pixel size, and a program that asked before would keep the old number.
+        self.hooks.size = sys::GhosttySizeReportSize {
+            rows,
+            columns: cols,
+            cell_width: cell_width_px,
+            cell_height: cell_height_px,
+        };
+
+        // The parser is told even when the cell count is unchanged, because the
+        // pixel size may still have moved.
         unsafe {
             let _ =
                 sys::ghostty_terminal_resize(self.raw, cols, rows, cell_width_px, cell_height_px);
-        }
+        };
+
+        self.cols = cols;
+        self.rows = rows;
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -680,11 +723,37 @@ extern "C" fn write_pty_trampoline(
     if userdata.is_null() || data.is_null() || len == 0 {
         return;
     }
-    // SAFETY: `userdata` is the `Box<Box<dyn FnMut>>` installed in
-    // `install_write_pty`, and the terminal outlives the callback.
-    let cb = unsafe { &mut *(userdata as *mut Box<dyn FnMut(&[u8])>) };
+    // SAFETY: `userdata` is the `Box<Hooks>` installed in `install_hooks`, and
+    // the terminal outlives the callback.
+    let hooks = unsafe { &mut *(userdata as *mut Hooks) };
+    let Some(cb) = hooks.write.as_mut() else {
+        return;
+    };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
     cb(bytes);
+}
+
+/// Answers XTWINOPS size queries from the geometry last given to `resize`.
+///
+/// Returning false suppresses the response. That is the right answer before the
+/// owner has measured the font: a cell size of zero would have a program divide
+/// by it, and a wrong size is worse than no size.
+extern "C" fn size_trampoline(
+    _terminal: sys::GhosttyTerminal,
+    userdata: *mut c_void,
+    out_size: *mut sys::GhosttySizeReportSize,
+) -> bool {
+    if userdata.is_null() || out_size.is_null() {
+        return false;
+    }
+    // SAFETY: `userdata` is the `Box<Hooks>` installed in `install_hooks`, and
+    // the out pointer is the library's own stack slot.
+    let hooks = unsafe { &*(userdata as *const Hooks) };
+    if hooks.size.cell_width == 0 || hooks.size.cell_height == 0 {
+        return false;
+    }
+    unsafe { *out_size = hooks.size };
+    true
 }
 
 /// A key encoder, reused across events.

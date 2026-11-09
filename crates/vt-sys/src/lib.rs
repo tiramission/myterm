@@ -65,6 +65,25 @@ pub struct GhosttySelection {
 /// `GhosttyAllocator`: pass a null pointer to use the library's own allocator.
 pub type GhosttyAllocator = c_void;
 
+/// What a terminal reports for a size query: XTWINOPS `CSI 14/16/18/19 t` and
+/// in-band mode 2048. The struct is frozen, so it stays valid across versions.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GhosttySizeReportSize {
+    pub rows: u16,
+    pub columns: u16,
+    pub cell_width: u32,
+    pub cell_height: u32,
+}
+
+/// Answers a size query. Fills `out_size` and returns true; returning false
+/// suppresses the response entirely.
+pub type GhosttyTerminalSizeFn = unsafe extern "C" fn(
+    terminal: GhosttyTerminal,
+    userdata: *mut c_void,
+    out_size: *mut GhosttySizeReportSize,
+) -> bool;
+
 /// A borrowed byte string: pointer plus length, no terminator.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -368,6 +387,9 @@ pub const GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS: i32 = 30;
 
 pub const GHOSTTY_TERMINAL_OPT_USERDATA: i32 = 1;
 pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: i32 = 2;
+/// Answers XTWINOPS size queries. Without it the terminal silently ignores
+/// them, and a graphics program is left guessing the cell size.
+pub const GHOSTTY_TERMINAL_OPT_SIZE: i32 = 7;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: i32 = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: i32 = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: i32 = 14;
