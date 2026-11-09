@@ -274,36 +274,43 @@ impl Element for TerminalGrid {
             vt::ImageLayer::BelowText,
         );
 
-        // Pass two: glyphs.
+        // Pass two: images that sit above the cell backgrounds.
+        //
+        // Every layer but the below-background one is drawn here, before the
+        // glyphs, rather than after them. A layer is about what an image covers
+        // when a terminal can lay out both itself; on Windows the console behind
+        // the pseudo-terminal has no idea an image took any rows, so a line
+        // editor that addresses its input line by absolute row keeps writing
+        // into the rows the picture covers. Whatever we drew first is the thing
+        // that has to give way, and the text is the thing people are reading.
+        paint_images(
+            window,
+            bounds,
+            style,
+            &self.frame,
+            self.pane_id,
+            &self.images,
+            vt::ImageLayer::BelowText,
+        );
+        paint_images(
+            window,
+            bounds,
+            style,
+            &self.frame,
+            self.pane_id,
+            &self.images,
+            vt::ImageLayer::AboveText,
+        );
+
+        // Pass three: glyphs.
         for (y, row) in rows.iter().enumerate() {
-            for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
-                if cell.text.is_empty() || cell.style.invisible {
-                    continue;
-                }
-
-                let mut fg = resolve(cell.style.fg, &palette, default_fg);
-                if cell.style.inverse {
-                    fg = resolve(cell.style.bg, &palette, default_bg);
-                }
-                if cell.style.faint {
-                    fg = blend(fg, style.background, 0.5);
-                }
-
-                let cell_box = cell_bounds(origin, style, x, y);
-                paint_glyph(
-                    window,
-                    cx,
-                    &cell.text,
-                    fg,
-                    cell.style.bold,
-                    cell_box,
-                    style,
-                    &font,
-                );
-            }
+            paint_row_glyphs(
+                window, cx, row, y, fit_cols, origin, style, &palette, default_fg, default_bg,
+                &font,
+            );
         }
 
-        // Pass three: decorations and the cursor, drawn over the glyphs.
+        // Pass four: decorations, drawn over the glyphs.
         for (y, row) in rows.iter().enumerate() {
             for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
                 let cell_box = cell_bounds(origin, style, x, y);
@@ -342,8 +349,9 @@ impl Element for TerminalGrid {
             }
         }
 
+        // Pass five: the caret.
+        let cursor = self.frame.cursor;
         if self.focused {
-            let cursor = self.frame.cursor;
             // A blinking cursor is hidden on alternate phases; a steady one is
             // always drawn.
             let show =
@@ -353,16 +361,6 @@ impl Element for TerminalGrid {
                 paint_cursor(window, cx, cell_box, style, &self.frame, &font);
             }
         }
-
-        paint_images(
-            window,
-            bounds,
-            style,
-            &self.frame,
-            self.pane_id,
-            &self.images,
-            vt::ImageLayer::AboveText,
-        );
 
         paint_scrollbar(window, bounds, style, &self.frame);
     }
@@ -514,6 +512,52 @@ fn paint_cursor(
                 );
             }
         }
+    }
+}
+
+/// Draws every glyph of one row, in cell order.
+///
+/// Pulled out of the paint pass so the row's glyphs are written once, in one
+/// place: the caret draws some of them a second time, and a second copy written
+/// elsewhere would drift from this one.
+#[allow(clippy::too_many_arguments)]
+fn paint_row_glyphs(
+    window: &mut Window,
+    cx: &mut App,
+    row: &vt::Row,
+    y: usize,
+    fit_cols: usize,
+    origin: Point<Pixels>,
+    style: GridStyle,
+    palette: &[vt::Rgb; 256],
+    default_fg: vt::Rgb,
+    default_bg: vt::Rgb,
+    font: &Font,
+) {
+    for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
+        if cell.text.is_empty() || cell.style.invisible {
+            continue;
+        }
+
+        let mut fg = resolve(cell.style.fg, palette, default_fg);
+        if cell.style.inverse {
+            fg = resolve(cell.style.bg, palette, default_bg);
+        }
+        if cell.style.faint {
+            fg = blend(fg, style.background, 0.5);
+        }
+
+        let cell_box = cell_bounds(origin, style, x, y);
+        paint_glyph(
+            window,
+            cx,
+            &cell.text,
+            fg,
+            cell.style.bold,
+            cell_box,
+            style,
+            font,
+        );
     }
 }
 
