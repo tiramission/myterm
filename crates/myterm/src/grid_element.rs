@@ -226,6 +226,22 @@ impl Element for TerminalGrid {
             .max(0.0) as usize;
         let rows: Vec<&vt::Row> = self.frame.rows.iter().take(fit_rows).collect();
 
+        // The library defines three image layers and says to interleave them
+        // with the renderer's own passes, bottom first. So the painting order is:
+        // below-background images, cell backgrounds, below-text images, glyphs,
+        // above-text images. Getting this wrong is not obvious from a screenshot:
+        // an image in the wrong layer still looks correct until something covers
+        // it.
+        paint_images(
+            window,
+            bounds,
+            style,
+            &self.frame,
+            self.pane_id,
+            &self.images,
+            vt::ImageLayer::BelowBackground,
+        );
+
         // Pass one: cell backgrounds, so glyphs from a neighbouring cell never
         // sit on top of a background painted later.
         for (y, row) in rows.iter().enumerate() {

@@ -20,12 +20,20 @@ use vt_sys as sys;
 use crate::Result;
 
 /// The layer an image is drawn in.
+///
+/// The library defines these in draw order, bottom first, and a renderer has to
+/// interleave them with its own passes: below-background, cell backgrounds,
+/// below-text, text, above-text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageLayer {
-    /// Under the cell backgrounds, so text stays readable over it.
+    /// Beneath the cell background colours. A Kitty placement lands here when
+    /// its z-index is below `INT32_MIN / 2`.
+    BelowBackground,
+    /// Above the cell backgrounds and below the text, so the text stays
+    /// readable over it. Kitty z-index from `INT32_MIN / 2` up to `-1`.
     BelowText,
-    /// Over the text, which is what a program asks for when it means to cover
-    /// what is already on screen.
+    /// Above the text, which is what a program asks for when it means to cover
+    /// what is already on screen. Kitty z-index 0 and above.
     AboveText,
 }
 
@@ -238,12 +246,25 @@ impl Drop for ImageIterator {
     }
 }
 
-/// Draw order within the result: below the text first, so anything above it
-/// covers what is underneath.
+/// Draw order within the result: the layer's own value is the draw order, so
+/// sorting by it puts the bottom-most layer first.
 fn layer_rank(layer: ImageLayer) -> u8 {
     match layer {
-        ImageLayer::BelowText => 0,
-        ImageLayer::AboveText => 1,
+        ImageLayer::BelowBackground => 0,
+        ImageLayer::BelowText => 1,
+        ImageLayer::AboveText => 2,
+    }
+}
+
+/// The library's layer constant as this crate's enum.
+fn to_layer(layer: i32) -> ImageLayer {
+    match layer {
+        sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND => ImageLayer::BelowBackground,
+        sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT => ImageLayer::AboveText,
+        // Below-text is the documented middle, and it is also the safe default:
+        // an unknown layer drawn under the text cannot hide what the terminal
+        // is saying.
+        _ => ImageLayer::BelowText,
     }
 }
 
@@ -319,10 +340,7 @@ unsafe fn read_placement(iterator: sys::GhosttyRenderStateImageIterator) -> Opti
         &mut source_height
     );
 
-    let layer = match layer {
-        sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT => ImageLayer::AboveText,
-        _ => ImageLayer::BelowText,
-    };
+    let layer = to_layer(layer);
 
     // A source rectangle of zero means "the whole image", which is what the
     // library reports for the common case; filling it in here keeps a renderer
@@ -400,10 +418,44 @@ mod tests {
         if reported == 0 { drawn } else { reported }
     }
 
-    /// Draw order is what the sort is for: below the text first, so anything
-    /// drawn above it covers what is underneath.
+    /// The three layers are drawn bottom first, and the sort has to agree with
+    /// that: an image that ends up in the wrong layer still looks right until
+    /// something covers it.
     #[test]
-    fn below_text_draws_before_above_text() {
+    fn layers_sort_bottom_first() {
+        assert!(layer_rank(ImageLayer::BelowBackground) < layer_rank(ImageLayer::BelowText));
         assert!(layer_rank(ImageLayer::BelowText) < layer_rank(ImageLayer::AboveText));
+    }
+
+    /// The library's layer constants are 0, 1, 2 in draw order. Getting them
+    /// wrong silently inverts which images go under the text.
+    #[test]
+    fn every_layer_round_trips_through_its_constant() {
+        let cases = [
+            (
+                sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND,
+                ImageLayer::BelowBackground,
+            ),
+            (sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT, ImageLayer::BelowText),
+            (sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT, ImageLayer::AboveText),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(to_layer(raw), expected);
+        }
+        assert_eq!(
+            (
+                sys::GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND,
+                sys::GHOSTTY_IMAGE_LAYER_BELOW_TEXT,
+                sys::GHOSTTY_IMAGE_LAYER_ABOVE_TEXT,
+            ),
+            (0, 1, 2)
+        );
+    }
+
+    /// An unknown layer is drawn under the text: a placement drawn too low
+    /// cannot hide what the terminal is saying.
+    #[test]
+    fn an_unknown_layer_falls_back_to_below_text() {
+        assert_eq!(to_layer(99), ImageLayer::BelowText);
     }
 }

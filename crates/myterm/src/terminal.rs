@@ -170,6 +170,7 @@ impl Session {
         let mut rows = Vec::new();
         self.state.for_each_row(|row| rows.push(row));
 
+        let images = self.collect_images();
         self.term.refresh_title();
         self.frame = Frame {
             rows,
@@ -179,7 +180,7 @@ impl Session {
             palette: colors.palette,
             scrollbar: self.term.scrollbar(),
             title: self.term.title().to_owned(),
-            images: self.collect_images(),
+            images,
         };
     }
 

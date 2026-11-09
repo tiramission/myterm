@@ -307,8 +307,12 @@ pub const GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION: i32 = 23;
 pub const GHOSTTY_IMAGE_PROTOCOL_KITTY: i32 = 0;
 
 /// The layer an image is drawn in.
-pub const GHOSTTY_IMAGE_LAYER_BELOW_TEXT: i32 = 0;
-pub const GHOSTTY_IMAGE_LAYER_ABOVE_TEXT: i32 = 1;
+///
+/// Draw each frame from the bottom up: images below the background, cell
+/// backgrounds, images below the text, text, then images above the text.
+pub const GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND: i32 = 0;
+pub const GHOSTTY_IMAGE_LAYER_BELOW_TEXT: i32 = 1;
+pub const GHOSTTY_IMAGE_LAYER_ABOVE_TEXT: i32 = 2;
 
 // One placement, read one key at a time.
 pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL: i32 = 1;
@@ -332,6 +336,10 @@ pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_PLACEMENT_ID: i32 = 18;
 pub const GHOSTTY_RENDER_STATE_IMAGE_DATA_KITTY_KIND: i32 = 19;
 
 // One stored image, read with `ghostty_kitty_graphics_image_get`.
+/// A value that changes whenever an image is sent, placed or deleted; zero
+/// means nothing has ever changed, so the storage is empty.
+pub const GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION: i32 = 2;
+
 pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_ID: i32 = 1;
 pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH: i32 = 3;
 pub const GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT: i32 = 4;
