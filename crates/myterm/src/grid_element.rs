@@ -733,6 +733,7 @@ fn paint_images(
 ) {
     let origin = bounds.origin;
     let mut cache = cache.borrow_mut();
+    let mut painted: Vec<PendingImage> = Vec::new();
 
     for entry in frame
         .images
@@ -754,13 +755,10 @@ fn paint_images(
             None => continue,
         };
 
-        // Cell coordinates place the top-left corner and the pixel offset moves
-        // it inside that cell. Either can be negative, which is how a placement
-        // that starts off screen is reported.
         // The rectangle the placement occupies, in this renderer's own cell
-        // metrics. The library also reports a pixel width and height, but those
-        // are computed from the cell size *it* was told about, which is not the
-        // size measured here.
+        // metrics. The library also reports a pixel width and height, computed
+        // from the cell size *it* was told; the two agree as long as the
+        // terminal is told the size measured here, which `Session::resize` does.
         let cell_left = origin.x + style.cell_width * placement.col as f32;
         let cell_top = origin.y + style.cell_height * placement.row as f32;
         let cell_rect = Bounds::new(
@@ -776,32 +774,63 @@ fn paint_images(
             ),
         );
 
-        // The cell rectangle is an upper bound, not a shape to stretch into.
+        // A placement can show a sub-rectangle of its image. Scale the whole
+        // image as if it filled the rectangle, then shift it so the requested
+        // part lands there; the clip trims the rest.
         //
-        // A placement says how many cells it covers, and the program picks that
-        // count by dividing its own height by the cell height the terminal
-        // reported. The two do not always agree — `chafa` asks a 128×128 image
-        // for 13×7 cells — so filling the rectangle would stretch a square
-        // picture into a tall one. Fitting the image's own aspect inside the
-        // rectangle keeps it looking like itself.
-        //
-        // It is anchored at the top left rather than centred. The rectangle
-        // tends to be taller than the image, and centring it put a band of empty
-        // space between the prompt that started the image and the image itself,
-        // which read as the terminal having skipped a line. Anchoring keeps the
-        // picture directly under the command that produced it; the leftover rows
-        // are simply what the program reserved and did not fill.
+        // The rectangle's shape is not corrected. A program decides both the
+        // cells and the part of the image to show, and it bakes its aspect into
+        // the source rectangle — `chafa` scales a 128×128 icon to 128×138 before
+        // sending it. Stretching into the declared rectangle is what Ghostty and
+        // Kero both do; fitting the image's own aspect here would fight the
+        // program that already did.
         let source_w = placement.source_width.max(1) as f32;
         let source_h = placement.source_height.max(1) as f32;
-        let fit = (cell_rect.size.width.as_f32() / source_w)
-            .min(cell_rect.size.height.as_f32() / source_h);
-        let drawn = size(px(source_w * fit), px(source_h * fit));
-        let image_bounds = Bounds::new(cell_rect.origin, drawn);
+        let scale_x = cell_rect.size.width.as_f32() / source_w;
+        let scale_y = cell_rect.size.height.as_f32() / source_h;
+        let image_bounds = Bounds::new(
+            point(
+                cell_rect.origin.x - px(placement.source_x as f32 * scale_x),
+                cell_rect.origin.y - px(placement.source_y as f32 * scale_y),
+            ),
+            size(
+                px(image.width as f32 * scale_x),
+                px(image.height as f32 * scale_y),
+            ),
+        );
 
         // Clipped to both the cell rectangle and the pane, so a placement that
         // runs past either is cut off rather than spilling over the text or the
         // neighbouring pane.
         let clip = cell_rect.intersect(&bounds);
+        if clip.size.width <= px(0.0) || clip.size.height <= px(0.0) {
+            continue;
+        }
+        painted.push((
+            layer_rank(placement.layer),
+            placement.z,
+            texture,
+            clip,
+            image_bounds,
+        ));
+    }
+
+    // Sorted here rather than trusted: the frame is built from the render state
+    // in whatever order the library reports, and a higher z has to land on top.
+    painted.sort_by_key(|(rank, z, ..)| (*rank, *z));
+    for (_, _, texture, clip, image_bounds) in painted {
         let _ = window.paint_image(clip, image_bounds, Corners::default(), texture, 0, false);
+    }
+}
+
+/// One image ready to paint: its draw order, texture, clip and destination.
+type PendingImage = (u8, i32, Arc<RenderImage>, Bounds<Pixels>, Bounds<Pixels>);
+
+/// Draw order of the layers, bottom first.
+fn layer_rank(layer: vt::ImageLayer) -> u8 {
+    match layer {
+        vt::ImageLayer::BelowBackground => 0,
+        vt::ImageLayer::BelowText => 1,
+        vt::ImageLayer::AboveText => 2,
     }
 }
