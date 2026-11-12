@@ -25,7 +25,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::prelude::*;
@@ -54,17 +53,20 @@ const WINDOW_MINIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewB
 const WINDOW_MAXIMIZE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>"#;
 
 /// Zoom a pane to fill the card; and the reverse.
-/// The sidebar toggle: a column beside a page.
-const SIDEBAR_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9.5 4v16"/></svg>"#;
-
 const ZOOM_IN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9"/><path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9"/><path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15"/><path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></svg>"#;
 const ZOOM_OUT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4"/><path d="M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4"/><path d="M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20"/><path d="M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/></svg>"#;
 
 const WINDOW_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
 const WINDOW_RESTORE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="4" y="8" width="12" height="12" rx="1.5"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16"/></svg>"#;
 
-/// The close cross on a tab. Smaller and lighter than the window caption's,
-/// because it sits inside a 18-pixel circle rather than a full caption button.
+/// The plus that opens a tab. It lives in the sidebar — beside the column
+/// heading, in the rail, and in the empty list — because that is where the tab
+/// it creates will appear.
+const PLUS_SMALL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"#;
+
+/// The close cross on a tab row in the sidebar. Smaller and lighter than the
+/// window caption's, because it sits inside an 18-pixel circle rather than a
+/// full caption button.
 const TAB_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
 
 /// The app mark in the title bar: a prompt caret inside a window frame.
@@ -105,10 +107,10 @@ const CHIP_RADIUS: f32 = 10.0;
 /// at rest, and the pointer is the only thing that shows it can be moved.
 const PANE_GAP: f32 = 10.0;
 
-/// Width of the pane list.
+/// Width of the tab list.
 const SIDEBAR_WIDTH: f32 = 214.0;
 
-/// Narrowest the list gets: a column of dots with room to aim at.
+/// Narrowest the list gets: a chip of glyphs with room to aim at.
 const RAIL_WIDTH: f32 = 56.0;
 
 const MAX_SIDEBAR_WIDTH: f32 = 420.0;
@@ -380,13 +382,17 @@ pub struct Workspace {
     installing: bool,
     /// The last install or uninstall failure, shown in the about panel.
     install_error: Option<String>,
-    /// What the user asked for. `None` means "decide by how much there is to
-    /// list", which is what keeps a single terminal free of a list of one.
-    sidebar_choice: Option<bool>,
+    /// Whether the startup reminder that this copy is not installed is on
+    /// screen. Dismissing it hides it for the session; installing ends it
+    /// everywhere, because the installed copy is what runs from then on.
+    show_install_prompt: bool,
     /// How wide the list is. Width is the whole state: below the rail width the
-    /// list draws as a strip of dots, which is how it collapses without a second
-    /// control to learn.
+    /// list draws as a strip of capsules, which is how it collapses without a
+    /// second control to learn.
     sidebar_width: f32,
+    /// The width to come back to when the rail opens. Kept apart from
+    /// `sidebar_width` so collapsing does not forget the width the user chose.
+    sidebar_expanded: f32,
     /// Present while the list's edge is being dragged.
     sidebar_drag: Option<SidebarDrag>,
     /// Whether Tab has been claimed from the focus system. Registered once.
@@ -422,14 +428,20 @@ impl Workspace {
             drag_anchor: None,
             selection: false,
             zoomed: None,
-            sidebar_choice: None,
             update: None,
             updating: false,
             update_progress: None,
             update_rx: None,
             installing: false,
             install_error: None,
-            sidebar_width: SIDEBAR_WIDTH,
+            // One stat call at start-up. A copy at the install location means
+            // the app has already been through this; a portable download has
+            // not, and is the one case worth mentioning.
+            show_install_prompt: !install::is_present(),
+            // The rail is the default: a terminal should open with as little
+            // chrome as it can get away with, and the list is one click away.
+            sidebar_width: RAIL_WIDTH,
+            sidebar_expanded: SIDEBAR_WIDTH,
             sidebar_drag: None,
             tab_claimed: false,
             resize_drag: None,
@@ -849,7 +861,7 @@ impl Workspace {
                     return;
                 }
                 "b" => {
-                    self.toggle_sidebar(cx);
+                    self.toggle_rail(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1381,14 +1393,24 @@ impl Render for Workspace {
                 }),
             );
 
-        body = body.child(self.render_tabs(window, cx));
+        body = body.child(self.render_title_bar(window, cx));
+
+        // An uninstalled copy says so once, in a band that can be dismissed. It
+        // is not a dialog: installing is an offer, and a terminal that blocks
+        // its own grid until you accept one is not a terminal.
+        if self.show_install_prompt {
+            body = body.child(self.render_install_prompt(&theme, cx));
+        }
 
         // The list and the panes sit side by side under the bar, so the window
-        // still has exactly one title row.
-        let mut content = div().flex_1().min_h_0().flex().flex_row();
-        if self.sidebar_shown() {
-            content = content.child(self.render_sidebar(&theme, cx));
-        }
+        // still has exactly one title row. The list is always there: it is the
+        // tab surface now, not an accessory that can be switched off.
+        let mut content = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .child(self.render_sidebar(&theme, cx));
 
         if let Some(error) = &self.error {
             // A failure is the one moment the grid is not there, so it gets the
@@ -1442,7 +1464,12 @@ impl Render for Workspace {
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .p(px(10.0))
+                // One gutter on all four sides. The leading gap used to be
+                // smaller to make "row to card" match "card to card", but that
+                // left the card four pixels from the column and ten from the
+                // bar: the content sat off-centre in its own region, which is
+                // what the eye notices first. The region's boundary wins.
+                .p(px(PANE_GAP))
                 .bg(theme.title_bar)
                 .child(self.render_panes(tab, style, cx)),
         );
@@ -1777,6 +1804,11 @@ impl Workspace {
         // back: dragging to the narrow end is how the list is collapsed.
         if (width - self.sidebar_width).abs() > 0.5 {
             self.sidebar_width = width;
+            // Remember the last readable width, so the keyboard collapse has
+            // somewhere to come back to.
+            if width >= RAIL_THRESHOLD {
+                self.sidebar_expanded = width;
+            }
             cx.notify();
         }
     }
@@ -2032,19 +2064,143 @@ impl Workspace {
         .detach();
     }
 
-    /// Whether the sidebar is on screen.
+    /// Collapses the list to its rail, or opens it back to the width it had.
     ///
-    /// With no explicit choice it follows how much there is to list: a list of
-    /// one is not worth a column, and a window full of panes is worth one even
-    /// if nobody asked. An explicit toggle wins either way.
-    fn sidebar_shown(&self) -> bool {
-        let panes: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
-        self.sidebar_choice.unwrap_or(panes > 1)
+    /// The width is the user's: it starts at the rail and only changes when the
+    /// edge is dragged, this is pressed, or `Ctrl+Shift+B` is. Splitting a pane
+    /// never widens it on its own — the column is navigation, and it has no
+    /// reason to take the terminal's width without being asked.
+    fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_width < RAIL_THRESHOLD {
+            self.sidebar_width = self
+                .sidebar_expanded
+                .clamp(RAIL_THRESHOLD, MAX_SIDEBAR_WIDTH);
+        } else {
+            self.sidebar_expanded = self.sidebar_width;
+            self.sidebar_width = RAIL_WIDTH;
+        }
+        cx.notify();
     }
 
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_choice = Some(!self.sidebar_shown());
-        cx.notify();
+    /// The band that offers to install this copy.
+    ///
+    /// Shown when nothing exists at the install location, which is the portable
+    /// download case. It is an offer, not a gate: it can be dismissed, and the
+    /// install button runs the same path as the about panel so the two entry
+    /// points cannot drift. A failure stays in the band, where the user pressed.
+    fn render_install_prompt(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let accent = theme.ring;
+        let muted = theme.muted_foreground;
+        let danger = theme.danger;
+        let hover = theme.muted;
+        let foreground = theme.foreground;
+
+        let (title, detail, tint, title_color) = if self.installing {
+            ("正在安装…".to_owned(), String::new(), accent, foreground)
+        } else if let Some(error) = &self.install_error {
+            ("安装失败".to_owned(), error.clone(), danger, danger)
+        } else {
+            (
+                "myterm 还没有安装到这台电脑".to_owned(),
+                "安装后可从开始菜单启动，有新版本时会自动更新。".to_owned(),
+                accent,
+                foreground,
+            )
+        };
+
+        let mut band = div()
+            .mx(px(PANE_GAP))
+            .mt(px(PANE_GAP))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(38.0))
+            .px(px(12.0))
+            .rounded(px(CHIP_RADIUS))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .child(icon_data(INFO_ICON, 14.0, tint))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.0))
+                            .text_color(title_color)
+                            .child(title),
+                    )
+                    .when(!detail.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child(detail),
+                        )
+                    }),
+            );
+
+        // No buttons while the work runs: pressing install twice would replace
+        // the copy twice, and this band is not a progress control.
+        if !self.installing {
+            band = band
+                .child(
+                    div()
+                        .id("install-prompt-later")
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .h(px(24.0))
+                        .px(px(10.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .text_size(px(11.5))
+                        .text_color(muted)
+                        .hover(move |this| this.bg(hover))
+                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                            workspace.show_install_prompt = false;
+                            cx.notify();
+                        }))
+                        .child("稍后"),
+                )
+                .child(
+                    div()
+                        .id("install-prompt-install")
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .h(px(24.0))
+                        .px(px(12.0))
+                        .rounded(px(6.0))
+                        .bg(accent.opacity(0.12))
+                        .text_size(px(11.5))
+                        .text_color(accent)
+                        .cursor_pointer()
+                        .hover(move |this| this.bg(accent.opacity(0.2)))
+                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                            workspace.run_install(cx);
+                        }))
+                        .child("安装"),
+                );
+        }
+
+        band.into_any_element()
     }
 
     /// Every tab and pane, with enough state to jump to one.
@@ -2052,6 +2208,11 @@ impl Workspace {
     /// This is the whole model the sidebar reads: it is rebuilt from the
     /// workspace each frame rather than kept in step with it, so there is
     /// nothing to keep in sync.
+    ///
+    /// The list holds one place per row, and every row can be clicked. A tab
+    /// holding one pane is one place, so its row *is* the tab; a tab holding
+    /// several is a group, and the header above its rows is clickable too. A
+    /// list that names a place and cannot go there is decoration.
     fn render_sidebar(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -2065,163 +2226,113 @@ impl Workspace {
             .flex_col()
             .gap(px(1.0))
             .px(px(6.0))
-            .pt(px(6.0))
+            .pt(px(4.0))
             .pb(px(8.0));
         // One answer for "which pane is current", shared with the grid.
         let current = self.effective_active();
+
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
+            let grouped = tab.panes.len() > 1;
 
-            // Every tab gets one line, and only a tab holding several panes gets
-            // lines under it. That represents each tab exactly once — a
-            // single-pane tab is its own line rather than a label above an
-            // identical row — while still leaving the groups readable.
-            //
-            // The line is a label, not a row: smaller and quieter than the panes
-            // it names, and the current one is marked by its own weight and
-            // colour rather than a bar beside it. A leading edge adds a second
-            // edge to a column that already aligns on its text.
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .pl(px(7.0))
-                    .pr(px(7.0))
-                    .when(tab_index > 0, |this| this.mt(px(8.0)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(10.5))
-                            .font_weight(if current_tab {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if current_tab {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground.opacity(0.75)
-                            })
-                            .child(tab.title.clone()),
-                    )
-                    // The count only earns its place when there is more than one
-                    // pane to count; "1" beside a single line is noise.
-                    .when(tab.panes.len() > 1, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted_foreground.opacity(0.7))
-                                .child(tab.panes.len().to_string()),
-                        )
-                    }),
-            );
+            // Groups are separated by air rather than a rule: the selected fill
+            // already marks the current place, and a line drawn across the
+            // column would be a second edge saying the same thing louder.
+            if tab_index > 0 {
+                list = list.child(div().h(px(8.0)));
+            }
 
-            // A single pane needs no row of its own: the tab line above is it.
-            if tab.panes.len() > 1 {
-                for (id, pane) in &tab.panes {
-                    let id = *id;
-                    let selected = current == Some((tab_index, id));
-                    let status = pane_status(pane);
-                    // Captured by the listeners below, which outlive this borrow.
-                    let hover_bg = theme.muted;
-                    let selected_bg = theme.background;
+            // The cross belongs to the tab you are looking at. On every tab it
+            // turns the list into a column of identical buttons, and the one you
+            // might hit by accident is the one you did not mean to close.
+            // Closing another tab is one click away: select it, then close it.
+            let closable = current_tab && self.tabs.len() > 1;
 
-                    list = list.child(
-                        div()
-                            // Pane ids restart at 1 in every tab, so the row has to carry the
-                            // tab too: without it two rows share an id and only one of
-                            // them can be hit or highlighted.
-                            .id(ElementId::Name(
-                                format!("side-pane-{tab_index}-{id}").into(),
-                            ))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(7.0))
-                            .h(px(28.0))
-                            .px(px(8.0))
-                            .rounded(px(CHIP_RADIUS))
-                            .cursor_pointer()
-                            .when(selected, |this| this.bg(selected_bg))
-                            .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
-                            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                                workspace.select_tab(tab_index, cx);
-                                workspace.focus_pane(id, cx);
-                            }))
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded(px(999.0))
-                                    .bg(dot_color(status, selected, theme)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(12.0))
-                                    .text_color(if selected {
-                                        theme.foreground
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(pane_label(pane)),
-                            )
-                            .when_some(status.label(), |this, label| {
-                                this.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(10.0))
-                                        .text_color(theme.muted_foreground.opacity(0.8))
-                                        .child(label),
-                                )
-                            }),
-                    );
-                }
+            if grouped {
+                list = list.child(sidebar_group_row(
+                    tab_index,
+                    tab.title.clone(),
+                    tab.panes.len(),
+                    current_tab,
+                    closable,
+                    theme,
+                    cx,
+                ));
+            }
+
+            for (id, pane) in &tab.panes {
+                let id = *id;
+                let selected = current == Some((tab_index, id));
+                list = list.child(sidebar_pane_row(
+                    tab_index,
+                    id,
+                    pane_label(pane),
+                    pane_status(pane),
+                    // A row under a header belongs to it and steps in; a row
+                    // that stands for its own tab stays on the top spine.
+                    grouped,
+                    selected,
+                    // A one-pane tab is closed from its own row, because that
+                    // row is the tab. A grouped tab closes from its header.
+                    closable && !grouped,
+                    theme,
+                    cx,
+                ));
             }
         }
 
-        // A section label, not a heading with actions. The title bar already
-        // carries the plus that opens a tab, and one action should have one door.
+        if self.tabs.is_empty() {
+            list = list.child(sidebar_empty_row(theme, cx));
+        }
+
+        // The column's head carries the one action the list cannot express:
+        // opening a tab. It is here because the title bar no longer has tabs to
+        // hang a plus beside, and the list is where the result will appear.
         //
-        // It names what the list holds, so it changes with the list: several tabs
-        // means the rows are grouped and the tab is the unit; one tab means the
-        // rows are panes. Either way the column has a top edge to align its rows
-        // against, which is what stops a short list from looking unfinished.
-        let section = if self.tabs.len() > 1 {
-            "标签"
-        } else {
-            "窗格"
-        };
+        // Short on purpose. It is a label for the column, not a second title
+        // bar: the bar above it already holds the window's own controls, and
+        // two full-height rows of chrome in a row is a lot of weight for one
+        // word and one button.
         let header = div()
             .flex()
             .flex_row()
             .items_center()
-            .h(px(TITLE_BAR_HEIGHT))
-            .pl(px(13.0))
-            .pr(px(6.0))
+            .h(px(PANE_HEADER_HEIGHT))
+            // On the same leading spine as the grouped rows below: a heading
+            // two pixels off its list is the kind of drift that makes a column
+            // look assembled rather than drawn.
+            .pl(px(14.0))
+            .pr(px(4.0))
             .child(
                 div()
                     .flex_1()
                     .text_size(px(10.5))
                     .text_color(theme.muted_foreground)
-                    .child(section),
+                    .child("标签"),
+            )
+            .child(
+                icon_button("side-new-tab", PLUS_SMALL, 24.0, theme, cx).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, window, cx| {
+                        workspace.new_tab(window, cx);
+                    },
+                )),
             );
 
         let width = self.sidebar_width;
         let rail = width < RAIL_THRESHOLD;
 
         let column = if rail {
-            self.render_rail(theme, cx)
+            // The rail scrolls for the same reason the list does: the rows are
+            // as tall as they need to be, and a split workspace outgrows the
+            // window before the workspace runs out of panes.
+            div()
+                .id("side-rail")
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(self.render_rail(theme, cx))
+                .into_any_element()
         } else {
             div()
                 .w_full()
@@ -2244,10 +2355,15 @@ impl Workspace {
             .flex_shrink_0()
             .h_full()
             .relative()
-            .group("sidebar")
             .flex()
             .flex_col()
             .bg(theme.title_bar)
+            // The column starts and ends on the same gutter as the pane cards
+            // beside it, so the two regions share one top and bottom line
+            // instead of the list hanging from the title bar while the cards
+            // float ten pixels down.
+            .pt(px(PANE_GAP))
+            .pb(px(PANE_GAP))
             .child(column)
             // The edge is the control: it is where a pointer already goes when
             // it wants to resize a column, and dragging it to the narrow end is
@@ -2256,45 +2372,148 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The list with its names dropped: one dot per pane, grouped by tab.
+    /// The list with its names dropped: one capsule per tab, one chip per pane.
     ///
-    /// This is what the sidebar becomes at its narrowest. The status stays
-    /// visible — that is the part worth the pixels — and clicking a dot still
-    /// goes to its pane.
+    /// This is what the sidebar becomes at its narrowest, and it keeps the same
+    /// two levels as the list. The capsule is the tab — its outline is what says
+    /// where one tab ends and the next begins, which space alone could not do
+    /// once the labels lost their headings. The accent outline marks the tab the
+    /// keyboard is in; the white chip inside it marks the focused pane.
+    ///
+    /// A tab that holds several panes gets a small glyph above them; the chips
+    /// under it are its panes. A tab that holds one pane is one chip, because it
+    /// is one place.
+    ///
+    /// A column of identical dots said how many places there were but not which
+    /// was which, so each chip carries a character. Names collide often — every
+    /// shell is called `pwsh` — so when two panes in one tab start with the same
+    /// character they fall back to their position instead of repeating it. The
+    /// full name is one drag of the edge away.
     fn render_rail(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        /// Width of one tab's capsule.
+        const CAPSULE: f32 = 44.0;
+        /// Height of a pane's chip. The capsule's padding and outline leave the
+        /// chip the capsule's whole inner width, so it is a square.
+        const CHIP: f32 = 30.0;
+
         let mut rail = div()
             .w_full()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(4.0))
-            .py(px(10.0));
+            .gap(px(8.0))
+            .py(px(2.0));
         let current = self.effective_active();
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
-            for (id, pane) in &tab.panes {
+            let grouped = tab.panes.len() > 1;
+            let current_tab = tab_index == self.active_tab;
+
+            // The outline is the tab. Inactive tabs wear the same hairline the
+            // window uses elsewhere plus a wash, so a group reads as a group even
+            // before the eye finds its outline; the current one wears the accent,
+            // so the rail answers "where is the keyboard" at a glance.
+            //
+            // The wash is half strength on purpose: a full `muted` is what a row
+            // looks like under the pointer, and a resting surface must not borrow
+            // the hover state's colour.
+            let mut capsule = div()
+                .w(px(CAPSULE))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(2.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .rounded(px(16.0))
+                .border_1()
+                .border_color(if current_tab {
+                    theme.ring
+                } else {
+                    theme.border
+                })
+                .when(!current_tab, |this| this.bg(theme.muted.opacity(0.5)));
+
+            // Only a group needs a name of its own; a one-pane tab is already
+            // named by its chip.
+            if grouped {
+                let hover_bg = theme.muted;
+                let text_color = if current_tab {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                };
+                capsule = capsule.child(
+                    div()
+                        .id(ElementId::Name(format!("rail-tab-{tab_index}").into()))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w_full()
+                        .h(px(14.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(move |this| this.bg(hover_bg))
+                        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.select_tab(tab_index, cx);
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(if current_tab {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(text_color)
+                                .child(rail_initial(&tab.title)),
+                        ),
+                );
+            }
+
+            let labels: Vec<String> = tab.panes.values().map(pane_label).collect();
+            let glyphs = rail_glyphs(&labels);
+
+            for (index, (id, pane)) in tab.panes.iter().enumerate() {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
-                let selected_bg = theme.background;
+                let glyph = glyphs[index].clone();
                 let hover_bg = theme.muted;
+                let text_color = match status {
+                    // A dead shell is the one state worth interrupting for, so
+                    // it keeps a colour even when it is not the focused chip.
+                    PaneStatus::Exited => theme.danger,
+                    _ if selected => theme.foreground,
+                    _ => theme.muted_foreground,
+                };
 
-                rail = rail.child(
+                capsule = capsule.child(
                     div()
+                        // Pane ids restart at 1 in every tab, so the row has to
+                        // carry the tab too: without it two rows share an id and
+                        // only one of them can be hit or highlighted.
                         .id(ElementId::Name(
                             format!("rail-pane-{tab_index}-{id}").into(),
                         ))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .size(px(30.0))
+                        // The inner width, so the fill meets the capsule's own
+                        // inset instead of floating inside it.
+                        .w_full()
+                        .h(px(CHIP))
                         .rounded(px(8.0))
                         .cursor_pointer()
-                        .when(selected, |this| this.bg(selected_bg))
+                        // State is a surface, not a corner dot. At this size a
+                        // five-pixel dot is a speck that has to be hunted; a
+                        // tint answers at a glance and costs no alignment.
+                        .when(selected, |this| this.bg(theme.background))
+                        .when(!selected, |this| this.bg(rail_tint(status, theme)))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                             workspace.select_tab(tab_index, cx);
@@ -2302,37 +2521,60 @@ impl Workspace {
                         }))
                         .child(
                             div()
-                                .size(px(7.0))
-                                .rounded(px(999.0))
-                                .bg(dot_color(status, selected, theme)),
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(text_color)
+                                .child(glyph),
                         ),
                 );
             }
 
-            // A hairline between groups, so two tabs do not read as one list.
-            if tab_index + 1 < self.tabs.len() {
-                rail = rail.child(div().w(px(16.0)).h(px(1.0)).my(px(3.0)).bg(theme.border));
-            }
+            rail = rail.child(capsule);
         }
+
+        // The rail still has to open tabs, because it is the whole tab surface
+        // at this width and there is no title-bar strip to fall back on.
+        let hover_bg = theme.muted;
+        rail = rail.child(
+            div()
+                .id("rail-new-tab")
+                .flex()
+                .items_center()
+                .justify_center()
+                // The same capsule as a one-pane tab, so a new tab lands in the
+                // shape the list already uses for tabs.
+                .w(px(44.0))
+                .h(px(40.0))
+                .rounded(px(16.0))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(move |this| this.bg(hover_bg))
+                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                    workspace.new_tab(window, cx);
+                }))
+                .child(icon_data(PLUS_SMALL, 14.0, theme.muted_foreground)),
+        );
 
         rail.into_any_element()
     }
 
-    /// Draws the title bar: window drag area, tabs, and window controls.
+    /// Draws the title bar: the window drag area and the window's controls.
     ///
-    /// This is the whole title bar, not a strip under one. The tabs live where
-    /// the OS caption would be, which is what lets a terminal read as a single
-    /// surface. Two things therefore have to be true at once: the empty areas
-    /// must drag the window, and the buttons must not. The drag area is a
-    /// `WindowControlArea::Drag` hitbox behind the content, and the tabs and
-    /// buttons sit on top of it and swallow their own clicks.
-    fn render_tabs(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// This is the window chrome, not a strip under one, and it no longer
+    /// carries the tab list — that moved to the sidebar. Two things have to be
+    /// true at once: the empty area must drag the window, and the buttons must
+    /// not. The drag area is a `WindowControlArea::Drag` hitbox behind the
+    /// content, and the buttons sit on top of it and swallow their own clicks.
+    fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = gpui_kit::component::Theme::global(cx).clone();
-        let active = self.active_tab;
         let maximized = window.is_maximized();
         // The bar drops its split buttons once panes have their own; see the
         // comment at their call site.
         let multi = self.active_tab().is_some_and(|tab| tab.panes.len() > 1);
+
+        // Copied before the closures below capture `theme` by move.
+        let mark_hover = theme.muted;
 
         // The bar is chrome: one step warmer than the grid, flat rather than
         // glossy, and separated from the panes by a single hairline. The app mark
@@ -2344,12 +2586,24 @@ impl Workspace {
             .items_center()
             .h(px(TITLE_BAR_HEIGHT))
             .relative()
-            .pl(px(10.0))
+            // Fourteen pixels puts the mark on the sidebar's own leading spine.
+            // With the list open that is the left edge of its heading; with the
+            // rail it is the centre of the column, because the mark's box and
+            // the rail's chips are both twenty-eight wide. One number, both
+            // widths, no second alignment to keep.
+            .pl(px(14.0))
             .pr(px(6.0))
             .gap(px(6.0))
             .bg(theme.title_bar)
+            // The mark is also the list switch. It already sits at the leading
+            // edge of the bar, which is the edge the list opens onto, and the
+            // two widths are one gesture apart: press it to open the list, press
+            // it again to fold it back to the rail. It is not a drag area — a
+            // control that moves the window instead of acting is a control that
+            // does not work.
             .child(
                 div()
+                    .id("toggle-rail")
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2357,64 +2611,18 @@ impl Workspace {
                     // controls beside it share one centre line instead of the
                     // mark sitting two pixels off it.
                     .size(px(28.0))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(icon_data(APP_MARK, 16.0, theme.ring)),
-            )
-            // The list toggle sits beside the mark, on the same edge as the list
-            // it opens. On the far side it was a control whose subject was
-            // somewhere else, and once the list collapsed to a rail it was the
-            // only way back that did not involve finding the drag edge.
-            .child(
-                icon_button("toggle-sidebar", Glyph::Inline(SIDEBAR_ICON), &theme, cx)
-                    .when(self.sidebar_shown(), |this| this.bg(theme.muted))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .hover(move |this| this.bg(mark_hover))
                     .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                        workspace.toggle_sidebar(cx);
-                    })),
-            )
-            // The mark and the list belong to the window; the tabs are the work.
-            // They are separated by a wider gap rather than a rule: the mark and
-            // the toggle are one thing (the window), the tabs are another (the
-            // work), and the difference in kind is already visible in their
-            // shapes.
-            ;
+                        workspace.toggle_rail(cx);
+                    }))
+                    .child(icon_data(APP_MARK, 16.0, theme.ring)),
+            );
 
-        // Tabs sit close together in a group, the way a pill row reads; the
-        // spacing between them is smaller than the spacing to anything else.
-        //
-        // The gap to the mark cluster is wider than the gap inside the group,
-        // which is what says "these belong together" now that the hairline that
-        // used to say it is gone. A line and a gap are two ways to draw the same
-        // boundary, and the app has enough lines without this one.
-        let mut tabs = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .ml(px(6.0));
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let selected = index == active;
-            let title = tab.title.clone();
-            let pane_count = tab.panes.len();
-            // The cross belongs to the tab you are looking at. On every tab it
-            // turns the strip into a row of identical-looking buttons, and the
-            // one you might hit by accident is the one you did not mean to
-            // close. Closing another tab is still one click away: select it,
-            // then close it.
-            let closable = selected && self.tabs.len() > 1;
-
-            tabs = tabs.child(tab_chip(
-                index, title, pane_count, selected, closable, &theme, cx,
-            ));
-        }
-        tabs = tabs.child(icon_button("new-tab", IconName::Plus, &theme, cx).on_click(
-            cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                workspace.new_tab(window, cx);
-            }),
-        ));
-        strip = strip.child(tabs);
-
-        // Pane actions act on the current tab rather than on the tab list, so
-        // they are pushed to the far edge, away from the tabs they do not touch.
+        // Everything between the mark and the controls is drag area. The tabs
+        // used to live here; they are in the sidebar now, which leaves the bar
+        // with one job: move the window.
         strip = strip
             .child(
                 div()
@@ -2422,9 +2630,6 @@ impl Workspace {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
-            // The list comes before the pane actions: it is a place to go, not
-            // an action on the current pane.
-            //
             // Once there is more than one pane, every pane header carries its own
             // split, zoom and close controls, so the title bar's copies are a
             // second set of the same buttons pointing at a pane the user did not
@@ -2438,19 +2643,21 @@ impl Workspace {
                         .items_center()
                         // Tighter than the bar's own gap: these two are one
                         // control in two parts, and the pair should read that
-                        // way next to the tab strip's looser spacing.
+                        // way next to the app controls' looser spacing.
                         .gap(px(2.0))
                         .child(
-                            icon_button("split-h", Glyph::Inline(SPLIT_HORIZONTAL), &theme, cx)
-                                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                            icon_button("split-h", SPLIT_HORIZONTAL, 28.0, &theme, cx).on_click(
+                                cx.listener(|workspace, _: &ClickEvent, window, cx| {
                                     workspace.split_active(Axis::Horizontal, window, cx);
-                                })),
+                                }),
+                            ),
                         )
                         .child(
-                            icon_button("split-v", Glyph::Inline(SPLIT_VERTICAL), &theme, cx)
-                                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                            icon_button("split-v", SPLIT_VERTICAL, 28.0, &theme, cx).on_click(
+                                cx.listener(|workspace, _: &ClickEvent, window, cx| {
                                     workspace.split_active(Axis::Vertical, window, cx);
-                                })),
+                                }),
+                            ),
                         ),
                 )
             })
@@ -2508,10 +2715,11 @@ impl Workspace {
                 icon_button(
                     "toggle-theme",
                     if theme.mode == gpui_kit::component::ThemeMode::Light {
-                        Glyph::Inline(THEME_MOON)
+                        THEME_MOON
                     } else {
-                        Glyph::Inline(THEME_SUN)
+                        THEME_SUN
                     },
+                    28.0,
                     &theme,
                     cx,
                 )
@@ -2555,7 +2763,7 @@ impl Workspace {
         strip
             .child(window_button(
                 "win-min",
-                Glyph::Inline(WINDOW_MINIMIZE),
+                WINDOW_MINIMIZE,
                 WindowControlArea::Min,
                 false,
                 &theme,
@@ -2568,9 +2776,9 @@ impl Workspace {
             .child(window_button(
                 "win-max",
                 if maximized {
-                    Glyph::Inline(WINDOW_RESTORE)
+                    WINDOW_RESTORE
                 } else {
-                    Glyph::Inline(WINDOW_MAXIMIZE)
+                    WINDOW_MAXIMIZE
                 },
                 WindowControlArea::Max,
                 false,
@@ -2583,7 +2791,7 @@ impl Workspace {
             ))
             .child(window_button(
                 "win-close",
-                Glyph::Inline(WINDOW_CLOSE),
+                WINDOW_CLOSE,
                 WindowControlArea::Close,
                 true,
                 &theme,
@@ -2717,23 +2925,33 @@ fn subtree_bounds(tab: &Tab, layout: &Layout) -> Option<Bounds<Pixels>> {
 /// The grab strip on the sidebar's trailing edge.
 ///
 /// It straddles the seam rather than sitting beside it, so the pointer finds it
-/// exactly where the two columns meet. A short grip fades in on hover, and stays
-/// while the width is being dragged — the same rule the split divider follows.
+/// exactly where the two columns meet. The grip is the same one the split
+/// divider uses — a short accent capsule that fades in under the pointer and
+/// stays while the width is being dragged — so the two edges in the window read
+/// as one kind of control, because they are.
 fn sidebar_handle(
     theme: &gpui_kit::component::Theme,
     dragging: bool,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let grip = theme.muted_foreground;
-
     div()
         .id("side-handle")
         .absolute()
         .top_0()
         .bottom_0()
-        .right(px(0.0))
-        .w(px(6.0))
+        // The strip straddles the seam: it starts just inside the column's
+        // padding, past the end of the rows, and stops a pixel short of the
+        // card. Wide enough for the pointer to find, and it never sits over a
+        // row or the terminal, so it cannot steal a click meant for them.
+        .right(px(-3.0))
+        .w(px(8.0))
+        // Its own hover group, like the divider band. Revealing the accent
+        // capsule whenever the pointer is anywhere over the list would make it
+        // flash on every pass; the edge is a control, and it should look like
+        // one only where it can be grabbed.
+        .group("side-edge")
         .flex()
+        .items_center()
         .justify_center()
         .cursor_col_resize()
         .on_mouse_down(
@@ -2744,14 +2962,14 @@ fn sidebar_handle(
         )
         .child(
             div()
-                .w(px(2.0))
-                .my(px(8.0))
+                .w(px(3.0))
+                .h(px(26.0))
                 .rounded(px(999.0))
-                .bg(grip)
-                .when(dragging, |this| this.opacity(0.5))
+                .bg(theme.ring)
+                .when(dragging, |this| this.opacity(1.0))
                 .when(!dragging, |this| {
                     this.opacity(0.0)
-                        .group_hover("sidebar", |this| this.opacity(0.35))
+                        .group_hover("side-edge", |this| this.opacity(1.0))
                 }),
         )
 }
@@ -3113,140 +3331,268 @@ fn pane_action(
         .child(icon_data(icon, 16.0, theme.muted_foreground))
 }
 
-/// One tab: name, pane count, and a close affordance that only appears when
-/// there is more than one tab to fall back to.
-fn tab_chip(
-    index: usize,
+/// A tab's row in the sidebar: the header of a group of panes.
+///
+/// Quieter than the rows under it — smaller, and marked as current by weight and
+/// colour rather than by a fill. The fill belongs to the focused pane, and two
+/// filled rows in one group would read as two active places.
+fn sidebar_group_row(
+    tab_index: usize,
     title: String,
     pane_count: usize,
+    current: bool,
+    closable: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let hover_bg = theme.muted;
+
+    div()
+        .id(ElementId::Name(format!("side-tab-{tab_index}").into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .px(px(8.0))
+        .rounded(px(CHIP_RADIUS))
+        .cursor_pointer()
+        .hover(move |this| this.bg(hover_bg))
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            workspace.select_tab(tab_index, cx);
+        }))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(11.0))
+                .font_weight(if current {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if current {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground.opacity(0.8)
+                })
+                .child(title),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(10.0))
+                .text_color(theme.muted_foreground.opacity(0.6))
+                .child(pane_count.to_string()),
+        )
+        .when(closable, |this| {
+            this.child(sidebar_close_button(
+                format!("side-close-tab-{tab_index}"),
+                tab_index,
+                theme,
+                cx,
+            ))
+        })
+}
+
+/// The cross on a tab row, sized to sit inside the row rather than take a lane.
+///
+/// It is drawn only on the current tab, so it reads as "this is what you would
+/// close" rather than as a column of buttons.
+fn sidebar_close_button(
+    id: String,
+    tab_index: usize,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let wash = theme.muted;
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .size(px(18.0))
+        .rounded(px(999.0))
+        .cursor_pointer()
+        .hover(move |this| this.bg(wash))
+        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            // The row underneath selects a tab; the cross closes one.
+            cx.stop_propagation();
+            workspace.close_tab(tab_index, cx);
+        }))
+        .child(icon_data(TAB_CLOSE, 10.0, theme.muted_foreground))
+}
+
+/// One pane in the sidebar, or the single row that stands for a one-pane tab.
+///
+/// `indented` steps a row under its group header, which is the only hierarchy
+/// the list needs; nothing else about the row changes, because a pane is a pane
+/// wherever it appears.
+#[allow(clippy::too_many_arguments)]
+fn sidebar_pane_row(
+    tab_index: usize,
+    id: u64,
+    label: String,
+    status: PaneStatus,
+    indented: bool,
     selected: bool,
     closable: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let hover_bg = theme.muted;
+    let selected_bg = theme.background;
     let text_color = if selected {
         theme.foreground
     } else {
         theme.muted_foreground
     };
 
-    let mut chip = div()
-        .id(("tab", index))
-        .group("tab")
+    div()
+        // Pane ids restart at 1 in every tab, so the row has to carry the tab
+        // too: without it two rows share an id and only one of them can be hit
+        // or highlighted.
+        .id(ElementId::Name(
+            format!("side-pane-{tab_index}-{id}").into(),
+        ))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
-        .h(px(28.0))
-        .pl(px(11.0))
-        .pr(if closable { px(5.0) } else { px(11.0) })
-        // A tab is a card, not a pill. The fully rounded ends read as a
-        // button beside the bar's round icon controls, and the tab is a
-        // container for a name rather than a thing to press. The radius is
-        // shared with the sidebar's pane row: both are the same small card, and
-        // two radii for one shape reads as two shapes.
+        .gap(px(7.0))
+        .h(px(30.0))
+        // The dot keeps its lane through the indent, so the status column runs
+        // straight down the group while the names step in behind it.
+        .pl(px(if indented { 16.0 } else { 8.0 }))
+        .pr(px(8.0))
         .rounded(px(CHIP_RADIUS))
-        .when(selected, |this| this.bg(theme.background))
-        // Smaller than body text. A tab is a label for a place, not a line of
-        // content, and the strip has to stay quiet next to the pane headers.
-        .text_size(px(12.0))
-        .text_color(text_color)
         .cursor_pointer()
-        .hover(move |this| {
-            // Hovering an inactive tab previews what selecting it does; hovering
-            // the active tab must not lighten it, which would read as a second
-            // state it does not have.
-            if selected {
-                this
-            } else {
-                this.bg(theme.muted).text_color(theme.foreground)
-            }
-        })
+        .when(selected, |this| this.bg(selected_bg))
+        .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-            workspace.select_tab(index, cx);
+            workspace.select_tab(tab_index, cx);
+            workspace.focus_pane(id, cx);
         }))
         .child(
+            div().w(px(7.0)).flex().justify_center().child(
+                div()
+                    .size(px(6.0))
+                    .rounded(px(999.0))
+                    .bg(dot_color(status, selected, theme)),
+            ),
+        )
+        .child(
             div()
-                .max_w(px(180.0))
+                .flex_1()
+                .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(title),
-        );
+                .text_size(px(12.0))
+                .text_color(text_color)
+                .child(label),
+        )
+        .when_some(status.label(), |this, label| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(10.0))
+                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .child(label),
+            )
+        })
+        .when(closable, |this| {
+            this.child(sidebar_close_button(
+                format!("side-close-pane-tab-{tab_index}-{id}"),
+                tab_index,
+                theme,
+                cx,
+            ))
+        })
+}
 
-    // The pane count is a quiet badge rather than a number floating after the
-    // name: it is a property of the tab, not part of its title.
-    if pane_count > 1 {
-        chip = chip.child(
+/// The row a list with nothing in it shows: the way to put something in it.
+///
+/// It is an action rather than a sentence, because the only thing an empty list
+/// can say that the user does not already know is where the next place comes
+/// from.
+fn sidebar_empty_row(
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    div()
+        .id("side-empty-new")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .h(px(30.0))
+        .px(px(8.0))
+        .rounded(px(CHIP_RADIUS))
+        .cursor_pointer()
+        .hover(move |this| this.bg(theme.muted))
+        .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+            workspace.new_tab(window, cx);
+        }))
+        .child(icon_data(PLUS_SMALL, 12.0, theme.muted_foreground))
+        .child(
             div()
-                .px(px(6.0))
-                .rounded(px(999.0))
-                .bg(theme.muted)
-                .text_xs()
+                .text_size(px(12.0))
                 .text_color(theme.muted_foreground)
-                .child(pane_count.to_string()),
-        );
-    }
-
-    if closable {
-        // The cross is always drawn, faintly, rather than appearing on hover.
-        // Hover-only controls are invisible to anyone who does not already know
-        // they are there, and the previous attempt hid it behind `opacity(0.0)`
-        // plus `group_hover`, which never fired: the button had no hitbox to
-        // hover in the first place.
-        //
-        // The glyph is an inline SVG rather than `IconName::X`, whose bundled
-        // path draws blank here — an invisible button that still took clicks.
-        chip = chip.child(
-            div()
-                .id(("close-tab", index))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(18.0))
-                .rounded(px(999.0))
-                .cursor_pointer()
-                .hover(move |this| this.bg(theme.muted))
-                .child(icon_data(TAB_CLOSE, 10.0, theme.muted_foreground))
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    workspace.close_tab(index, cx);
-                })),
-        );
-    }
-
-    chip
+                .child("新建终端"),
+        )
 }
 
-/// A glyph a toolbar button can draw.
-enum Glyph {
-    /// A path into the bundled icon assets.
-    Asset(SharedString),
-    /// SVG bytes, for shapes the bundled set does not render reliably.
-    Inline(&'static [u8]),
+/// The one character a rail chip can show to say which place it is.
+///
+/// Upper case for Latin labels, which is how the first letter of a name is
+/// normally read; a CJK label keeps its own character. An empty name falls back
+/// to a mark rather than an empty chip.
+fn rail_initial(label: &str) -> String {
+    label.chars().next().map_or_else(
+        || "·".to_owned(),
+        |first| first.to_uppercase().collect::<String>(),
+    )
 }
 
-impl From<IconName> for Glyph {
-    fn from(name: IconName) -> Self {
-        Self::Asset(name.path())
-    }
+/// The character each pane in one tab gets at rail width.
+///
+/// Two panes called `pwsh` would otherwise both show `P` and the column would be
+/// back to identical dots. When a tab's panes collide on their first character,
+/// the pane's position stands in, so every chip in the group is distinct.
+fn rail_glyphs(labels: &[String]) -> Vec<String> {
+    let initials: Vec<String> = labels.iter().map(|label| rail_initial(label)).collect();
+    initials
+        .iter()
+        .enumerate()
+        .map(|(index, initial)| {
+            if initials.iter().filter(|other| *other == initial).count() > 1 {
+                (index + 1).to_string()
+            } else {
+                initial.clone()
+            }
+        })
+        .collect()
 }
 
-/// A round icon-only button, sized for the title bar.
+/// A round icon-only button.
 ///
 /// Icon-only controls carry no visible label, so the caller must pass an id that
-/// also reads as a name.
+/// also reads as a name. `size` is the frame, and the glyph follows it: the title
+/// bar uses 28, the sidebar's shorter heading uses 24.
 fn icon_button(
     id: &'static str,
-    icon: impl Into<Glyph>,
+    icon: &'static [u8],
+    size: f32,
     theme: &gpui_kit::component::Theme,
     _cx: &mut Context<Workspace>,
 ) -> Stateful<Div> {
-    let color = theme.muted_foreground;
-    let glyph = match icon.into() {
-        Glyph::Asset(path) => icon_element(path, color),
-        Glyph::Inline(svg) => icon_data(svg, 16.0, color),
-    };
+    // A glyph is about four sevenths of its frame, which is the ratio the title
+    // bar's buttons already use: 16 px inside 28.
+    let glyph = icon_data(icon, (size * 0.57).round(), theme.muted_foreground);
 
     // Round, like every other control in the bar. A square icon button next to
     // pill-shaped tabs reads as a different design language.
@@ -3255,22 +3601,11 @@ fn icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .size(px(28.0))
+        .size(px(size))
         .rounded(px(999.0))
         .cursor_pointer()
         .hover(move |this| this.bg(theme.muted))
         .child(glyph)
-}
-
-/// Draws a 16 px icon by path.
-///
-/// Kept in one place so every glyph in the bar shares the same optical size.
-fn icon_element(path: SharedString, color: Hsla) -> AnyElement {
-    gpui_kit::svg()
-        .path(path)
-        .size(px(16.0))
-        .text_color(color)
-        .into_any_element()
 }
 
 /// Draws an inline SVG, for glyphs the bundled assets cannot provide.
@@ -3294,7 +3629,7 @@ fn icon_data(svg: &'static [u8], size: f32, color: Hsla) -> AnyElement {
 /// red wash on hover, the others the same grey the rest of the bar uses.
 fn window_button(
     id: &'static str,
-    icon: Glyph,
+    icon: &'static [u8],
     area: WindowControlArea,
     destructive: bool,
     theme: &gpui_kit::component::Theme,
@@ -3309,10 +3644,7 @@ fn window_button(
     // The cross stays the same grey as its neighbours and only the wash turns
     // red: a permanently red close button draws the eye to the one control the
     // user is least likely to want.
-    let glyph = match icon {
-        Glyph::Asset(path) => icon_element(path, color),
-        Glyph::Inline(svg) => icon_data(svg, 16.0, color),
-    };
+    let glyph = icon_data(icon, 16.0, color);
 
     div()
         .id(id)
@@ -3516,6 +3848,21 @@ fn dot_color(status: PaneStatus, focused: bool, theme: &gpui_kit::component::The
         _ if focused => theme.ring,
         PaneStatus::Working => theme.ring,
         PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
+    }
+}
+
+/// The surface a rail chip wears when it is not the focused one.
+///
+/// The rail has no room for a status word and no patience for a five-pixel dot,
+/// so state moves into the chip's own background. Idle gets none: it is what a
+/// pane is most of the time, and tinting everything would leave selection with
+/// nothing to stand out against. Working borrows the accent at low strength; a
+/// dead shell borrows danger.
+fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
+    match status {
+        PaneStatus::Working => theme.ring.opacity(0.14),
+        PaneStatus::Exited => theme.danger.opacity(0.14),
+        PaneStatus::Idle => theme.background.opacity(0.0),
     }
 }
 
