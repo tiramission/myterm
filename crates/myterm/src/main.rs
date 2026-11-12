@@ -1464,12 +1464,13 @@ impl Render for Workspace {
                 .flex_1()
                 .min_h_0()
                 .flex()
-                // One gutter on all four sides. The leading gap used to be
-                // smaller to make "row to card" match "card to card", but that
-                // left the card four pixels from the column and ten from the
-                // bar: the content sat off-centre in its own region, which is
-                // what the eye notices first. The region's boundary wins.
-                .p(px(PANE_GAP))
+                // The leading and top edges have no gutter: the cards meet the
+                // title bar and the sidebar directly, so the chrome reads as an
+                // L wrapped around the work instead of a frame floating ten
+                // pixels away from it. Only the trailing and bottom edges keep
+                // the gap, where the window edge would otherwise cut the card.
+                .pr(px(PANE_GAP))
+                .pb(px(PANE_GAP))
                 .bg(theme.title_bar)
                 .child(self.render_panes(tab, style, cx)),
         );
@@ -2358,11 +2359,10 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(theme.title_bar)
-            // The column starts and ends on the same gutter as the pane cards
-            // beside it, so the two regions share one top and bottom line
-            // instead of the list hanging from the title bar while the cards
-            // float ten pixels down.
-            .pt(px(PANE_GAP))
+            // The column hangs from the title bar like the cards do: its first
+            // row and the card's top edge are on the same line, so the L of
+            // chrome and the work area start together. Only the bottom keeps a
+            // gutter, matching the card's.
             .pb(px(PANE_GAP))
             .child(column)
             // The edge is the control: it is where a pointer already goes when
