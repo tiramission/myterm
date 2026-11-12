@@ -5,6 +5,17 @@
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-11-12
+
+### 变更
+
+- 升级到 libghostty-vt 1.0.1。ABI 未变，绑定代码没有改动，只换掉静态库与头文件；
+  带来的是上游的性能改进与 bug 修复。
+- 库改用 Zig 以本机目标（Windows 上即 MSVC）从 `vt-1.0.1` 标签构建。Ghostty 现在
+  也发布 Windows 预编译包，但那份是 gnu ABI 构建，其目标文件使用了 `link.exe`
+  拒绝的 COMDAT 布局（`LNK1143`），无法直接链接进 MSVC 的 Rust 二进制。
+  自己构建保留了静态链接，不需要在可执行文件旁附带 DLL。
+
 ## [0.2.0] - 2026-11-10
 
 ### 终端
