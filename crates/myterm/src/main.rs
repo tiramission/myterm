@@ -12,6 +12,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod grid_element;
+mod config;
 mod install;
 mod layout;
 mod palette;
@@ -341,6 +342,24 @@ struct SidebarDrag {
     width: f32,
 }
 
+/// A tab being dragged up or down the sidebar.
+///
+/// Reordering is per tab, not per pane: a split is one thing the user named,
+/// and dragging one of its panes would ask whether the whole tab moves. The row
+/// that stands for the tab is the row that drags.
+struct TabDrag {
+    /// Where the tab sits now.
+    from: usize,
+    /// Where the pointer was when the button went down.
+    start: f32,
+    /// The tab the pointer is over, once it has actually moved.
+    target: Option<usize>,
+    /// Whether the pointer has moved far enough to mean a drag rather than a
+    /// click. Checked once and then kept, so a gesture that comes back to its
+    /// starting row still reads as a drag.
+    moved: bool,
+}
+
 /// A split being dragged.
 struct ResizeDrag {
     /// The panes on either side of the divider, in visual order.
@@ -404,6 +423,7 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand { id: "zoom", label: "缩放当前窗格", keys: "Ctrl+Shift+Z" },
     PaletteCommand { id: "theme", label: "切换明暗主题", keys: "Ctrl+Shift+L" },
     PaletteCommand { id: "find", label: "在当前窗格内查找", keys: "Ctrl+Shift+F" },
+    PaletteCommand { id: "settings", label: "设置", keys: "Ctrl+," },
     PaletteCommand { id: "close-window", label: "关闭窗口", keys: "Ctrl+Shift+Q" },
 ];
 
@@ -464,6 +484,11 @@ pub struct Workspace {
     sidebar_expanded: f32,
     /// Present while the list's edge is being dragged.
     sidebar_drag: Option<SidebarDrag>,
+    /// A tab being dragged up or down the sidebar.
+    tab_drag: Option<TabDrag>,
+    /// Set when a drag ended on another row, so the click that follows the
+    /// release does not act on the row's old index.
+    swallow_tab_click: bool,
     /// Whether Tab has been claimed from the focus system. Registered once.
     tab_claimed: bool,
     /// The open tab context menu, if any.
@@ -478,6 +503,11 @@ pub struct Workspace {
     /// The tabs the last session left behind, while the offer to rebuild them
     /// is on screen.
     restore: Option<session::Snapshot>,
+    /// The preferences this window is running with, kept so the settings sheet
+    /// can write them back without re-reading the file.
+    config: config::Config,
+    /// Whether the settings sheet is open.
+    settings: bool,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -493,8 +523,9 @@ pub struct Workspace {
 impl Workspace {
     /// Builds an empty workspace. The caller installs the first tab, because its
     /// shell is spawned before the event loop exists.
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>, config: config::Config) -> Self {
         let _ = window;
+        let restore = config.restore.then(session::Snapshot::load).flatten();
 
         Self {
             tabs: Vec::new(),
@@ -524,6 +555,8 @@ impl Workspace {
             sidebar_width: RAIL_WIDTH,
             sidebar_expanded: SIDEBAR_WIDTH,
             sidebar_drag: None,
+            tab_drag: None,
+            swallow_tab_click: false,
             tab_claimed: false,
             menu: None,
             find: None,
@@ -531,7 +564,9 @@ impl Workspace {
             closing: false,
             // Read once at start-up: a tiny file, and the offer belongs on the
             // first frame rather than after the terminals have already opened.
-            restore: session::Snapshot::load(),
+            restore,
+            config,
+            settings: false,
             resize_drag: None,
             focus: cx.focus_handle(),
             images: Rc::new(RefCell::new(ImageCache::default())),
@@ -992,6 +1027,49 @@ impl Workspace {
                 _ => {}
             }
             return;
+        }
+
+        // Settings is a non-modal drawer: it owns Escape but nothing else, so a
+        // shell behind it keeps accepting keys while a size or theme is being
+        // tried on. The dialog-like alternative would mean closing the sheet to
+        // keep working, which is exactly backwards.
+        if self.settings && keystroke.key == "escape" {
+            self.settings = false;
+            window.focus(&self.focus, cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        // Font size. `Ctrl+0` returns to the default rather than to whatever the
+        // last size was, so the way back is one chord and always the same size.
+        if mods.control && !mods.alt {
+            let size = gpui_kit::component::Theme::global(cx)
+                .mono_font_size
+                .as_f32();
+            match keystroke.key.as_str() {
+                "=" | "+" => {
+                    self.set_font_size(size + 1.0, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "-" => {
+                    self.set_font_size(size - 1.0, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "0" => {
+                    self.set_font_size(config::DEFAULT_FONT_SIZE, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "," if !mods.shift => {
+                    self.toggle_settings(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if mods.control && keystroke.key == "tab" {
@@ -1752,6 +1830,10 @@ impl Render for Workspace {
             body = body.child(self.render_close_prompt(&theme, cx));
         }
 
+        if self.settings {
+            body = body.child(self.render_settings(&theme, cx));
+        }
+
         body
     }
 }
@@ -2066,13 +2148,55 @@ impl Workspace {
             gpui_kit::component::ThemeMode::Light => gpui_kit::component::ThemeMode::Dark,
             _ => gpui_kit::component::ThemeMode::Light,
         };
-        palette::install(cx, next);
+        self.apply_theme(next, cx);
+    }
+
+    /// Paints the app in `mode` and remembers the choice.
+    ///
+    /// Re-applying the terminal font after the palette matters: the library
+    /// re-reads its theme file on every mode change, which drops the font this
+    /// app set at start-up. Without this the grid silently falls back to the
+    /// library's monospace the first time the theme is switched.
+    fn apply_theme(&mut self, mode: gpui_kit::component::ThemeMode, cx: &mut Context<Self>) {
+        self.config.light = Some(mode == gpui_kit::component::ThemeMode::Light);
+        self.config.save();
+
+        palette::install(cx, mode);
+        apply_terminal_font(cx, self.config.font_size);
 
         let theme = gpui_kit::component::Theme::global(cx).clone();
         for tab in &mut self.tabs {
             for pane in tab.panes.values_mut() {
                 pane.retheme(&theme);
             }
+        }
+        cx.notify();
+    }
+
+    /// Sets the terminal's font size, within the range the grid can lay out.
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(config::MIN_FONT_SIZE, config::MAX_FONT_SIZE);
+        self.config.font_size = Some(size);
+        self.config.save();
+        apply_terminal_font(cx, Some(size));
+        cx.notify();
+    }
+
+    /// Opens or closes the settings sheet.
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = !self.settings;
+        cx.notify();
+    }
+
+    /// Turns the start-up offer of the last session on or off.
+    fn set_restore(&mut self, restore: bool, cx: &mut Context<Self>) {
+        self.config.restore = restore;
+        self.config.save();
+        if !restore {
+            // Off means off: the record goes away too, so turning it back on
+            // does not resurrect tabs from a session the user said no to.
+            self.restore = None;
+            session::Snapshot::clear();
         }
         cx.notify();
     }
@@ -2460,6 +2584,185 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The settings sheet.
+    ///
+    /// A 360px drawer pinned to the window's trailing edge, with no scrim: every
+    /// row takes effect immediately, and half the value of a font-size setting
+    /// is watching the terminal behind it change size. A dimmed backdrop would
+    /// hide the very thing being tuned, and a modal one would stop the shell
+    /// from accepting keys while the user is still working in it.
+    fn render_settings(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = theme.muted_foreground;
+        let size = theme.mono_font_size.as_f32();
+        let light = self.config.light;
+        let restore = self.config.restore;
+
+        let appearance = div()
+            .flex()
+            .flex_row()
+            .gap(px(4.0))
+            .child(
+                setting_chip("settings-theme-system", "跟随系统", light.is_none(), theme).on_click(
+                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.config.light = None;
+                        workspace.config.save();
+                        // Back to the desktop's own answer, resolved rather than
+                        // remembered: the setting may have changed since start-up.
+                        let mode = if system_prefers_light() {
+                            gpui_kit::component::ThemeMode::Light
+                        } else {
+                            gpui_kit::component::ThemeMode::Dark
+                        };
+                        workspace.apply_theme(mode, cx);
+                    }),
+                ),
+            )
+            .child(
+                setting_chip("settings-theme-light", "浅色", light == Some(true), theme).on_click(
+                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.apply_theme(gpui_kit::component::ThemeMode::Light, cx);
+                    }),
+                ),
+            )
+            .child(
+                setting_chip("settings-theme-dark", "深色", light == Some(false), theme).on_click(
+                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.apply_theme(gpui_kit::component::ThemeMode::Dark, cx);
+                    }),
+                ),
+            );
+
+        let font = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                setting_chip("settings-font-smaller", "−", false, theme).on_click(cx.listener(
+                    move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.set_font_size(size - 1.0, cx);
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .w(px(34.0))
+                    .text_center()
+                    .text_size(px(12.0))
+                    .text_color(theme.foreground)
+                    .child(format!("{size:.0} pt")),
+            )
+            .child(
+                setting_chip("settings-font-larger", "+", false, theme).on_click(cx.listener(
+                    move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.set_font_size(size + 1.0, cx);
+                    },
+                )),
+            )
+            .child(
+                setting_chip("settings-font-reset", "重置", false, theme).on_click(cx.listener(
+                    |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.set_font_size(config::DEFAULT_FONT_SIZE, cx);
+                    },
+                )),
+            );
+
+        let session = div().flex().flex_row().gap(px(4.0)).child(
+            setting_chip("settings-restore", if restore { "开" } else { "关" }, restore, theme)
+                .on_click(cx.listener(move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                    workspace.set_restore(!restore, cx);
+                })),
+        );
+
+        div()
+            .absolute()
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(px(16.0))
+            .bg(theme.popover)
+            .border_l_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .child(
+                div()
+                    .w(px(430.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .p(px(16.0))
+                    .rounded(px(12.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .pb(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child("设置"),
+                            )
+                            .child(pane_action(
+                                "settings-close",
+                                WINDOW_CLOSE,
+                                theme,
+                                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.settings = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(setting_row(
+                        "外观",
+                        "跟随系统时按桌面的明暗设置",
+                        theme,
+                        appearance.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "终端字号",
+                        "同时改变窗格能容纳的列数",
+                        theme,
+                        font.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "启动时",
+                        "上次有多个标签时，提示恢复",
+                        theme,
+                        session.into_any_element(),
+                    ))
+                    .child(
+                        div()
+                            .pt(px(12.0))
+                            .text_size(px(10.5))
+                            .text_color(muted)
+                            .child(format!(
+                                "保存在 {}",
+                                config::Config::location().unwrap_or_else(|| "本机设置目录".to_owned())
+                            )),
+                    )
+            )
+            .into_any_element()
+    }
+
     /// Asks before ending more than one shell.
     ///
     /// The copy names the object and the count, because "are you sure" over an
@@ -2686,6 +2989,7 @@ impl Workspace {
             }
             "theme" => self.toggle_theme(cx),
             "find" => self.open_find(window, cx),
+            "settings" => self.settings = true,
             "close-window" => self.close_window(window, cx),
             _ => {}
         }
@@ -2774,6 +3078,74 @@ fn palette_matches(query: &str) -> Vec<&'static PaletteCommand> {
 }
 
 impl Workspace {
+    /// Starts dragging a tab.
+    fn begin_tab_drag(&mut self, from: usize, start: f32) {
+        self.tab_drag = Some(TabDrag {
+            from,
+            start,
+            target: None,
+            moved: false,
+        });
+        // A new press is a new gesture, whatever the last one left behind.
+        self.swallow_tab_click = false;
+    }
+
+    /// Follows the pointer onto another row, once it has actually moved.
+    ///
+    /// The six-pixel threshold is what separates a drag from the click that
+    /// selects the row: without it every click with a slightly unsteady hand
+    /// would end up reordering the list.
+    fn extend_tab_drag(&mut self, target: usize, y: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.tab_drag.as_mut() else {
+            return;
+        };
+        if !drag.moved && (y - drag.start).abs() < 6.0 {
+            return;
+        }
+        drag.moved = true;
+        if drag.target != Some(target) {
+            drag.target = Some(target);
+            cx.notify();
+        }
+    }
+
+    /// Drops the tab where the pointer left it.
+    fn end_tab_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.tab_drag.take() else {
+            return;
+        };
+        if drag.moved
+            && let Some(to) = drag.target
+            && to != drag.from
+        {
+            self.move_tab(drag.from, to);
+            // The release will still produce a click whose `tab_index` points at
+            // the slot the tab used to occupy. Acting on it would select the tab
+            // that drag just pushed there.
+            self.swallow_tab_click = true;
+        }
+        cx.notify();
+    }
+
+    /// Moves a tab to another position, keeping the current one current.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+
+        // The selection follows the tab, not the slot: dragging the current tab
+        // must not silently make a different one current.
+        if self.active_tab == from {
+            self.active_tab = to;
+        } else if from < self.active_tab && to >= self.active_tab {
+            self.active_tab -= 1;
+        } else if to <= self.active_tab && from > self.active_tab {
+            self.active_tab += 1;
+        }
+    }
+
     /// Starts dragging the list's edge.
     fn begin_sidebar_resize(&mut self, position: Point<Pixels>) {
         self.sidebar_drag = Some(SidebarDrag {
@@ -3312,9 +3684,23 @@ impl Workspace {
             .gap(px(1.0))
             .px(px(6.0))
             .pt(px(4.0))
-            .pb(px(8.0));
+            .pb(px(8.0))
+            // A drag released over the empty part of the column still has to
+            // end, or the insertion rule stays on screen until the next click.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseUpEvent, _, cx| {
+                    workspace.end_tab_drag(cx);
+                }),
+            );
         // One answer for "which pane is current", shared with the grid.
         let current = self.effective_active();
+        // Both are copied out before the loop: the rows need to know where a
+        // drag would land, and holding a borrow of `tab_drag` across the
+        // listeners would make the list impossible to build.
+        let drag = self.tab_drag.as_ref().filter(|drag| drag.moved);
+        let dragging_tab = drag.map(|drag| drag.from);
+        let drop_target = drag.and_then(|drag| drag.target);
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
@@ -3325,6 +3711,19 @@ impl Workspace {
             // column would be a second edge saying the same thing louder.
             if tab_index > 0 {
                 list = list.child(div().h(px(8.0)));
+            }
+
+            // Where the tab would land. A two-pixel rule in the accent colour,
+            // placed between rows rather than drawn on one: an insertion point
+            // is a gap in the list, not a property of a row.
+            if drop_target == Some(tab_index) && dragging_tab != Some(tab_index) {
+                list = list.child(
+                    div()
+                        .h(px(2.0))
+                        .mx(px(8.0))
+                        .rounded(px(1.0))
+                        .bg(theme.ring),
+                );
             }
 
             // The cross belongs to the tab you are looking at: on every tab it
@@ -3342,6 +3741,7 @@ impl Workspace {
                     current_tab,
                     tab.unseen,
                     closable,
+                    dragging_tab == Some(tab_index),
                     theme,
                     cx,
                 ));
@@ -3363,6 +3763,7 @@ impl Workspace {
                     // A one-pane tab is closed from its own row, because that
                     // row is the tab. A grouped tab closes from its header.
                     closable && !grouped,
+                    dragging_tab == Some(tab_index),
                     theme,
                     cx,
                 ));
@@ -4312,6 +4713,26 @@ fn about_card(
             .child(div().text_size(px(11.5)).text_color(text).child(value))
     };
 
+    // The keys sit on the right in the terminal's own font: they are an
+    // identifier, and an identifier in a proportional face reads as prose.
+    let key_row = move |keys: &'static str, label: &'static str| {
+        div()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .justify_between()
+            .gap(px(16.0))
+            .w_full()
+            .child(div().text_size(px(10.5)).text_color(muted).child(label))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .font_family(TERMINAL_FONT)
+                    .text_color(text)
+                    .child(keys),
+            )
+    };
+
     let mut card = div()
         .w(px(268.0))
         .flex()
@@ -4357,6 +4778,32 @@ fn about_card(
                 .child(row("终端解析", "libghostty-vt 1.0.0"))
                 .child(row("界面框架", "GPUI Kit 0.9"))
                 .child(row("平台", "Windows")),
+        )
+        // The shortcut sheet lives here instead of behind its own panel: this
+        // card is already the place people look when they want to know what the
+        // program is and how it works, and a second overlay for eight lines
+        // would be a second thing to open.
+        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .mt(px(12.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(muted)
+                        .child("键位"),
+                )
+                .child(key_row("Ctrl+Shift+T", "新建标签"))
+                .child(key_row("Ctrl+Shift+W", "关闭窗格"))
+                .child(key_row("Ctrl+Shift+D / E", "拆分到右侧 / 下方"))
+                .child(key_row("Ctrl+Tab", "切换标签"))
+                .child(key_row("Alt+方向", "切换窗格"))
+                .child(key_row("Ctrl+Shift+F / P", "查找 / 命令面板"))
+                .child(key_row("Ctrl+= / -", "字号，Ctrl+0 复位"))
+                .child(key_row("Ctrl+,", "设置")),
         )
         .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint));
 
@@ -4530,6 +4977,82 @@ fn pane_action(
         .child(icon_data(icon, 16.0, theme.muted_foreground))
 }
 
+/// A choice inside the settings sheet.
+///
+/// Selected is carried by fill, border and weight together rather than by a
+/// single colour: the sheet has to stay readable to someone who cannot tell the
+/// accent green from the muted grey.
+fn setting_chip(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    theme: &gpui_kit::component::Theme,
+) -> Stateful<Div> {
+    let accent = theme.ring;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(if active { accent } else { theme.border })
+        .bg(if active {
+            accent.opacity(0.10)
+        } else {
+            theme.background
+        })
+        .text_size(px(11.5))
+        .text_color(if active {
+            accent
+        } else {
+            theme.muted_foreground
+        })
+        .cursor_pointer()
+        .hover(move |this| this.bg(theme.muted))
+        .child(label)
+}
+
+/// One row of the settings sheet: what it is, why it matters, and the control.
+fn setting_row(
+    label: &'static str,
+    hint: &'static str,
+    theme: &gpui_kit::component::Theme,
+    control: AnyElement,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .py(px(11.0))
+        .border_b_1()
+        .border_color(theme.border.opacity(0.45))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.muted_foreground)
+                        .child(hint),
+                ),
+        )
+        .child(control)
+}
+
 /// A tab's row in the sidebar: the header of a group of panes.
 ///
 /// Quieter than the rows under it — smaller, and marked as current by weight and
@@ -4543,6 +5066,7 @@ fn sidebar_group_row(
     current: bool,
     unseen: bool,
     closable: bool,
+    dragging: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -4560,11 +5084,35 @@ fn sidebar_group_row(
         .px(px(8.0))
         .rounded(px(CHIP_RADIUS))
         .cursor_pointer()
+        // The tab being moved stays in its place, faded, so the list does not
+        // jump under the pointer while a landing spot is being chosen.
+        .when(dragging, |this| this.opacity(0.5))
         .group(row_group.clone())
         .hover(move |this| this.bg(hover_bg))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            if workspace.swallow_tab_click {
+                workspace.swallow_tab_click = false;
+                return;
+            }
             workspace.select_tab(tab_index, cx);
         }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |workspace, event: &MouseDownEvent, _, _| {
+                workspace.begin_tab_drag(tab_index, event.position.y.as_f32());
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |workspace, event: &MouseMoveEvent, _, cx| {
+                workspace.extend_tab_drag(tab_index, event.position.y.as_f32(), cx);
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|workspace, _: &MouseUpEvent, _, cx| {
+                workspace.end_tab_drag(cx);
+            }),
+        )
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
@@ -4678,6 +5226,7 @@ fn sidebar_pane_row(
     selected: bool,
     unseen: bool,
     closable: bool,
+    dragging: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -4712,13 +5261,35 @@ fn sidebar_pane_row(
         .pr(px(8.0))
         .rounded(px(CHIP_RADIUS))
         .cursor_pointer()
+        .when(dragging, |this| this.opacity(0.5))
         .group(row_group.clone())
         .when(selected, |this| this.bg(selected_bg))
         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+            if workspace.swallow_tab_click {
+                workspace.swallow_tab_click = false;
+                return;
+            }
             workspace.select_tab(tab_index, cx);
             workspace.focus_pane(id, cx);
         }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |workspace, event: &MouseDownEvent, _, _| {
+                workspace.begin_tab_drag(tab_index, event.position.y.as_f32());
+            }),
+        )
+        .on_mouse_move(
+            cx.listener(move |workspace, event: &MouseMoveEvent, _, cx| {
+                workspace.extend_tab_drag(tab_index, event.position.y.as_f32(), cx);
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|workspace, _: &MouseUpEvent, _, cx| {
+                workspace.end_tab_drag(cx);
+            }),
+        )
         // Right click asks the row what can be done to it. Middle click is the
         // desktop shorthand for "close this", and it works on any tab without
         // the row having to be current first.
@@ -5350,17 +5921,34 @@ const TERMINAL_FONT: &str = "Maple Mono NF CN";
 /// Both registered theme configs are rewritten, not just the live family: a
 /// mode change re-applies the config, and a config that says nothing about the
 /// mono family would put the old one back.
-fn apply_terminal_font(cx: &mut App) {
+/// Applies the terminal's font family, and its size when one was chosen.
+///
+/// Kept in one place because a theme change re-reads the library's theme file:
+/// anything set here has to be re-applied after every mode switch, or the grid
+/// drifts back to the library's monospace.
+fn apply_terminal_font(cx: &mut App, size: Option<f32>) {
     gpui_kit::component::Theme::update(cx, |theme| {
+        // The library's theme files store the mono size as points, while the
+        // resolved theme carries pixels. Both are written here so the two
+        // cannot disagree after a mode change.
         let mut dark = (*theme.dark_theme).clone();
         dark.mono_font_family = Some(TERMINAL_FONT.into());
+        if let Some(size) = size {
+            dark.mono_font_size = Some(size);
+        }
         theme.dark_theme = std::rc::Rc::new(dark);
 
         let mut light = (*theme.light_theme).clone();
         light.mono_font_family = Some(TERMINAL_FONT.into());
+        if let Some(size) = size {
+            light.mono_font_size = Some(size);
+        }
         theme.light_theme = std::rc::Rc::new(light);
 
         theme.mono_font_family = TERMINAL_FONT.into();
+        if let Some(size) = size {
+            theme.mono_font_size = gpui_kit::px(size);
+        }
     });
 }
 
@@ -5387,10 +5975,15 @@ fn main() {
     // soon as the window asks for its first frame.
     let command = pty_command::default_profile();
 
+    // A saved preference wins over the desktop's setting. Both are resolved
+    // before the loop starts, because the first shell has to be painted in the
+    // colors the window will use.
+    let saved = config::Config::load();
+    let light = saved.light.unwrap_or_else(system_prefers_light);
+
     // The pane needs the palette the window will end up with, and the theme is
     // only installed later in `gpui_kit::init`, so the colors are resolved
     // directly from the theme crate here.
-    let light = system_prefers_light();
     let mut theme = gpui_kit::component::Theme::default();
     theme.colors = if light {
         *gpui_kit::component::ThemeColor::light()
@@ -5407,12 +6000,15 @@ fn main() {
         Err(message) => (None, Some(message)),
     };
 
+    let font_size = saved.font_size;
+    let workspace_config = saved;
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
 
-            apply_terminal_font(cx);
+            apply_terminal_font(cx, font_size);
 
             // The app follows the desktop's light/dark setting, resolved before
             // the loop started so the first shell could be painted to match.
@@ -5447,8 +6043,9 @@ fn main() {
 
                 let pane = first_pane.take();
                 let error = startup_error.clone();
+                let settings = workspace_config.clone();
                 cx.new(|cx| {
-                    let mut workspace = Workspace::new(window, cx);
+                    let mut workspace = Workspace::new(window, cx, settings);
                     match pane {
                         Some(pane) => workspace.adopt(pane),
                         None => workspace.error = error,
