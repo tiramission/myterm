@@ -16,6 +16,7 @@ mod install;
 mod layout;
 mod palette;
 mod pty_command;
+mod session;
 mod terminal;
 mod update;
 
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -149,6 +151,10 @@ struct Pane {
     /// The IME needs it to place its candidate window and the mouse needs it to
     /// resolve a pointer to a cell.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// Whether the last poll saw this shell writing. The transition out of it is
+    /// what raises the tab's badge, so a program that finishes while you are
+    /// reading another tab leaves a mark instead of disappearing.
+    working: bool,
 }
 
 impl Pane {
@@ -191,6 +197,9 @@ impl Pane {
                 point(px(0.0), px(0.0)),
                 size(px(0.0), px(0.0)),
             ))),
+            // The first frame decides this; assuming "idle" means a shell that
+            // starts by printing its banner does not count as activity.
+            working: false,
         }
     }
 
@@ -230,6 +239,9 @@ struct Tab {
     active: u64,
     /// The id the next pane in this tab will take.
     next_id: u64,
+    /// Set when a pane in this tab stopped writing while the tab was not the
+    /// one on screen. Cleared by selecting it.
+    unseen: bool,
 }
 
 impl Tab {
@@ -257,6 +269,7 @@ impl Tab {
             layout: Layout::Leaf(1),
             active: 1,
             next_id: 2,
+            unseen: false,
         }
     }
 
@@ -349,6 +362,51 @@ struct TabMenu {
     position: Point<Pixels>,
 }
 
+/// The find bar over the active pane, and what it found.
+///
+/// The terminal exposes no search over its scrollback, so this searches the
+/// rows the pane is currently showing. That is the honest limit of what the
+/// renderer can see; a match above the viewport would need a scrollback index
+/// the library does not publish.
+struct FindState {
+    input: Entity<InputState>,
+    /// Matches on visible rows, as the row and the first and last cell it covers.
+    matches: Vec<(usize, usize, usize)>,
+    /// Which match Enter would move to.
+    current: usize,
+    _sub: Subscription,
+}
+
+/// The command palette.
+struct Palette {
+    input: Entity<InputState>,
+    /// What the input says, mirrored here so filtering does not read an entity
+    /// during render.
+    query: String,
+    selected: usize,
+    _sub: Subscription,
+}
+
+/// One row of the command palette.
+struct PaletteCommand {
+    id: &'static str,
+    label: &'static str,
+    /// The key it already has. The palette is a discovery surface, not a
+    /// second place for commands to live: everything here works without it.
+    keys: &'static str,
+}
+
+const PALETTE_COMMANDS: &[PaletteCommand] = &[
+    PaletteCommand { id: "new-tab", label: "新建标签", keys: "Ctrl+Shift+T" },
+    PaletteCommand { id: "close-tab", label: "关闭标签", keys: "Ctrl+Shift+W" },
+    PaletteCommand { id: "split-right", label: "拆分到右侧", keys: "Ctrl+Shift+D" },
+    PaletteCommand { id: "split-down", label: "拆分到下方", keys: "Ctrl+Shift+E" },
+    PaletteCommand { id: "zoom", label: "缩放当前窗格", keys: "Ctrl+Shift+Z" },
+    PaletteCommand { id: "theme", label: "切换明暗主题", keys: "Ctrl+Shift+L" },
+    PaletteCommand { id: "find", label: "在当前窗格内查找", keys: "Ctrl+Shift+F" },
+    PaletteCommand { id: "close-window", label: "关闭窗口", keys: "Ctrl+Shift+Q" },
+];
+
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
     tabs: Vec<Tab>,
@@ -410,6 +468,16 @@ pub struct Workspace {
     tab_claimed: bool,
     /// The open tab context menu, if any.
     menu: Option<TabMenu>,
+    /// The find bar, while it is open.
+    find: Option<FindState>,
+    /// The command palette, while it is open.
+    palette: Option<Palette>,
+    /// Set when a close would end more than one shell and is waiting on
+    /// confirmation. Nothing is torn down until it is answered.
+    closing: bool,
+    /// The tabs the last session left behind, while the offer to rebuild them
+    /// is on screen.
+    restore: Option<session::Snapshot>,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -458,6 +526,12 @@ impl Workspace {
             sidebar_drag: None,
             tab_claimed: false,
             menu: None,
+            find: None,
+            palette: None,
+            closing: false,
+            // Read once at start-up: a tiny file, and the offer belongs on the
+            // first frame rather than after the terminals have already opened.
+            restore: session::Snapshot::load(),
             resize_drag: None,
             focus: cx.focus_handle(),
             images: Rc::new(RefCell::new(ImageCache::default())),
@@ -474,6 +548,7 @@ impl Workspace {
             layout: Layout::Leaf(1),
             active: 1,
             next_id: 2,
+            unseen: false,
         }];
     }
 
@@ -616,10 +691,29 @@ impl Workspace {
     /// Drains every pane. Returns true when a frame changed.
     fn poll(&mut self) -> bool {
         let mut changed = self.advance_caret_blink();
-        for tab in &mut self.tabs {
+        let active = self.active_tab;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            // Which tab is on screen decides whether activity is news. The tab
+            // being read has its own answer in the header.
+            let watched = index == active;
+
             for pane in tab.panes.values_mut() {
                 if pane.session.poll() {
                     changed = true;
+                }
+
+                let working = pane.session.exit_code().is_none()
+                    && pane.session.idle_for() < Duration::from_millis(1200);
+                if working != pane.working {
+                    // The edge that matters is run-to-stop, not "is busy":
+                    // "the build finished while you were in another tab" is
+                    // the thing a badge is for, and a shell that is merely
+                    // busy would badge itself on every prompt.
+                    if pane.working && !working && !watched && !tab.unseen {
+                        tab.unseen = true;
+                        changed = true;
+                    }
+                    pane.working = working;
                 }
             }
             // The shell announces its directory and command through OSC
@@ -829,6 +923,77 @@ impl Workspace {
             return;
         }
 
+        // While an overlay owns the keyboard, only the keys that mean something
+        // to it are taken here; everything else falls through untouched so the
+        // field receives it as text. Taking them all would make the find bar
+        // unable to accept a single character.
+        if self.find.is_some() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.close_find(window, cx);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    // Enter walks the matches; Shift+Enter walks back.
+                    self.step_find(if mods.shift { -1 } else { 1 }, cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.palette.is_some() {
+            let rows = self
+                .palette
+                .as_ref()
+                .map(|palette| palette_matches(&palette.query).len())
+                .unwrap_or(0);
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.palette = None;
+                    window.focus(&self.focus, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                "enter" => {
+                    let selected = self.palette.as_ref().map_or(0, |palette| palette.selected);
+                    self.run_command(selected, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "down" | "up" => {
+                    if let Some(palette) = self.palette.as_mut()
+                        && rows > 0
+                    {
+                        let step = if keystroke.key == "down" { 1 } else { rows - 1 };
+                        palette.selected = (palette.selected + step) % rows;
+                    }
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        if self.closing {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.closing = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    self.confirm_close(window, cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if mods.control && keystroke.key == "tab" {
             let count = self.tabs.len();
             if count > 1 {
@@ -851,19 +1016,19 @@ impl Workspace {
             && !mods.shift
             && !mods.alt
             && let Ok(number) = keystroke.key.parse::<usize>()
+            && (1..=9).contains(&number)
+            && !self.tabs.is_empty()
         {
-            if (1..=9).contains(&number) && !self.tabs.is_empty() {
-                let index = if number == 9 {
-                    self.tabs.len() - 1
-                } else {
-                    number - 1
-                };
-                if index < self.tabs.len() {
-                    self.select_tab(index, cx);
-                }
-                cx.stop_propagation();
-                return;
+            let index = if number == 9 {
+                self.tabs.len() - 1
+            } else {
+                number - 1
+            };
+            if index < self.tabs.len() {
+                self.select_tab(index, cx);
             }
+            cx.stop_propagation();
+            return;
         }
 
         if mods.control && mods.shift {
@@ -918,6 +1083,16 @@ impl Workspace {
                 }
                 "l" => {
                     self.toggle_theme(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "f" => {
+                    self.open_find(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "p" => {
+                    self.open_palette(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1463,6 +1638,10 @@ impl Render for Workspace {
             body = body.child(self.render_install_prompt(&theme, cx));
         }
 
+        if self.restore.is_some() {
+            body = body.child(self.render_restore_prompt(&theme, cx));
+        }
+
         // The list and the panes sit side by side under the bar, so the window
         // still has exactly one title row. The list is always there: it is the
         // tab surface now, not an accessory that can be switched off.
@@ -1520,20 +1699,34 @@ impl Render for Workspace {
         // The pane area is chrome, not grid: the space between panes shows this
         // tone, so the panes read as cards laid on a surface rather than as
         // rectangles that happen to stop.
+        //
+        // The find bar sits above the cards and inside the same column, so
+        // opening it shortens the grid instead of covering the output the
+        // search is about.
         content = content.child(
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
+                .flex_col()
+                .bg(theme.title_bar)
+                .when(self.find.is_some(), |this| {
+                    this.child(self.render_find_bar(&theme, cx))
+                })
                 // The leading and top edges have no gutter: the cards meet the
                 // title bar and the sidebar directly, so the chrome reads as an
                 // L wrapped around the work instead of a frame floating ten
                 // pixels away from it. Only the trailing and bottom edges keep
                 // the gap, where the window edge would otherwise cut the card.
-                .pr(px(PANE_GAP))
-                .pb(px(PANE_GAP))
-                .bg(theme.title_bar)
-                .child(self.render_panes(tab, style, cx)),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .pr(px(PANE_GAP))
+                        .pb(px(PANE_GAP))
+                        .child(self.render_panes(tab, style, cx)),
+                ),
         );
 
         body = body.child(content);
@@ -1549,6 +1742,14 @@ impl Render for Workspace {
                 &theme,
                 cx,
             ));
+        }
+
+        if self.palette.is_some() {
+            body = body.child(self.render_palette(&theme, cx));
+        }
+
+        if self.closing {
+            body = body.child(self.render_close_prompt(&theme, cx));
         }
 
         body
@@ -1605,6 +1806,16 @@ impl Workspace {
                 let exit = pane.session.exit_code();
                 let name = pane_label(pane);
                 let detail = pane_detail(pane);
+                // Only the pane the bar is over shows its matches. Tinting every
+                // pane would answer a question the bar did not ask.
+                let find = if focused {
+                    self.find.as_ref().map(|find| grid_element::FindRanges {
+                        rows: find.matches.clone(),
+                        current: find.current,
+                    })
+                } else {
+                    None
+                };
                 let zoomed = self.zoomed == Some(id);
                 let show_header = multi || zoomed;
 
@@ -1655,6 +1866,10 @@ impl Workspace {
                     }));
 
                 if show_header {
+                    // While a divider is being dragged the header lends its
+                    // trailing space to the numbers that are changing, because
+                    // that is the question the drag is asking.
+                    let live_size = self.resize_drag.is_some().then(|| dims.get());
                     card = card.child(pane_header(
                         id,
                         name,
@@ -1666,6 +1881,7 @@ impl Workspace {
                         },
                         focused,
                         zoomed,
+                        live_size,
                         theme,
                         cx,
                     ));
@@ -1695,6 +1911,7 @@ impl Workspace {
                             self.focus.clone(),
                             self.images.clone(),
                             id,
+                            find,
                         )),
                 );
 
@@ -1800,7 +2017,18 @@ impl Workspace {
     /// Pane ids restart at 1 in every tab, so a zoom left behind would be read
     /// as an id in the new tab and cover the wrong pane.
     fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() || index == self.active_tab {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // Looking at a tab is what clears its badge, even when it is already the
+        // current one.
+        if let Some(tab) = self.tabs.get_mut(index)
+            && tab.unseen
+        {
+            tab.unseen = false;
+        }
+        if index == self.active_tab {
+            cx.notify();
             return;
         }
         self.active_tab = index;
@@ -1853,10 +2081,96 @@ impl Workspace {
     ///
     /// Every shell is a child of this process, so dropping the workspace on the
     /// way out takes the whole tree with it rather than leaving orphaned
-    /// consoles behind.
-    fn close_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+    /// consoles behind. That is also why closing more than one shell asks
+    /// first: the window cannot put back a running program, and the shell that
+    /// is in the middle of a build is the one people close by accident.
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shells: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+        if shells > 1 {
+            self.closing = true;
+            cx.notify();
+            return;
+        }
+
+        self.remember_session();
         self.tabs.clear();
         window.remove_window();
+    }
+
+    /// Answers the close prompt with "yes".
+    fn confirm_close(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        self.closing = false;
+        self.remember_session();
+        self.tabs.clear();
+        window.remove_window();
+    }
+
+    /// Writes down what is open, so the next start can offer it back.
+    ///
+    /// One tab is what the app opens with anyway, so recording it would only
+    /// produce an offer to do nothing; the record is cleared instead.
+    fn remember_session(&self) {
+        if self.tabs.len() < 2 {
+            session::Snapshot::clear();
+            return;
+        }
+
+        let snapshot = session::Snapshot {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| {
+                    let command = tab.command_snapshot();
+                    session::SnapshotTab {
+                        title: tab.title.clone(),
+                        program: command.program,
+                        args: command.args,
+                    }
+                })
+                .collect(),
+        };
+        snapshot.save();
+    }
+
+    /// Rebuilds the tabs the last session left.
+    ///
+    /// One background task opens them in order: spawning them in parallel would
+    /// let a slow shell overtake a fast one and put the tabs back in an order
+    /// nobody chose.
+    fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.restore.take() else {
+            return;
+        };
+        let (cols, rows) = initial_grid(window);
+        let entity = cx.entity();
+
+        cx.spawn(async move |_, cx| {
+            for tab in snapshot.tabs {
+                let command = Command {
+                    program: tab.program,
+                    args: tab.args,
+                };
+                let spawn_command = command.clone();
+                let pty = cx
+                    .background_executor()
+                    .spawn(async move { Pty::spawn(&spawn_command, cols, rows) })
+                    .await;
+                let Ok(pty) = pty else {
+                    continue;
+                };
+
+                let tab_command = command.clone();
+                entity.update(cx, move |workspace, cx| {
+                    let theme = gpui_kit::component::Theme::global(cx).clone();
+                    if let Ok(restored) = Tab::from_pty(pty, &tab_command, cols, rows, &theme) {
+                        workspace.tabs.push(restored);
+                        workspace.active_tab = workspace.tabs.len() - 1;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 }
 
@@ -1976,6 +2290,256 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The find bar: a field, a count, and a way out.
+    fn render_find_bar(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(find) = self.find.as_ref() else {
+            return div().into_any_element();
+        };
+
+        let total = find.matches.len();
+        let counter = if total == 0 {
+            "无匹配".to_owned()
+        } else {
+            format!("{} / {total}", find.current + 1)
+        };
+        let input = find.input.clone();
+
+        div()
+            .flex_shrink_0()
+            .h(px(38.0))
+            .px(px(PANE_GAP))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .bg(theme.title_bar)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child("查找"),
+            )
+            .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.0))
+                    .text_color(if total == 0 {
+                        theme.muted_foreground
+                    } else {
+                        theme.foreground
+                    })
+                    .child(counter),
+            )
+            .child(pane_action(
+                "find-close",
+                WINDOW_CLOSE,
+                theme,
+                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, window, cx| {
+                    workspace.close_find(window, cx);
+                }),
+            ))
+            .into_any_element()
+    }
+
+    /// The command palette.
+    ///
+    /// Every command here already has a key; the palette exists so the keys can
+    /// be discovered, not so commands can have a second home. That is why each
+    /// row prints its shortcut instead of hiding it.
+    fn render_palette(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(palette) = self.palette.as_ref() else {
+            return div().into_any_element();
+        };
+
+        let rows = palette_matches(&palette.query);
+        let selected = palette.selected.min(rows.len().saturating_sub(1));
+        let input = palette.input.clone();
+
+        let mut list = div().flex().flex_col().gap(px(1.0)).p(px(4.0));
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(10.0))
+                    .py(px(10.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child("没有匹配的命令"),
+            );
+        } else {
+            for (index, command) in rows.iter().enumerate() {
+                let is_selected = index == selected;
+                let hover = theme.muted;
+                list = list.child(
+                    div()
+                        .id(ElementId::Name(format!("palette-{index}").into()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(12.0))
+                        .h(px(30.0))
+                        .px(px(10.0))
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .when(is_selected, |this| this.bg(hover))
+                        .when(!is_selected, |this| this.hover(move |this| this.bg(hover)))
+                        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                            workspace.run_command(index, window, cx);
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(12.0))
+                                .text_color(if is_selected {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(command.label),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted_foreground)
+                                .child(command.keys),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(96.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.palette = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(12.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .p(px(8.0))
+                            .child(Input::new(&input).appearance(false).bordered(false)),
+                    )
+                    .child(div().h(px(1.0)).bg(theme.border))
+                    .child(list),
+            )
+            .into_any_element()
+    }
+
+    /// Asks before ending more than one shell.
+    ///
+    /// The copy names the object and the count, because "are you sure" over an
+    /// unnamed action is exactly the dialog people click through without
+    /// reading.
+    fn render_close_prompt(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tabs = self.tabs.len();
+        let shells: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .child(
+                div()
+                    .w(px(360.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .p(px(18.0))
+                    .rounded(px(12.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("关闭窗口？"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "关闭窗口会结束 {tabs} 个标签里的 {shells} 个终端，正在运行的程序也会停止。"
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .pt(px(4.0))
+                            .child(
+                                Button::new("cancel-close")
+                                    .outline()
+                                    .label("取消")
+                                    .on_click(cx.listener(
+                                        |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                            workspace.closing = false;
+                                            cx.notify();
+                                        },
+                                    )),
+                            )
+                            .child(
+                                Button::new("confirm-close")
+                                    .danger()
+                                    .label("关闭窗口")
+                                    .on_click(cx.listener(
+                                        |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
+                                            workspace.confirm_close(window, cx);
+                                        },
+                                    )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Closes every tab but one.
     fn close_others(&mut self, keep: usize, cx: &mut Context<Self>) {
         if keep >= self.tabs.len() {
@@ -1986,6 +2550,145 @@ impl Workspace {
         self.tabs.push(kept);
         self.active_tab = 0;
         self.menu = None;
+        cx.notify();
+    }
+
+    /// Opens the find bar over the active pane.
+    ///
+    /// The input owns the text and the workspace owns the matches: the bar has
+    /// to be able to show "3 / 12" while the caret is still in the field, and a
+    /// controlled input that rebuilt its value every frame would fight the
+    /// platform's own editing state.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.is_some() || self.active_pane().is_none() {
+            return;
+        }
+
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("在当前屏幕内查找"));
+        let sub = cx.subscribe(
+            &input,
+            |workspace: &mut Workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    workspace.refresh_find(cx);
+                }
+            },
+        );
+        input.update(cx, |state, cx| state.focus(window, cx));
+
+        self.find = Some(FindState {
+            input,
+            matches: Vec::new(),
+            current: 0,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// Rereads the query and rescans the visible rows.
+    fn refresh_find(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        let query = find.input.read(cx).value().to_string();
+        let matches = self
+            .active_pane()
+            .map(|pane| find_matches(pane.session.frame(), &query))
+            .unwrap_or_default();
+
+        if let Some(find) = self.find.as_mut() {
+            find.matches = matches;
+            find.current = 0;
+        }
+        cx.notify();
+    }
+
+    /// Moves the highlight to the next or previous match, wrapping.
+    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        if find.matches.is_empty() {
+            return;
+        }
+        let len = find.matches.len() as isize;
+        find.current = ((find.current as isize + delta).rem_euclid(len)) as usize;
+        cx.notify();
+    }
+
+    /// Closes the find bar and gives the keyboard back to the terminal.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Opens the command palette.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("输入命令"));
+        let sub = cx.subscribe(
+            &input,
+            |workspace: &mut Workspace, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = workspace
+                        .palette
+                        .as_ref()
+                        .map(|palette| palette.input.read(cx).value().to_string())
+                        .unwrap_or_default();
+                    if let Some(palette) = workspace.palette.as_mut() {
+                        palette.query = query;
+                        // The list is short and filtered as you type, so the
+                        // first row is always the answer until a key says
+                        // otherwise.
+                        palette.selected = 0;
+                    }
+                    cx.notify();
+                }
+            },
+        );
+        input.update(cx, |state, cx| state.focus(window, cx));
+
+        self.palette = Some(Palette {
+            input,
+            query: String::new(),
+            selected: 0,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// Runs the palette's selected command.
+    fn run_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        let rows = palette_matches(&palette.query);
+        let Some(command) = rows.get(index).copied() else {
+            return;
+        };
+
+        self.palette = None;
+        window.focus(&self.focus, cx);
+
+        match command.id {
+            "new-tab" => self.new_tab(window, cx),
+            "close-tab" => self.close_tab(self.active_tab, cx),
+            "split-right" => self.split_active(Axis::Horizontal, window, cx),
+            "split-down" => self.split_active(Axis::Vertical, window, cx),
+            "zoom" => {
+                if let Some(pane) = self.active_tab().map(|tab| tab.active) {
+                    self.toggle_zoom(pane, cx);
+                }
+            }
+            "theme" => self.toggle_theme(cx),
+            "find" => self.open_find(window, cx),
+            "close-window" => self.close_window(window, cx),
+            _ => {}
+        }
         cx.notify();
     }
 }
@@ -2018,6 +2721,56 @@ fn menu_row(
             this.cursor_pointer().hover(move |this| this.bg(hover))
         })
         .child(label)
+}
+
+/// Finds `query` on the rows a pane is currently showing.
+///
+/// Case-insensitive, and returned as cell spans rather than character offsets:
+/// a cell may hold no text at all (the tail of a wide glyph), so the cell is the
+/// only unit the grid can tint. Overlapping matches on one row are all kept —
+/// `aaa` in `aaaa` is two hits, and silently dropping one would make the count
+/// lie.
+fn find_matches(frame: &terminal::Frame, query: &str) -> Vec<(usize, usize, usize)> {
+    let needle: Vec<char> = query.trim().to_lowercase().chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut hits = Vec::new();
+    for (y, row) in frame.rows.iter().enumerate() {
+        let units: Vec<(usize, char)> = row
+            .cells
+            .iter()
+            .enumerate()
+            .flat_map(|(x, cell)| {
+                let lower: Vec<char> = cell.text.to_lowercase().chars().collect();
+                lower.into_iter().map(move |c| (x, c)).collect::<Vec<_>>()
+            })
+            .collect();
+
+        if units.len() < needle.len() {
+            continue;
+        }
+        for start in 0..=units.len() - needle.len() {
+            let window: Vec<char> = units[start..start + needle.len()]
+                .iter()
+                .map(|unit| unit.1)
+                .collect();
+            if window == needle {
+                hits.push((y, units[start].0, units[start + needle.len() - 1].0));
+            }
+        }
+    }
+    hits
+}
+
+/// The palette rows a query leaves.
+fn palette_matches(query: &str) -> Vec<&'static PaletteCommand> {
+    let query = query.trim().to_lowercase();
+    PALETTE_COMMANDS
+        .iter()
+        .filter(|command| query.is_empty() || command.label.to_lowercase().contains(&query))
+        .collect()
 }
 
 impl Workspace {
@@ -2440,6 +3193,101 @@ impl Workspace {
         band.into_any_element()
     }
 
+    /// The band that offers the last session back.
+    ///
+    /// It sits where the install band sits and is built the same way: a strip
+    /// with a sentence and two actions, not a dialog. Rebuilding tabs is
+    /// convenience, and convenience must not hold up the first frame.
+    fn render_restore_prompt(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(snapshot) = &self.restore else {
+            return div().into_any_element();
+        };
+
+        let count = snapshot.tabs.len();
+        let accent = theme.ring;
+        let muted = theme.muted_foreground;
+        let hover = theme.muted;
+
+        div()
+            .mx(px(PANE_GAP))
+            .mt(px(PANE_GAP))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .px(px(14.0))
+            .py(px(8.0))
+            .rounded(px(CHIP_RADIUS))
+            .bg(accent.opacity(0.08))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.foreground)
+                            .child(format!("上次退出时有 {count} 个标签")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(muted)
+                            .child("恢复会重新打开这些 shell；它们自己的输出不会回来。"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("restore-dismiss")
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(muted)
+                    .hover(move |this| this.bg(hover))
+                    .on_click(cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                        workspace.restore = None;
+                        session::Snapshot::clear();
+                        cx.notify();
+                    }))
+                    .child("不恢复"),
+            )
+            .child(
+                div()
+                    .id("restore-accept")
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px(px(12.0))
+                    .rounded(px(6.0))
+                    .bg(accent.opacity(0.12))
+                    .text_size(px(11.5))
+                    .text_color(accent)
+                    .cursor_pointer()
+                    .hover(move |this| this.bg(accent.opacity(0.2)))
+                    .on_click(cx.listener(
+                        |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
+                            workspace.restore_session(window, cx);
+                        },
+                    ))
+                    .child("恢复"),
+            )
+            .into_any_element()
+    }
+
     /// Every tab and pane, with enough state to jump to one.
     ///
     /// This is the whole model the sidebar reads: it is rebuilt from the
@@ -2492,6 +3340,7 @@ impl Workspace {
                     tab.title.clone(),
                     tab.panes.len(),
                     current_tab,
+                    tab.unseen,
                     closable,
                     theme,
                     cx,
@@ -2510,6 +3359,7 @@ impl Workspace {
                     // that stands for its own tab stays on the top spine.
                     grouped,
                     selected,
+                    tab.unseen,
                     // A one-pane tab is closed from its own row, because that
                     // row is the tab. A grouped tab closes from its header.
                     closable && !grouped,
@@ -3304,6 +4154,7 @@ fn pane_header(
     status: PaneStatus,
     focused: bool,
     zoomed: bool,
+    live_size: Option<(u16, u16)>,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
@@ -3361,6 +4212,19 @@ fn pane_header(
                 .mr(px(4.0))
                 .child(status_glyph(status, theme)),
         )
+        .when_some(live_size, |this, (cols, rows)| {
+            this.child(
+                // The cell count the divider is producing right now. Only while
+                // dragging: a permanent readout of a number nobody is changing
+                // is decoration, and the shell already knows its own size.
+                div()
+                    .flex_shrink_0()
+                    .mr(px(6.0))
+                    .text_size(px(10.5))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{cols}×{rows}")),
+            )
+        })
         .child(
             // The pane's own actions. Quieter than a label, never gone: a
             // control that only exists under the pointer does not exist for a
@@ -3671,17 +4535,20 @@ fn pane_action(
 /// Quieter than the rows under it — smaller, and marked as current by weight and
 /// colour rather than by a fill. The fill belongs to the focused pane, and two
 /// filled rows in one group would read as two active places.
+#[allow(clippy::too_many_arguments)]
 fn sidebar_group_row(
     tab_index: usize,
     title: String,
     pane_count: usize,
     current: bool,
+    unseen: bool,
     closable: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let hover_bg = theme.muted;
     let row_group = format!("side-tab-row-{tab_index}");
+    let dot = theme.primary;
 
     div()
         .id(ElementId::Name(format!("side-tab-{tab_index}").into()))
@@ -3732,6 +4599,18 @@ fn sidebar_group_row(
                 })
                 .child(title),
         )
+        .when(unseen, |this| {
+            // A filled dot at the trailing edge: something in this tab stopped
+            // while you were somewhere else. It is a shape, not only a colour,
+            // and it lives beside the count rather than in front of the name.
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(5.0))
+                    .rounded(px(999.0))
+                    .bg(dot),
+            )
+        })
         .child(
             div()
                 .flex_shrink_0()
@@ -3797,6 +4676,7 @@ fn sidebar_pane_row(
     status: PaneStatus,
     indented: bool,
     selected: bool,
+    unseen: bool,
     closable: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
@@ -3881,6 +4761,15 @@ fn sidebar_pane_row(
                     .text_size(px(10.5))
                     .text_color(theme.muted_foreground)
                     .child(label),
+            )
+        })
+        .when(unseen, |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(5.0))
+                    .rounded(px(999.0))
+                    .bg(theme.primary),
             )
         })
         .when(closable, |this| {
@@ -4570,3 +5459,4 @@ fn main() {
             .expect("failed to open window");
         });
 }
+

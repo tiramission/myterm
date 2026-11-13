@@ -54,12 +54,24 @@ impl Default for GridStyle {
     }
 }
 
+/// Where the find bar's matches sit on the rows this grid is showing.
+///
+/// Cell spans, not character offsets: the pasteboard of the grid is cells, and
+/// a wide glyph's tail is a cell with no text of its own.
+#[derive(Clone, Default)]
+pub struct FindRanges {
+    pub rows: Vec<(usize, usize, usize)>,
+    pub current: usize,
+}
+
 /// Paints one terminal frame into the bounds it is given.
 pub struct TerminalGrid {
     id: ElementId,
     frame: Frame,
     style: GridStyle,
     focused: bool,
+    /// Matches to tint, when the find bar is open over this pane.
+    find: Option<FindRanges>,
     /// Written during prepaint with the cell count the element actually has
     /// room for, so the owner can size the pseudo console to match.
     dims: Rc<Cell<(u16, u16)>>,
@@ -96,12 +108,14 @@ impl TerminalGrid {
         focus: FocusHandle,
         images: Rc<RefCell<ImageCache>>,
         pane_id: u64,
+        find: Option<FindRanges>,
     ) -> Self {
         Self {
             id: id.into(),
             frame,
             style,
             focused,
+            find,
             dims,
             window_bounds,
             entity,
@@ -244,18 +258,44 @@ impl Element for TerminalGrid {
 
         // Pass one: cell backgrounds, so glyphs from a neighbouring cell never
         // sit on top of a background painted later.
-        for (y, row) in rows.iter().enumerate() {
-            for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
-                let bg = resolve(cell.style.bg, &palette, default_bg);
-                let bg = if cell.selected {
-                    blend(bg, style.selection, style.selection_alpha)
-                } else if cell.style.inverse {
-                    resolve(cell.style.fg, &palette, default_fg)
-                } else {
-                    bg
-                };
+        //
+        // Find matches are tinted here rather than in a pass of their own: the
+        // tint is a background, and a second layer over the glyphs would make
+        // the text the search is pointing at the hardest thing to read.
+        let current_match = self.find.as_ref().map(|find| find.current);
+        let find_rows = self.find.as_ref().map(|find| &find.rows);
 
-                if bg != style.background || cell.selected || cell.style.inverse {
+        for (y, row) in rows.iter().enumerate() {
+            let hits: Vec<(usize, usize, bool)> = match find_rows {
+                Some(rows) => rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, hit)| hit.0 == y)
+                    .map(|(index, hit)| (hit.1, hit.2, Some(index) == current_match))
+                    .collect(),
+                None => Vec::new(),
+            };
+
+            for (x, cell) in row.cells.iter().take(fit_cols).enumerate() {
+                let mut bg = resolve(cell.style.bg, &palette, default_bg);
+                let mut repaint = false;
+
+                if cell.selected {
+                    bg = blend(bg, style.selection, style.selection_alpha);
+                    repaint = true;
+                } else if cell.style.inverse {
+                    bg = resolve(cell.style.fg, &palette, default_fg);
+                    repaint = true;
+                }
+
+                if let Some((_, _, is_current)) =
+                    hits.iter().find(|(start, end, _)| (*start..=*end).contains(&x))
+                {
+                    bg = blend(bg, style.selection, if *is_current { 0.55 } else { 0.26 });
+                    repaint = true;
+                }
+
+                if repaint || bg != style.background {
                     window.paint_quad(fill(cell_bounds(origin, style, x, y), bg));
                 }
             }
