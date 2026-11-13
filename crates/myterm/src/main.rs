@@ -3996,10 +3996,13 @@ impl Workspace {
                         .w_full()
                         .h(px(CHIP))
                         .rounded(px(8.0))
+                        .relative()
                         .cursor_pointer()
-                        // State is a surface, not a corner dot. At this size a
-                        // five-pixel dot is a speck that has to be hunted; a
-                        // tint answers at a glance and costs no alignment.
+                        // Selection keeps the deepest surface, the same one the
+                        // grid draws on: the chip is a small screen and the
+                        // focused one is the one you are looking into. Activity
+                        // is the rule below, so a working pane still reads as
+                        // working while it is focused.
                         .when(selected, |this| this.bg(theme.background))
                         .when(!selected, |this| this.bg(rail_tint(status, theme)))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
@@ -4013,7 +4016,19 @@ impl Workspace {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(text_color)
                                 .child(glyph),
-                        ),
+                        )
+                        .when_some(rail_bar(status, theme), |this, color| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left(px(6.0))
+                                    .right(px(6.0))
+                                    .bottom(px(2.0))
+                                    .h(px(2.0))
+                                    .rounded(px(1.0))
+                                    .bg(color),
+                            )
+                        }),
                 );
             }
 
@@ -5719,18 +5734,41 @@ fn status_glyph(status: PaneStatus, theme: &gpui_kit::component::Theme) -> impl 
         })
 }
 
-/// The surface a rail chip wears when it is not the focused one.
+/// The surface a rail chip wears.
 ///
-/// The rail has no room for a status word and no patience for a five-pixel dot,
-/// so state moves into the chip's own background. Idle gets none: it is what a
-/// pane is most of the time, and tinting everything would leave selection with
-/// nothing to stand out against. Working borrows the accent at low strength; a
-/// dead shell borrows danger.
+/// The chip is the one place in the app with no room for a status word, so
+/// state has to be carried by the surface itself. Two channels, kept separate:
+/// selection raises the chip to `surface`, while activity is a two-pixel rule at
+/// the chip's foot (`rail_bar`). A 14% tint was the first attempt and it failed
+/// in dark mode — over a capsule that is itself a muted wash, a lime wash that
+/// low is a few points of luminance and reads as nothing.
+///
+/// Idle keeps a small neutral lift rather than none: without it the chip has no
+/// edge at all against the capsule, and the letter floats in the column.
 fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
     match status {
-        PaneStatus::Working => theme.ring.opacity(0.14),
-        PaneStatus::Exited => theme.danger.opacity(0.14),
-        PaneStatus::Idle => theme.background.opacity(0.0),
+        // 18% of the accent over the capsule is about 1.6:1 against it, enough
+        // to see from a metre away; 14% was 1.4:1 and disappeared next to the
+        // selected chip.
+        PaneStatus::Working => theme.ring.opacity(0.18),
+        PaneStatus::Exited => theme.danger.opacity(0.16),
+        // Just enough lift to give the chip an edge: 9% of the muted text tone
+        // lands near 1.18:1, which is a tile rather than a smudge.
+        PaneStatus::Idle => theme.muted_foreground.opacity(0.09),
+    }
+}
+
+/// The rule a rail chip carries while its shell is not at rest.
+///
+/// The same shape language as the pane header — colour is the second channel,
+/// not the first — reduced to the one form that fits a thirty-pixel chip. A line
+/// survives being scaled down and can be seen at the edge of vision; a dot
+/// cannot.
+fn rail_bar(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Option<Hsla> {
+    match status {
+        PaneStatus::Working => Some(theme.ring),
+        PaneStatus::Exited => Some(theme.danger),
+        PaneStatus::Idle => None,
     }
 }
 
