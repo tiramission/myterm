@@ -17,7 +17,6 @@ mod install;
 mod layout;
 mod palette;
 mod pty_command;
-mod session;
 mod terminal;
 mod update;
 
@@ -544,9 +543,6 @@ pub struct Workspace {
     /// Set when a close would end more than one shell and is waiting on
     /// confirmation. Nothing is torn down until it is answered.
     closing: bool,
-    /// The tabs the last session left behind, while the offer to rebuild them
-    /// is on screen.
-    restore: Option<session::Snapshot>,
     /// The preferences this window is running with, kept so the settings sheet
     /// can write them back without re-reading the file.
     config: config::Config,
@@ -569,7 +565,6 @@ impl Workspace {
     /// shell is spawned before the event loop exists.
     fn new(window: &mut Window, cx: &mut Context<Self>, config: config::Config) -> Self {
         let _ = window;
-        let restore = config.restore.then(session::Snapshot::load).flatten();
 
         Self {
             tabs: Vec::new(),
@@ -606,9 +601,6 @@ impl Workspace {
             find: None,
             palette: None,
             closing: false,
-            // Read once at start-up: a tiny file, and the offer belongs on the
-            // first frame rather than after the terminals have already opened.
-            restore,
             config,
             settings: false,
             resize_drag: None,
@@ -1760,10 +1752,6 @@ impl Render for Workspace {
             body = body.child(self.render_install_prompt(&theme, cx));
         }
 
-        if self.restore.is_some() {
-            body = body.child(self.render_restore_prompt(&theme, cx));
-        }
-
         // The list and the panes sit side by side under the bar, so the window
         // still has exactly one title row. The list is always there: it is the
         // tab surface now, not an accessory that can be switched off.
@@ -2255,19 +2243,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Turns the start-up offer of the last session on or off.
-    fn set_restore(&mut self, restore: bool, cx: &mut Context<Self>) {
-        self.config.restore = restore;
-        self.config.save();
-        if !restore {
-            // Off means off: the record goes away too, so turning it back on
-            // does not resurrect tabs from a session the user said no to.
-            self.restore = None;
-            session::Snapshot::clear();
-        }
-        cx.notify();
-    }
-
     /// Closes the window, which ends the app.
     ///
     /// Every shell is a child of this process, so dropping the workspace on the
@@ -2283,7 +2258,6 @@ impl Workspace {
             return;
         }
 
-        self.remember_session();
         self.tabs.clear();
         window.remove_window();
     }
@@ -2291,77 +2265,8 @@ impl Workspace {
     /// Answers the close prompt with "yes".
     fn confirm_close(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         self.closing = false;
-        self.remember_session();
         self.tabs.clear();
         window.remove_window();
-    }
-
-    /// Writes down what is open, so the next start can offer it back.
-    ///
-    /// One tab is what the app opens with anyway, so recording it would only
-    /// produce an offer to do nothing; the record is cleared instead.
-    fn remember_session(&self) {
-        if self.tabs.len() < 2 {
-            session::Snapshot::clear();
-            return;
-        }
-
-        let snapshot = session::Snapshot {
-            tabs: self
-                .tabs
-                .iter()
-                .map(|tab| {
-                    let command = tab.command_snapshot();
-                    session::SnapshotTab {
-                        title: tab.title.clone(),
-                        program: command.program,
-                        args: command.args,
-                    }
-                })
-                .collect(),
-        };
-        snapshot.save();
-    }
-
-    /// Rebuilds the tabs the last session left.
-    ///
-    /// One background task opens them in order: spawning them in parallel would
-    /// let a slow shell overtake a fast one and put the tabs back in an order
-    /// nobody chose.
-    fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.restore.take() else {
-            return;
-        };
-        let (cols, rows) = initial_grid(window);
-        let entity = cx.entity();
-
-        cx.spawn(async move |_, cx| {
-            for tab in snapshot.tabs {
-                let command = Command {
-                    program: tab.program,
-                    args: tab.args,
-                };
-                let spawn_command = command.clone();
-                let pty = cx
-                    .background_executor()
-                    .spawn(async move { Pty::spawn(&spawn_command, cols, rows) })
-                    .await;
-                let Ok(pty) = pty else {
-                    continue;
-                };
-
-                let tab_command = command.clone();
-                entity.update(cx, move |workspace, cx| {
-                    let theme = gpui_kit::component::Theme::global(cx).clone();
-                    if let Ok(restored) = Tab::from_pty(pty, &tab_command, cols, rows, &theme) {
-                        workspace.tabs.push(restored);
-                        workspace.active_tab = workspace.tabs.len() - 1;
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 }
 
@@ -2536,6 +2441,7 @@ impl Workspace {
                 "find-close",
                 WINDOW_CLOSE,
                 theme,
+                false,
                 cx.listener(|workspace: &mut Workspace, _: &ClickEvent, window, cx| {
                     workspace.close_find(window, cx);
                 }),
@@ -2677,7 +2583,6 @@ impl Workspace {
         let muted = theme.muted_foreground;
         let size = theme.mono_font_size.as_f32();
         let light = self.config.light;
-        let restore = self.config.restore;
 
         let appearance = div()
             .flex()
@@ -2749,19 +2654,67 @@ impl Workspace {
                 )),
             );
 
-        let session = div().flex().flex_row().gap(px(4.0)).child(
-            setting_chip(
-                "settings-restore",
-                if restore { "开" } else { "关" },
-                restore,
-                theme,
-            )
-            .on_click(cx.listener(
-                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                    workspace.set_restore(!restore, cx);
-                },
-            )),
-        );
+        // The app section: what is running, whether a copy lives on this machine,
+        // and whether a newer one exists. These used to sit in the about card,
+        // where they were the only actions in a table of facts. Installing writes
+        // to this machine, which is the same kind of decision as the theme or
+        // the font, so it belongs in the sheet that changes this machine; the
+        // about card is now pure reference, with nothing to click but a link.
+        let install = self.install_state();
+        let install_error = self.install_error.clone();
+        let install_control = div()
+            .w(px(96.0))
+            .child(install_action(theme, install, cx.entity()));
+
+        let ready = self.update_badge();
+        let update_ready = matches!(ready, Some((_, true)));
+        let update_label: String = match &ready {
+            Some((label, _)) => label.clone(),
+            None => "检查更新".to_owned(),
+        };
+        let update_hover = theme.ring.opacity(0.18);
+        let update_control = div()
+            .id("settings-update")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .h(px(24.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(if update_ready {
+                theme.ring
+            } else {
+                theme.border
+            })
+            .bg(if update_ready {
+                theme.ring.opacity(0.10)
+            } else {
+                theme.background
+            })
+            .text_size(px(11.5))
+            .text_color(if update_ready { theme.ring } else { muted })
+            .cursor_pointer()
+            .hover(move |this| this.bg(update_hover))
+            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                if update_ready {
+                    workspace.install_update(cx);
+                } else {
+                    // A finished check that found nothing leaves the slot taken,
+                    // and `check_for_update` refuses a second call while it is
+                    // held. Clearing it is what lets the button be pressed twice.
+                    workspace.update = None;
+                    workspace.check_for_update(cx);
+                }
+            }))
+            .child(update_label);
+
+        let version = div()
+            .text_size(px(11.5))
+            .font_family(TERMINAL_FONT)
+            .text_color(theme.ring)
+            .child(version_label());
 
         div()
             .absolute()
@@ -2803,6 +2756,7 @@ impl Workspace {
                         "settings-close",
                         WINDOW_CLOSE,
                         theme,
+                        false,
                         cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                             workspace.settings = false;
                             cx.notify();
@@ -2832,21 +2786,79 @@ impl Workspace {
                         font.into_any_element(),
                     ))
                     .child(setting_row(
-                        "启动时",
-                        "上次有多个标签时，提示恢复",
+                        "版本",
+                        "当前运行的这一份",
                         theme,
-                        session.into_any_element(),
+                        version.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "安装",
+                        // The state is the hint, because the button's own label
+                        // only says what the next action would be.
+                        install.summary(),
+                        theme,
+                        install_control.into_any_element(),
+                    ))
+                    .when_some(install_error, |this, message| {
+                        this.child(
+                            div()
+                                .pb(px(10.0))
+                                .text_size(px(10.5))
+                                .text_color(theme.danger)
+                                .child(message),
+                        )
+                    })
+                    .child(setting_row(
+                        "更新",
+                        "启动时自动检查，失败不提示",
+                        theme,
+                        update_control.into_any_element(),
                     ))
                     .child(
                         div()
                             .pt(px(12.0))
-                            .text_size(px(10.5))
-                            .text_color(muted)
-                            .child(format!(
-                                "保存在 {}",
-                                config::Config::location()
-                                    .unwrap_or_else(|| "本机设置目录".to_owned())
-                            )),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(div().text_size(px(10.5)).text_color(muted).child("保存在"))
+                            // The path is where you go to edit the file by hand,
+                            // so it is a control rather than a caption: clicking
+                            // it opens the folder the config lives in, which is
+                            // the only thing this line was ever pointing at.
+                            .child(
+                                div()
+                                    .id("settings-reveal-config")
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(10.5))
+                                    .font_family(TERMINAL_FONT)
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(move |this| this.text_color(theme.ring))
+                                    .on_click(cx.listener(
+                                        |_: &mut Workspace, _: &ClickEvent, _, _cx| {
+                                            if let Some(path) = config::Config::location()
+                                                && let Some(dir) =
+                                                    std::path::Path::new(&path).parent()
+                                            {
+                                                // Explorer, not a URL: a `file://`
+                                                // link opens a second Explorer window
+                                                // for the file rather than the folder
+                                                // it is in.
+                                                let _ = std::process::Command::new("explorer")
+                                                    .arg(dir)
+                                                    .spawn();
+                                            }
+                                        },
+                                    ))
+                                    .child(
+                                        config::Config::location()
+                                            .unwrap_or_else(|| "本机设置目录".to_owned()),
+                                    ),
+                            ),
                     ),
             )
             .into_any_element()
@@ -3654,103 +3666,6 @@ impl Workspace {
         band.into_any_element()
     }
 
-    /// The band that offers the last session back.
-    ///
-    /// It sits where the install band sits and is built the same way: a strip
-    /// with a sentence and two actions, not a dialog. Rebuilding tabs is
-    /// convenience, and convenience must not hold up the first frame.
-    fn render_restore_prompt(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(snapshot) = &self.restore else {
-            return div().into_any_element();
-        };
-
-        let count = snapshot.tabs.len();
-        let accent = theme.ring;
-        let muted = theme.muted_foreground;
-        let hover = theme.muted;
-
-        div()
-            .mx(px(PANE_GAP))
-            .mt(px(PANE_GAP))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(12.0))
-            .px(px(14.0))
-            .py(px(8.0))
-            .rounded(px(CHIP_RADIUS))
-            .bg(accent.opacity(0.08))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.foreground)
-                            .child(format!("上次退出时有 {count} 个标签")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(muted)
-                            .child("恢复会重新打开这些 shell；它们自己的输出不会回来。"),
-                    ),
-            )
-            .child(
-                div()
-                    .id("restore-dismiss")
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .text_size(px(11.5))
-                    .text_color(muted)
-                    .hover(move |this| this.bg(hover))
-                    .on_click(
-                        cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                            workspace.restore = None;
-                            session::Snapshot::clear();
-                            cx.notify();
-                        }),
-                    )
-                    .child("不恢复"),
-            )
-            .child(
-                div()
-                    .id("restore-accept")
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_center()
-                    .h(px(24.0))
-                    .px(px(12.0))
-                    .rounded(px(6.0))
-                    .bg(accent.opacity(0.12))
-                    .text_size(px(11.5))
-                    .text_color(accent)
-                    .cursor_pointer()
-                    .hover(move |this| this.bg(accent.opacity(0.2)))
-                    .on_click(cx.listener(
-                        |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
-                            workspace.restore_session(window, cx);
-                        },
-                    ))
-                    .child("恢复"),
-            )
-            .into_any_element()
-    }
-
     /// Every tab and pane, with enough state to jump to one.
     ///
     /// This is the whole model the sidebar reads: it is rebuilt from the
@@ -4360,9 +4275,6 @@ impl Workspace {
                 // Copied out before the closure below captures `theme`.
                 let card_theme = theme.clone();
                 let mark = theme.muted_foreground;
-                let install_state = self.install_state();
-                let install_error = self.install_error.clone();
-                let card_entity = cx.entity();
                 // The trigger is a circled `i`, not the app mark: the mark is
                 // already at the leading edge of this same bar, and a second
                 // copy reads as decoration rather than as a control.
@@ -4377,14 +4289,7 @@ impl Workspace {
                     .anchor(Anchor::TopRight)
                     .offset(px(6.0))
                     .trigger(trigger)
-                    .content(move |_, _, _| {
-                        about_card(
-                            &card_theme,
-                            install_state,
-                            install_error.clone(),
-                            card_entity.clone(),
-                        )
-                    })
+                    .content(move |_, _, _| about_card(&card_theme))
             })
             // The theme toggle shows the theme it switches to, not the one in
             // use, which is the convention every app with this control follows.
@@ -4675,9 +4580,9 @@ fn sidebar_handle(
 /// by the tab beside it, and repeating that name in a second bar would spend
 /// thirty pixels saying nothing.
 ///
-/// The name starts on the grid's own leading spine. State sits at the trailing
-/// edge next to the actions, because a dot where the eye starts reading was
-/// competing with the name it was meant to annotate.
+/// The name starts on the grid's own leading spine. State sits beside the name,
+/// because it describes the shell; the actions live at the trailing edge and
+/// appear only while the pointer is over the pane.
 #[allow(clippy::too_many_arguments)]
 fn pane_header(
     id: u64,
@@ -4754,6 +4659,21 @@ fn pane_header(
             )
         })
         .child(
+            // State, as a shape first and a colour second: filled means writing,
+            // hollow means waiting, square means gone. Colour alone would leave
+            // the two commonest states identical to a colour-blind reader.
+            //
+            // It annotates the name, so it sits with the name. At the trailing
+            // edge, next to buttons that are hidden until hovered, the dot hung
+            // alone in the middle of the row with nothing to belong to.
+            div()
+                .flex_shrink_0()
+                .w(px(8.0))
+                .flex()
+                .justify_center()
+                .child(status_glyph(status, theme)),
+        )
+        .child(
             // The shell's own title when it says more than its name — a path is
             // what tells two `pwsh` panes apart. Quiet, allowed to vanish.
             div()
@@ -4765,18 +4685,6 @@ fn pane_header(
                 .text_size(px(10.5))
                 .text_color(theme.muted_foreground)
                 .child(detail.unwrap_or_default()),
-        )
-        .child(
-            // State, as a shape first and a colour second: filled means writing,
-            // hollow means waiting, square means gone. Colour alone would leave
-            // the two commonest states identical to a colour-blind reader.
-            div()
-                .flex_shrink_0()
-                .w(px(8.0))
-                .flex()
-                .justify_center()
-                .mr(px(4.0))
-                .child(status_glyph(status, theme)),
         )
         .when_some(live_size, |this, (cols, rows)| {
             this.child(
@@ -4792,20 +4700,29 @@ fn pane_header(
             )
         })
         .child(
-            // The pane's own actions. Quieter than a label, never gone: a
-            // control that only exists under the pointer does not exist for a
-            // keyboard or for a first run.
+            // The pane's own actions, only on the pane under the pointer. Four
+            // glyphs repeated in every header is the same command set printed
+            // once per pane, and in a split the addresses were the loudest thing
+            // in an otherwise quiet row. Nothing is lost by hiding them: each
+            // command has a key (Ctrl+Shift+D / E, Ctrl+Shift+W) and the pane is
+            // focused by the same click that reveals the buttons.
+            //
+            // Hidden, not dimmed. At 0.55 the buttons read as a disabled row the
+            // user could not press; the row is either there or it is not.
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(1.0))
-                .opacity(0.55)
+                // No shared fill, so the buttons need real air between them:
+                // at one pixel four glyphs read as one smear.
+                .gap(px(2.0))
+                .opacity(0.0)
                 .group_hover("pane", |this| this.opacity(1.0))
                 .child(pane_action(
                     ("pane-split-right", id),
                     SPLIT_HORIZONTAL,
                     theme,
+                    false,
                     cx.listener(move |workspace, _: &ClickEvent, window, cx| {
                         workspace.split_pane(id, Axis::Horizontal, window, cx);
                     }),
@@ -4814,6 +4731,7 @@ fn pane_header(
                     ("pane-split-down", id),
                     SPLIT_VERTICAL,
                     theme,
+                    false,
                     cx.listener(move |workspace, _: &ClickEvent, window, cx| {
                         workspace.split_pane(id, Axis::Vertical, window, cx);
                     }),
@@ -4822,6 +4740,7 @@ fn pane_header(
                     ("pane-zoom", id),
                     if zoomed { ZOOM_OUT } else { ZOOM_IN },
                     theme,
+                    false,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                         workspace.toggle_zoom(id, cx);
                     }),
@@ -4830,6 +4749,7 @@ fn pane_header(
                     ("pane-close", id),
                     WINDOW_CLOSE,
                     theme,
+                    true,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                         workspace.close_pane_at(id, cx);
                     }),
@@ -4855,12 +4775,7 @@ gpui::actions!(myterm, [InstallRequested]);
 /// The surface, ring and shadow belong to the popover that hosts this, so the
 /// card contributes only its contents and its own width. Drawing a second
 /// background here would nest one sheet inside another.
-fn about_card(
-    theme: &gpui_kit::component::Theme,
-    install: InstallState,
-    error: Option<String>,
-    entity: Entity<Workspace>,
-) -> AnyElement {
+fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
     let muted = theme.muted_foreground;
     let faint = theme.border;
     let accent = theme.ring;
@@ -4898,7 +4813,7 @@ fn about_card(
             )
     };
 
-    let mut card = div()
+    let card = div()
         .w(px(268.0))
         .flex()
         .flex_col()
@@ -4966,48 +4881,6 @@ fn about_card(
                 .child(key_row("Ctrl+,", "设置")),
         )
         .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint));
-
-    // Installing is a once-in-a-lifetime action, so it lives here rather than
-    // taking a permanent slot in the title bar. The row states which copy is
-    // running, because "installed" and "running from a download folder" look
-    // identical from the outside.
-    card = card.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .mt(px(14.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_baseline()
-                    .justify_between()
-                    .gap(px(32.0))
-                    .w_full()
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(muted)
-                            .child("安装状态"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(if install.installed { accent } else { muted })
-                            .child(install.summary()),
-                    ),
-            )
-            .child(install_action(theme, install, entity))
-            .when_some(error, |this, message| {
-                this.child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.danger)
-                        .child(message),
-                )
-            }),
-    );
 
     card.child(
         div()
@@ -5080,7 +4953,7 @@ fn install_action(
         .justify_center()
         .h(px(26.0))
         .w_full()
-        .rounded(px(7.0))
+        .rounded(px(6.0))
         .border_1()
         .border_color(color.opacity(0.35))
         .text_size(px(11.5))
@@ -5107,20 +4980,30 @@ fn version_label() -> &'static str {
     Box::leak(format!("v{}", update::current_version()).into_boxed_str())
 }
 
-/// A small split control floating inside a pane.
+/// A small control in a pane header.
 ///
-/// Smaller than [`icon_button`] and tinted like chrome rather than like content,
-/// because it covers terminal text: it has to be reachable without becoming part
-/// of what the terminal is saying.
-/// `id` is scoped to the pane: every header carries the same four buttons, and
-/// element ids have to be unique across the whole tree, or only the first one
-/// registers a hitbox and the rest are inert.
+/// Ghost by default: the glyph is drawn straight on the header and only gains a
+/// surface under the pointer, which is the rule the title bar's buttons follow.
+/// They used to be filled chips, and four grey blocks in an otherwise quiet row
+/// read as a segmented control — a group of related choices — when they are
+/// four unrelated commands.
+///
+/// `destructive` gives the close button the same red wash the window's own
+/// close button uses, so the one action that ends the pane is not the same
+/// colour as the three that rearrange it.
 fn pane_action(
     id: impl Into<ElementId>,
     icon: &'static [u8],
     theme: &gpui_kit::component::Theme,
+    destructive: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let wash = if destructive {
+        theme.danger.opacity(0.16)
+    } else {
+        theme.muted
+    };
+
     div()
         .id(id)
         .flex()
@@ -5131,11 +5014,12 @@ fn pane_action(
         // 24px with a 6px corner. A circle inside a rounded card was the one
         // shape in the window that belonged to no family.
         .rounded(px(6.0))
-        .bg(theme.background)
-        .border_1()
-        .border_color(theme.border)
+        // Nothing at rest: the header already carries the name, the ordinal, the
+        // title and the state, and a row of four tinted blocks was the heaviest
+        // thing in it. The surface appears when the pointer is on the button,
+        // which is also the only moment the button is revealed at all.
         .cursor_pointer()
-        .hover(move |this| this.bg(theme.muted))
+        .hover(move |this| this.bg(wash))
         .on_click(on_click)
         .child(icon_data(icon, 16.0, theme.muted_foreground))
 }
@@ -5159,7 +5043,7 @@ fn setting_chip(
         .justify_center()
         .h(px(24.0))
         .px(px(9.0))
-        .rounded(px(7.0))
+        .rounded(px(6.0))
         .border_1()
         .border_color(if active { accent } else { theme.border })
         .bg(if active {
@@ -5644,7 +5528,7 @@ fn window_button(
         .justify_center()
         .w(px(40.0))
         .h(px(28.0))
-        .rounded(px(7.0))
+        .rounded(px(6.0))
         .window_control_area(area)
         .cursor_pointer()
         .hover(move |this| this.bg(wash))

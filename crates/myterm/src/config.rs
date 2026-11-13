@@ -9,27 +9,13 @@
 use std::path::PathBuf;
 
 /// The preferences the app actually reads.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Config {
     /// The theme to use, when it is not the one the desktop is using. `None`
     /// means "follow the system", which is the default.
     pub light: Option<bool>,
     /// The terminal's font size. `None` means the theme's own default.
     pub font_size: Option<f32>,
-    /// Whether to offer the last session on start-up.
-    pub restore: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            light: None,
-            font_size: None,
-            // Offered, not forced: the band can be dismissed, and restoring is
-            // one click. A default of "off" would mean nobody ever discovers it.
-            restore: true,
-        }
-    }
 }
 
 impl Config {
@@ -101,11 +87,7 @@ impl Config {
                         config.font_size = Some(size);
                     }
                 }
-                "restore" => match value {
-                    "on" | "true" | "yes" => config.restore = true,
-                    "off" | "false" | "no" => config.restore = false,
-                    _ => {}
-                },
+
                 _ => {}
             }
         }
@@ -126,10 +108,7 @@ impl Config {
             "font_size = {}\n",
             self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
         ));
-        text.push_str(&format!(
-            "restore = {}\n",
-            if self.restore { "on" } else { "off" }
-        ));
+
         text
     }
 }
@@ -150,13 +129,11 @@ mod tests {
         let config = Config {
             light: Some(false),
             font_size: Some(16.0),
-            restore: true,
         };
         let read = Config::parse(&config.encode());
 
         assert_eq!(read.light, Some(false));
         assert_eq!(read.font_size, Some(16.0));
-        assert!(read.restore);
     }
 
     #[test]
