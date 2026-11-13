@@ -1,7 +1,7 @@
-//! Raw FFI declarations for libghostty-vt 1.0.0.
+//! Raw FFI declarations for libghostty-vt 1.0.1.
 //!
 //! Hand-written against the C headers in `vendor/include/ghostty`, which come
-//! from the 1.0.0 release tarball. The library is statically linked, so every
+//! from the 1.0.1 release tarball. The library is statically linked, so every
 //! declaration here is `extern "C"` with no import library indirection.
 //!
 //! Nothing in this crate is safe to call without the invariants documented on
@@ -622,7 +622,7 @@ unsafe extern "C" {
     pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
 }
 
-// ---- Key codes (generated from the 1.0.0 headers) ----
+// ---- Key codes (generated from the 1.0.1 headers) ----
 pub const GHOSTTY_KEY_UNIDENTIFIED: i32 = 0;
 pub const GHOSTTY_KEY_BACKQUOTE: i32 = 1;
 pub const GHOSTTY_KEY_BACKSLASH: i32 = 2;
