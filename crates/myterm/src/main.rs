@@ -1951,6 +1951,16 @@ impl Workspace {
                 };
                 let zoomed = self.zoomed == Some(id);
                 let show_header = multi || zoomed;
+                // The same number the rail chip wears, on the pane itself: with
+                // three panes open, "3" has to be findable in the work area and
+                // not only in the column. Numbering follows the tab's key order,
+                // which is the order the panes were opened.
+                let ordinal = multi.then(|| {
+                    tab.panes
+                        .keys()
+                        .position(|key| *key == id)
+                        .map_or(0, |index| index + 1)
+                });
 
                 let mut card = div()
                     .flex_1()
@@ -2005,6 +2015,7 @@ impl Workspace {
                     let live_size = self.resize_drag.is_some().then(|| dims.get());
                     card = card.child(pane_header(
                         id,
+                        ordinal,
                         name,
                         detail,
                         if exit.is_some() {
@@ -4038,13 +4049,24 @@ impl Workspace {
             }
 
             let labels: Vec<String> = tab.panes.values().map(pane_label).collect();
-            let glyphs = rail_glyphs(&labels);
 
+            // `panes` is a `BTreeMap` keyed by the pane id, so this iteration is
+            // the order the panes were opened — the same order the layout grows
+            // in, and the order `render_node` numbers the headers with. The chip
+            // and the badge have to agree, or the rail is pointing at a pane the
+            // user cannot find.
             for (index, (id, pane)) in tab.panes.iter().enumerate() {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
-                let glyph = glyphs[index].clone();
+                // A grouped tab numbers its panes, because that number is what
+                // the pane headers wear. A one-pane tab shows the shell's
+                // initial instead: the mark is the only thing to identify.
+                let glyph = if grouped {
+                    (index + 1).to_string()
+                } else {
+                    rail_initial(&labels[index])
+                };
                 let hover_bg = theme.muted;
                 // On the accent fill the letter has to be the window's ink, not
                 // its text colour: the accent is light in dark mode and dark in
@@ -4659,6 +4681,7 @@ fn sidebar_handle(
 #[allow(clippy::too_many_arguments)]
 fn pane_header(
     id: u64,
+    ordinal: Option<usize>,
     name: String,
     detail: Option<String>,
     status: PaneStatus,
@@ -4705,6 +4728,31 @@ fn pane_header(
                 })
                 .child(name),
         )
+        // The ordinal rides with the name rather than on the header's leading
+        // edge: the name shares its 10px spine with the terminal's first column,
+        // and putting a tile in front of it would push that spine 26px right.
+        // Right after the name it reads as part of the label — "pwsh 3" — which
+        // is exactly the question ("is this the pane my chip says 3?").
+        .when_some(ordinal, |this, number| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .bg(if focused { theme.ring } else { theme.muted })
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if focused {
+                        theme.background
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(number.to_string()),
+            )
+        })
         .child(
             // The shell's own title when it says more than its name — a path is
             // what tells two `pwsh` panes apart. Quiet, allowed to vanish.
@@ -5079,7 +5127,10 @@ fn pane_action(
         .items_center()
         .justify_center()
         .size(px(24.0))
-        .rounded(px(999.0))
+        // The same rounded square as the title bar's buttons, one step tighter:
+        // 24px with a 6px corner. A circle inside a rounded card was the one
+        // shape in the window that belonged to no family.
+        .rounded(px(6.0))
         .bg(theme.background)
         .border_1()
         .border_color(theme.border)
@@ -5515,27 +5566,7 @@ fn rail_initial(label: &str) -> String {
     )
 }
 
-/// The character each pane in one tab gets at rail width.
-///
-/// Two panes called `pwsh` would otherwise both show `P` and the column would be
-/// back to identical dots. When a tab's panes collide on their first character,
-/// the pane's position stands in, so every chip in the group is distinct.
-fn rail_glyphs(labels: &[String]) -> Vec<String> {
-    let initials: Vec<String> = labels.iter().map(|label| rail_initial(label)).collect();
-    initials
-        .iter()
-        .enumerate()
-        .map(|(index, initial)| {
-            if initials.iter().filter(|other| *other == initial).count() > 1 {
-                (index + 1).to_string()
-            } else {
-                initial.clone()
-            }
-        })
-        .collect()
-}
-
-/// A round icon-only button.
+/// A rounded icon-only button.
 ///
 /// Icon-only controls carry no visible label, so the caller must pass an id that
 /// also reads as a name. `size` is the frame, and the glyph follows it: the title
@@ -5551,15 +5582,18 @@ fn icon_button(
     // bar's buttons already use: 16 px inside 28.
     let glyph = icon_data(icon, (size * 0.57).round(), theme.muted_foreground);
 
-    // Round, like every other control in the bar. A square icon button next to
-    // pill-shaped tabs reads as a different design language.
+    // A rounded square, not a circle. The circle was left over from a bar whose
+    // other controls were pills; with tabs gone from the bar there is nothing to
+    // echo, and a 28px circle at this size reads as a dot rather than as a
+    // button. Eight pixels is the same corner the app mark wears one button
+    // away, so the row looks like one row.
     div()
         .id(id)
         .flex()
         .items_center()
         .justify_center()
         .size(px(size))
-        .rounded(px(999.0))
+        .rounded(px(8.0))
         .cursor_pointer()
         .hover(move |this| this.bg(theme.muted))
         .child(glyph)
