@@ -9,7 +9,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
-  <img src="docs/screenshot.png" alt="myterm 的窗口：左侧一栏标签，右侧是终端卡片" width="880">
+  <img src="docs/screenshot.png" alt="myterm 的窗口：左侧窄条是标签与窗格序号，右侧两张终端卡片各带窗格头" width="880">
 </picture>
 
 终端渲染、键盘与中文输入、多标签、分屏与拖动比例、选区与复制、滚轮回滚、Kitty 图形协议、深浅主题、自动更新与安装都已人工验证。设计取舍写在 [docs/design.md](docs/design.md)。
