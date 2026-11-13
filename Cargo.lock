@@ -3873,7 +3873,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "myterm"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "env_logger",
  "gpui-kit",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "pty"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "log",
  "portable-pty",
@@ -7098,7 +7098,7 @@ dependencies = [
 
 [[package]]
 name = "vt"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "log",
  "vt-sys",
@@ -7106,7 +7106,7 @@ dependencies = [
 
 [[package]]
 name = "vt-sys"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "waker-fn"
