@@ -11,8 +11,8 @@
 // through the console it would otherwise inherit.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod grid_element;
 mod config;
+mod grid_element;
 mod install;
 mod layout;
 mod palette;
@@ -84,6 +84,14 @@ const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 /// sits at the leading edge as the window's identity, and using it twice in one
 /// bar leaves the second copy with no reason to look clickable.
 const INFO_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></svg>"#;
+
+/// Three sliders: the settings entry in the title bar.
+///
+/// Not a gear. A gear at sixteen pixels is a circle with bumps, and the bar
+/// already holds a circled `i` two buttons away — at that size the two would be
+/// the same grey dot with a different fringe. Sliders keep their shape when they
+/// are small, and they name the idea rather than the object.
+const SETTINGS_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 5h-7"/><path d="M10 5H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 19h-5"/><path d="M12 19H3"/><circle cx="12" cy="5" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="19" r="2"/></svg>"#;
 
 /// The theme toggle: a sun in light mode, a moon in dark mode.
 const THEME_SUN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
@@ -416,15 +424,51 @@ struct PaletteCommand {
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
-    PaletteCommand { id: "new-tab", label: "新建标签", keys: "Ctrl+Shift+T" },
-    PaletteCommand { id: "close-tab", label: "关闭标签", keys: "Ctrl+Shift+W" },
-    PaletteCommand { id: "split-right", label: "拆分到右侧", keys: "Ctrl+Shift+D" },
-    PaletteCommand { id: "split-down", label: "拆分到下方", keys: "Ctrl+Shift+E" },
-    PaletteCommand { id: "zoom", label: "缩放当前窗格", keys: "Ctrl+Shift+Z" },
-    PaletteCommand { id: "theme", label: "切换明暗主题", keys: "Ctrl+Shift+L" },
-    PaletteCommand { id: "find", label: "在当前窗格内查找", keys: "Ctrl+Shift+F" },
-    PaletteCommand { id: "settings", label: "设置", keys: "Ctrl+," },
-    PaletteCommand { id: "close-window", label: "关闭窗口", keys: "Ctrl+Shift+Q" },
+    PaletteCommand {
+        id: "new-tab",
+        label: "新建标签",
+        keys: "Ctrl+Shift+T",
+    },
+    PaletteCommand {
+        id: "close-tab",
+        label: "关闭标签",
+        keys: "Ctrl+Shift+W",
+    },
+    PaletteCommand {
+        id: "split-right",
+        label: "拆分到右侧",
+        keys: "Ctrl+Shift+D",
+    },
+    PaletteCommand {
+        id: "split-down",
+        label: "拆分到下方",
+        keys: "Ctrl+Shift+E",
+    },
+    PaletteCommand {
+        id: "zoom",
+        label: "缩放当前窗格",
+        keys: "Ctrl+Shift+Z",
+    },
+    PaletteCommand {
+        id: "theme",
+        label: "切换明暗主题",
+        keys: "Ctrl+Shift+L",
+    },
+    PaletteCommand {
+        id: "find",
+        label: "在当前窗格内查找",
+        keys: "Ctrl+Shift+F",
+    },
+    PaletteCommand {
+        id: "settings",
+        label: "设置",
+        keys: "Ctrl+,",
+    },
+    PaletteCommand {
+        id: "close-window",
+        label: "关闭窗口",
+        keys: "Ctrl+Shift+Q",
+    },
 ];
 
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
@@ -1724,6 +1768,7 @@ impl Render for Workspace {
         // still has exactly one title row. The list is always there: it is the
         // tab surface now, not an accessory that can be switched off.
         let mut content = div()
+            .relative()
             .flex_1()
             .min_h_0()
             .flex()
@@ -1807,6 +1852,14 @@ impl Render for Workspace {
                 ),
         );
 
+        // The settings sheet is a child of `content`, not of the window body:
+        // hung from the body it would start at the window's top edge and cover
+        // the title bar — including the controls that close it. Anchored here it
+        // opens under the bar, beside the sidebar, over the work it is tuning.
+        if self.settings {
+            content = content.child(self.render_settings(&theme, cx));
+        }
+
         body = body.child(content);
 
         if let Some(menu) = self.menu {
@@ -1828,10 +1881,6 @@ impl Render for Workspace {
 
         if self.closing {
             body = body.child(self.render_close_prompt(&theme, cx));
-        }
-
-        if self.settings {
-            body = body.child(self.render_settings(&theme, cx));
         }
 
         body
@@ -2354,13 +2403,18 @@ impl Workspace {
                 workspace.close_tab(tab, cx);
             },
         ));
-        let close_others = menu_row("menu-close-others", "关闭其他标签", self.tabs.len() > 1, &theme)
-            .on_click(cx.listener(
-                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                    workspace.menu = None;
-                    workspace.close_others(tab, cx);
-                },
-            ));
+        let close_others = menu_row(
+            "menu-close-others",
+            "关闭其他标签",
+            self.tabs.len() > 1,
+            &theme,
+        )
+        .on_click(
+            cx.listener(move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                workspace.menu = None;
+                workspace.close_others(tab, cx);
+            }),
+        );
         let copy = menu_row("menu-copy", "复制标签标题", true, &theme).on_click(cx.listener(
             move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(title.clone()));
@@ -2586,11 +2640,17 @@ impl Workspace {
 
     /// The settings sheet.
     ///
-    /// A 360px drawer pinned to the window's trailing edge, with no scrim: every
-    /// row takes effect immediately, and half the value of a font-size setting
-    /// is watching the terminal behind it change size. A dimmed backdrop would
-    /// hide the very thing being tuned, and a modal one would stop the shell
-    /// from accepting keys while the user is still working in it.
+    /// One surface, not two. An earlier version pinned the sheet to the window
+    /// and then drew a second card inside it — 430px wide in a 360px drawer,
+    /// with its own padding, border, fill and shadow. The rows were laid out at
+    /// 398px inside a 328px box, so the right-hand controls were clipped, and the
+    /// panel read as a card floating on a card that happened to be a drawer. The
+    /// sheet is the surface now: its own edge, its own inset, nothing nested.
+    ///
+    /// It hangs under the title bar (`render` mounts it inside the content
+    /// region), so it never covers the bar or the controls that close it, and it
+    /// keeps no scrim: every row takes effect immediately, and half the value of
+    /// a font-size setting is watching the terminal behind it change size.
     fn render_settings(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -2672,10 +2732,17 @@ impl Workspace {
             );
 
         let session = div().flex().flex_row().gap(px(4.0)).child(
-            setting_chip("settings-restore", if restore { "开" } else { "关" }, restore, theme)
-                .on_click(cx.listener(move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+            setting_chip(
+                "settings-restore",
+                if restore { "开" } else { "关" },
+                restore,
+                theme,
+            )
+            .on_click(cx.listener(
+                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                     workspace.set_restore(!restore, cx);
-                })),
+                },
+            )),
         );
 
         div()
@@ -2686,51 +2753,54 @@ impl Workspace {
             .w(px(360.0))
             .flex()
             .flex_col()
-            .gap(px(2.0))
-            .p(px(16.0))
+            .overflow_hidden()
             .bg(theme.popover)
             .border_l_1()
             .border_color(theme.border)
             .shadow_lg()
+            // A press inside the sheet is the sheet's. Without this the click
+            // falls through to the pane underneath and puts the caret there,
+            // which is a strange thing to happen while you are changing a setting.
+            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+            })
             .child(
                 div()
-                    .w(px(430.0))
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .p(px(16.0))
-                    .rounded(px(12.0))
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
-                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                    })
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .flex_shrink_0()
+                    .px(px(16.0))
+                    .pt(px(14.0))
+                    .pb(px(10.0))
                     .child(
                         div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .pb(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child("设置"),
-                            )
-                            .child(pane_action(
-                                "settings-close",
-                                WINDOW_CLOSE,
-                                theme,
-                                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                    workspace.settings = false;
-                                    cx.notify();
-                                }),
-                            )),
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("设置"),
                     )
+                    .child(pane_action(
+                        "settings-close",
+                        WINDOW_CLOSE,
+                        theme,
+                        cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                            workspace.settings = false;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            // The rows own one inset, and it is the sheet's: sixteen pixels from
+            // the edge, the same as the header above them, so the title, the
+            // labels and the footer share a leading spine.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(16.0))
                     .child(setting_row(
                         "外观",
                         "跟随系统时按桌面的明暗设置",
@@ -2756,9 +2826,10 @@ impl Workspace {
                             .text_color(muted)
                             .child(format!(
                                 "保存在 {}",
-                                config::Config::location().unwrap_or_else(|| "本机设置目录".to_owned())
+                                config::Config::location()
+                                    .unwrap_or_else(|| "本机设置目录".to_owned())
                             )),
-                    )
+                    ),
             )
             .into_any_element()
     }
@@ -3628,11 +3699,13 @@ impl Workspace {
                     .text_size(px(11.5))
                     .text_color(muted)
                     .hover(move |this| this.bg(hover))
-                    .on_click(cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.restore = None;
-                        session::Snapshot::clear();
-                        cx.notify();
-                    }))
+                    .on_click(
+                        cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                            workspace.restore = None;
+                            session::Snapshot::clear();
+                            cx.notify();
+                        }),
+                    )
                     .child("不恢复"),
             )
             .child(
@@ -3717,13 +3790,7 @@ impl Workspace {
             // placed between rows rather than drawn on one: an insertion point
             // is a gap in the list, not a property of a row.
             if drop_target == Some(tab_index) && dragging_tab != Some(tab_index) {
-                list = list.child(
-                    div()
-                        .h(px(2.0))
-                        .mx(px(8.0))
-                        .rounded(px(1.0))
-                        .bg(theme.ring),
-                );
+                list = list.child(div().h(px(2.0)).mx(px(8.0)).rounded(px(1.0)).bg(theme.ring));
             }
 
             // The cross belongs to the tab you are looking at: on every tab it
@@ -3972,12 +4039,18 @@ impl Workspace {
                 let status = pane_status(pane);
                 let glyph = glyphs[index].clone();
                 let hover_bg = theme.muted;
-                let text_color = match status {
+                // On the accent fill the letter has to be the window's ink, not
+                // its text colour: the accent is light in dark mode and dark in
+                // light mode, so `background` is the one token that always
+                // contrasts with it.
+                let text_color = if selected {
+                    theme.background
+                } else if matches!(status, PaneStatus::Exited) {
                     // A dead shell is the one state worth interrupting for, so
                     // it keeps a colour even when it is not the focused chip.
-                    PaneStatus::Exited => theme.danger,
-                    _ if selected => theme.foreground,
-                    _ => theme.muted_foreground,
+                    theme.danger
+                } else {
+                    theme.muted_foreground
                 };
 
                 capsule = capsule.child(
@@ -3996,14 +4069,20 @@ impl Workspace {
                         .w_full()
                         .h(px(CHIP))
                         .rounded(px(8.0))
-                        .relative()
                         .cursor_pointer()
-                        // Selection keeps the deepest surface, the same one the
-                        // grid draws on: the chip is a small screen and the
-                        // focused one is the one you are looking into. Activity
-                        // is the rule below, so a working pane still reads as
-                        // working while it is focused.
-                        .when(selected, |this| this.bg(theme.background))
+                        // Selection is the loud one. In the rail the user is
+                        // scanning for one thing — which pane has the keyboard —
+                        // and the panes are thirty pixels wide, so anything
+                        // quieter loses to the column: a dark chip among dark
+                        // chips reads as no chip at all. The accent fill is the
+                        // same accent the focused pane's card wears, moved from
+                        // its outline to its whole face so it can be found at a
+                        // glance and from across the room.
+                        //
+                        // Activity is left to the unselected chips, as a wash:
+                        // it is the second question, and it must not compete
+                        // with the first answer.
+                        .when(selected, |this| this.bg(theme.ring))
                         .when(!selected, |this| this.bg(rail_tint(status, theme)))
                         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -4013,22 +4092,14 @@ impl Workspace {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(if selected {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
                                 .text_color(text_color)
                                 .child(glyph),
-                        )
-                        .when_some(rail_bar(status, theme), |this, color| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .left(px(6.0))
-                                    .right(px(6.0))
-                                    .bottom(px(2.0))
-                                    .h(px(2.0))
-                                    .rounded(px(1.0))
-                                    .bg(color),
-                            )
-                        }),
+                        ),
                 );
             }
 
@@ -4304,6 +4375,22 @@ impl Workspace {
                     workspace.toggle_theme(cx);
                 })),
             )
+            // Settings is a visible object in the bar, not a chord people have to
+            // know: the sheet holds the preferences that change the whole window,
+            // and a window that can only be configured through a hidden key is a
+            // window you cannot configure. `Ctrl+,` stays as the fast path.
+            .child({
+                let mark = theme.muted_foreground;
+                Button::new("settings")
+                    .text()
+                    .compact()
+                    .tooltip("设置 (Ctrl+,)")
+                    .accessibility_label("设置")
+                    .on_click(cx.listener(|workspace, _, _, cx| {
+                        workspace.toggle_settings(cx);
+                    }))
+                    .child(icon_data(SETTINGS_ICON, 16.0, mark))
+            })
             // The update badge sits with the app's own controls, not with the
             // window's: it is about this program, not about the window.
             .when_some(self.update_badge(), |this, (label, ready)| {
@@ -4805,12 +4892,7 @@ fn about_card(
                 .flex_col()
                 .gap(px(7.0))
                 .mt(px(12.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(muted)
-                        .child("键位"),
-                )
+                .child(div().text_size(px(10.0)).text_color(muted).child("键位"))
                 .child(key_row("Ctrl+Shift+T", "新建标签"))
                 .child(key_row("Ctrl+Shift+W", "关闭窗格"))
                 .child(key_row("Ctrl+Shift+D / E", "拆分到右侧 / 下方"))
@@ -5734,41 +5816,18 @@ fn status_glyph(status: PaneStatus, theme: &gpui_kit::component::Theme) -> impl 
         })
 }
 
-/// The surface a rail chip wears.
+/// The surface a rail chip wears when it is not the selected one.
 ///
-/// The chip is the one place in the app with no room for a status word, so
-/// state has to be carried by the surface itself. Two channels, kept separate:
-/// selection raises the chip to `surface`, while activity is a two-pixel rule at
-/// the chip's foot (`rail_bar`). A 14% tint was the first attempt and it failed
-/// in dark mode — over a capsule that is itself a muted wash, a lime wash that
-/// low is a few points of luminance and reads as nothing.
-///
-/// Idle keeps a small neutral lift rather than none: without it the chip has no
-/// edge at all against the capsule, and the letter floats in the column.
+/// Selection is the accent fill; this is only the second question — is anything
+/// happening in the panes I am not in. Idle keeps none of it: most panes are idle
+/// at any moment, and a wash on all of them would be the loudest thing in a
+/// column whose job is to point at one. Working borrows the accent at low
+/// strength, a dead shell borrows danger.
 fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
     match status {
-        // 18% of the accent over the capsule is about 1.6:1 against it, enough
-        // to see from a metre away; 14% was 1.4:1 and disappeared next to the
-        // selected chip.
-        PaneStatus::Working => theme.ring.opacity(0.18),
-        PaneStatus::Exited => theme.danger.opacity(0.16),
-        // Just enough lift to give the chip an edge: 9% of the muted text tone
-        // lands near 1.18:1, which is a tile rather than a smudge.
-        PaneStatus::Idle => theme.muted_foreground.opacity(0.09),
-    }
-}
-
-/// The rule a rail chip carries while its shell is not at rest.
-///
-/// The same shape language as the pane header — colour is the second channel,
-/// not the first — reduced to the one form that fits a thirty-pixel chip. A line
-/// survives being scaled down and can be seen at the edge of vision; a dot
-/// cannot.
-fn rail_bar(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Option<Hsla> {
-    match status {
-        PaneStatus::Working => Some(theme.ring),
-        PaneStatus::Exited => Some(theme.danger),
-        PaneStatus::Idle => None,
+        PaneStatus::Working => theme.ring.opacity(0.22),
+        PaneStatus::Exited => theme.danger.opacity(0.18),
+        PaneStatus::Idle => theme.background.opacity(0.0),
     }
 }
 
@@ -5789,7 +5848,8 @@ fn pane_detail(pane: &Pane) -> Option<String> {
     (!title.is_empty() && title != name).then(|| title.to_owned())
 }
 
-fn pane_label(pane: &Pane) -> String {    tab_title(pane).unwrap_or_else(|| {
+fn pane_label(pane: &Pane) -> String {
+    tab_title(pane).unwrap_or_else(|| {
         // `Path` handles both separators, which matters on Windows where a
         // program path arrives with backslashes.
         let program = &pane.command.program;
@@ -6094,4 +6154,3 @@ fn main() {
             .expect("failed to open window");
         });
 }
-

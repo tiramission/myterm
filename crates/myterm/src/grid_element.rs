@@ -288,8 +288,9 @@ impl Element for TerminalGrid {
                     repaint = true;
                 }
 
-                if let Some((_, _, is_current)) =
-                    hits.iter().find(|(start, end, _)| (*start..=*end).contains(&x))
+                if let Some((_, _, is_current)) = hits
+                    .iter()
+                    .find(|(start, end, _)| (*start..=*end).contains(&x))
                 {
                     bg = blend(bg, style.selection, if *is_current { 0.55 } else { 0.26 });
                     repaint = true;

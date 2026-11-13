@@ -119,7 +119,9 @@ mod tests {
 
     #[test]
     fn a_single_tab_is_not_worth_restoring() {
-        assert!(parse("pwsh\u{1f}C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\pwsh.exe\n").is_none());
+        assert!(
+            parse("pwsh\u{1f}C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\pwsh.exe\n").is_none()
+        );
     }
 
     #[test]
