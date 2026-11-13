@@ -1829,6 +1829,7 @@ impl Render for Workspace {
         content = content.child(
             div()
                 .flex_1()
+                .min_w_0()
                 .min_h_0()
                 .flex()
                 .flex_col()
@@ -1844,6 +1845,7 @@ impl Render for Workspace {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .min_h_0()
                         .flex()
                         .pr(px(PANE_GAP))
@@ -2085,12 +2087,6 @@ impl Workspace {
                     .render_node(second, tab, style, theme, multi, active, cx)
                     .into_any_element();
 
-                // The ratio is applied as a flex basis so the engine distributes
-                // the remaining space; a literal width would not account for a
-                // neighbouring split.
-                let first_share = (ratio.clamp(0.05, 0.95) * 1000.0).round();
-                let second_share = 1000.0 - first_share;
-
                 // The divider is a real flex child rather than a gap: a gap
                 // cannot be grabbed, and splitting a window by eye is the one
                 // adjustment a terminal user makes constantly. It stays one
@@ -2102,11 +2098,20 @@ impl Workspace {
                 // The wrapper carries the basis, and it is itself a flex container so
                 // the pane inside can fill it. Without that the pane has no box to
                 // stretch into and collapses to nothing.
+                // The basis is zero and the ratio is the *growth* factor, not a
+                // width. Two 50% bases plus a ten-pixel divider add up to more
+                // than the container, and the surplus is taken out of whatever
+                // the split sits nearest — here, the ten-pixel gutter the window
+                // keeps on its trailing and bottom edges. Dividing the space
+                // that is actually left after the divider is the only arithmetic
+                // that survives a split of a split.
                 container
                     .child(
                         div()
                             .flex()
-                            .flex_basis(relative(first_share / 1000.0))
+                            .flex_grow(ratio.clamp(0.05, 0.95))
+                            .flex_shrink(1.0)
+                            .flex_basis(relative(0.0))
                             .min_w_0()
                             .min_h_0()
                             .child(first_el),
@@ -2115,7 +2120,9 @@ impl Workspace {
                     .child(
                         div()
                             .flex()
-                            .flex_basis(relative(second_share / 1000.0))
+                            .flex_grow(1.0 - ratio.clamp(0.05, 0.95))
+                            .flex_shrink(1.0)
+                            .flex_basis(relative(0.0))
                             .min_w_0()
                             .min_h_0()
                             .child(second_el),
@@ -4663,6 +4670,14 @@ fn pane_header(
 ) -> impl IntoElement {
     div()
         .flex_shrink_0()
+        // The row has to take the card's width rather than its own content's.
+        // The header is a flex row of name, title, state and actions; a shell
+        // that reports a long title — a WindowsApps path is seventy characters —
+        // otherwise lays the row out at its own preferred width, pushes the
+        // state dot and the actions past the card's edge, and paints the title
+        // out over the chrome and off the window.
+        .w_full()
+        .min_w_0()
         .h(px(PANE_HEADER_HEIGHT))
         .flex()
         .flex_row()
