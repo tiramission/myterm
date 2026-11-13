@@ -107,6 +107,10 @@ const CHIP_RADIUS: f32 = 10.0;
 /// at rest, and the pointer is the only thing that shows it can be moved.
 const PANE_GAP: f32 = 10.0;
 
+/// The leading inset of a pane's contents. The header's name and the grid's
+/// first cell both start here, which is what makes them read as one column.
+const PANE_TEXT_INSET: f32 = 10.0;
+
 /// Width of the tab list.
 const SIDEBAR_WIDTH: f32 = 214.0;
 
@@ -338,6 +342,13 @@ struct ResizeDrag {
     ratio: f32,
 }
 
+/// A tab's context menu: which row opened it, and where it opened.
+#[derive(Clone, Copy)]
+struct TabMenu {
+    tab: usize,
+    position: Point<Pixels>,
+}
+
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
     tabs: Vec<Tab>,
@@ -397,6 +408,8 @@ pub struct Workspace {
     sidebar_drag: Option<SidebarDrag>,
     /// Whether Tab has been claimed from the focus system. Registered once.
     tab_claimed: bool,
+    /// The open tab context menu, if any.
+    menu: Option<TabMenu>,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -444,6 +457,7 @@ impl Workspace {
             sidebar_expanded: SIDEBAR_WIDTH,
             sidebar_drag: None,
             tab_claimed: false,
+            menu: None,
             resize_drag: None,
             focus: cx.focus_handle(),
             images: Rc::new(RefCell::new(ImageCache::default())),
@@ -808,6 +822,50 @@ impl Workspace {
         let mods = keystroke.modifiers;
 
         // App shortcuts come first: they must not reach the shell.
+        if keystroke.key == "escape" && self.menu.is_some() {
+            self.menu = None;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+
+        if mods.control && keystroke.key == "tab" {
+            let count = self.tabs.len();
+            if count > 1 {
+                let next = if mods.shift {
+                    (self.active_tab + count - 1) % count
+                } else {
+                    (self.active_tab + 1) % count
+                };
+                self.select_tab(next, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+
+        // `Ctrl+1..9` jumps straight to a tab; nine means the last one, which is
+        // what every tabbed desktop app does with the ninth slot. These are
+        // outside the `Ctrl+Shift` namespace because a shell has no use for them
+        // and the bare chords are quicker to reach.
+        if mods.control
+            && !mods.shift
+            && !mods.alt
+            && let Ok(number) = keystroke.key.parse::<usize>()
+        {
+            if (1..=9).contains(&number) && !self.tabs.is_empty() {
+                let index = if number == 9 {
+                    self.tabs.len() - 1
+                } else {
+                    number - 1
+                };
+                if index < self.tabs.len() {
+                    self.select_tab(index, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         if mods.control && mods.shift {
             match keystroke.key.as_str() {
                 // Copy and paste are `Ctrl+Shift+C` / `Ctrl+Shift+V`, not the
@@ -841,7 +899,10 @@ impl Workspace {
                     return;
                 }
                 "q" => {
-                    self.close_tab(self.active_tab, cx);
+                    // Q belongs to Quit on every desktop. Closing a tab is what
+                    // `Ctrl+Shift+W` already does when it is the last pane, so
+                    // the two no longer need separate keys.
+                    self.close_window(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1477,6 +1538,19 @@ impl Render for Workspace {
 
         body = body.child(content);
 
+        if let Some(menu) = self.menu {
+            let size = window.bounds().size;
+            body = body.child(self.render_tab_menu(
+                menu,
+                Point {
+                    x: size.width,
+                    y: size.height,
+                },
+                &theme,
+                cx,
+            ));
+        }
+
         body
     }
 }
@@ -1530,6 +1604,7 @@ impl Workspace {
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
                 let name = pane_label(pane);
+                let detail = pane_detail(pane);
                 let zoomed = self.zoomed == Some(id);
                 let show_header = multi || zoomed;
 
@@ -1543,12 +1618,18 @@ impl Workspace {
                     .overflow_hidden()
                     .group("pane")
                     .rounded(px(PANE_RADIUS))
-                    // No edge of its own. The card is the one white surface on a
-                    // warm ground, and the tone difference is what says "this is
-                    // the work" — a hairline on top of it was a second way of
-                    // saying the same thing, and the ground it sat on used to be
-                    // white too, which is why the line had to be there at all.
+                    // One hairline, always. The card and the chrome are close
+                    // in tone on purpose, and tone alone cannot carry the edge
+                    // at 1.2:1 — the line is what makes the gap read as a gap.
+                    // The focused card swaps its hairline for the accent instead
+                    // of growing a second ring, so focus never moves a pixel.
                     .bg(style.background)
+                    .border_1()
+                    .border_color(if multi && focused {
+                        theme.ring
+                    } else {
+                        theme.border
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
@@ -1577,9 +1658,14 @@ impl Workspace {
                     card = card.child(pane_header(
                         id,
                         name,
+                        detail,
+                        if exit.is_some() {
+                            PaneStatus::Exited
+                        } else {
+                            pane_status(pane)
+                        },
                         focused,
                         zoomed,
-                        exit.is_some(),
                         theme,
                         cx,
                     ));
@@ -1587,13 +1673,15 @@ impl Workspace {
 
                 // The terminal takes the rest of the card. Insetting it keeps the
                 // text off the rounded corners and gives the block cursor a
-                // margin at the edge of the pane.
+                // margin at the edge of the pane. The leading inset is the same
+                // number the header's name starts on, so the header and the first
+                // line of output share one spine.
                 card = card.child(
                     div()
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .mx(px(6.0))
+                        .mx(px(PANE_TEXT_INSET))
                         .mb(px(6.0))
                         .when(!show_header, |this| this.mt(px(6.0)))
                         .child(TerminalGrid::new(
@@ -1607,19 +1695,7 @@ impl Workspace {
                             self.focus.clone(),
                             self.images.clone(),
                             id,
-                        ))
-                        // A pane the user is not in recedes: the card's surface
-                        // lifts and the text fades behind a veil, so attention
-                        // follows the caret without a border having to shout.
-                        .when(multi && !focused, |this| {
-                            this.child(div().absolute().inset_0().bg(theme.background.opacity(
-                                if theme.mode == gpui_kit::component::ThemeMode::Light {
-                                    0.3
-                                } else {
-                                    0.42
-                                },
-                            )))
-                        }),
+                        )),
                 );
 
                 card.when_some(exit, |this, code| {
@@ -1782,6 +1858,166 @@ impl Workspace {
         self.tabs.clear();
         window.remove_window();
     }
+}
+
+impl Workspace {
+    /// Opens the tab menu for `tab` at the pointer.
+    ///
+    /// Right click does not select the row it lands on: the menu acts on that
+    /// row, and silently switching the focused terminal because a menu was
+    /// opened somewhere else would be a click with two meanings.
+    fn open_tab_menu(&mut self, tab: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if tab >= self.tabs.len() {
+            return;
+        }
+        self.menu = Some(TabMenu { tab, position });
+        cx.notify();
+    }
+
+    /// The tab menu, as one card over a click-away layer.
+    fn render_tab_menu(
+        &self,
+        menu: TabMenu,
+        max: Point<Pixels>,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        /// Menu width, also the amount kept inside the window on the right.
+        const WIDTH: f32 = 196.0;
+        /// Menu height for the clamp: three rows, a separator and padding.
+        const HEIGHT: f32 = 116.0;
+
+        let theme = theme.clone();
+        let tab = menu.tab;
+        let title = self
+            .tabs
+            .get(tab)
+            .map(|tab| tab.title.clone())
+            .unwrap_or_default();
+        let closable = self.tabs.len() > 1;
+
+        // A menu opened near an edge flips instead of being clipped by it.
+        let x = menu.position.x.as_f32();
+        let y = menu.position.y.as_f32();
+        let left = if x + WIDTH > max.x.as_f32() {
+            (x - WIDTH).max(0.0)
+        } else {
+            x
+        };
+        let top = if y + HEIGHT > max.y.as_f32() {
+            (y - HEIGHT).max(0.0)
+        } else {
+            y
+        };
+
+        let close = menu_row("menu-close", "关闭标签", closable, &theme).on_click(cx.listener(
+            move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                workspace.menu = None;
+                workspace.close_tab(tab, cx);
+            },
+        ));
+        let close_others = menu_row("menu-close-others", "关闭其他标签", self.tabs.len() > 1, &theme)
+            .on_click(cx.listener(
+                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                    workspace.menu = None;
+                    workspace.close_others(tab, cx);
+                },
+            ));
+        let copy = menu_row("menu-copy", "复制标签标题", true, &theme).on_click(cx.listener(
+            move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(title.clone()));
+                workspace.menu = None;
+                cx.notify();
+            },
+        ));
+
+        div()
+            .absolute()
+            .inset_0()
+            // Clicking anywhere else dismisses. The card below stops its own
+            // presses, so a menu row is never mistaken for the dismissal.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.menu = None;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.menu = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(WIDTH))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .p(px(4.0))
+                    .rounded(px(10.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(close)
+                    .child(close_others)
+                    .child(div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(theme.border))
+                    .child(copy),
+            )
+            .into_any_element()
+    }
+
+    /// Closes every tab but one.
+    fn close_others(&mut self, keep: usize, cx: &mut Context<Self>) {
+        if keep >= self.tabs.len() {
+            return;
+        }
+        let kept = self.tabs.remove(keep);
+        self.tabs.clear();
+        self.tabs.push(kept);
+        self.active_tab = 0;
+        self.menu = None;
+        cx.notify();
+    }
+}
+
+/// One row of a menu: the same row every menu in the app uses.
+fn menu_row(
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    theme: &gpui_kit::component::Theme,
+) -> Stateful<Div> {
+    let hover = theme.muted;
+    let text = if enabled {
+        theme.foreground
+    } else {
+        theme.muted_foreground
+    };
+
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(28.0))
+        .px(px(8.0))
+        .rounded(px(6.0))
+        .text_size(px(12.0))
+        .text_color(text)
+        .when(enabled, |this| {
+            this.cursor_pointer().hover(move |this| this.bg(hover))
+        })
+        .child(label)
 }
 
 impl Workspace {
@@ -2243,11 +2479,12 @@ impl Workspace {
                 list = list.child(div().h(px(8.0)));
             }
 
-            // The cross belongs to the tab you are looking at. On every tab it
+            // The cross belongs to the tab you are looking at: on every tab it
             // turns the list into a column of identical buttons, and the one you
             // might hit by accident is the one you did not mean to close.
-            // Closing another tab is one click away: select it, then close it.
-            let closable = current_tab && self.tabs.len() > 1;
+            // It is revealed on hover for the rest, so closing another tab no
+            // longer costs a select first.
+            let closable = self.tabs.len() > 1;
 
             if grouped {
                 list = list.child(sidebar_group_row(
@@ -2620,13 +2857,87 @@ impl Workspace {
                     .child(icon_data(APP_MARK, 16.0, theme.ring)),
             );
 
-        // Everything between the mark and the controls is drag area. The tabs
-        // used to live here; they are in the sidebar now, which leaves the bar
-        // with one job: move the window.
+        // Everything between the mark and the controls was drag area, and the
+        // tabs used to live here. They are in the sidebar now, which left the
+        // bar with one job — moving the window — and no answer to "which window
+        // is this". The platform only ever reads the title, so the title is
+        // where the answer goes: the current tab, and whatever its shell says
+        // about where it is.
+        let identity = self.active_tab().map(|tab| {
+            (
+                tab.title.clone(),
+                tab.panes.values().next().and_then(pane_detail),
+                tab.panes.len(),
+            )
+        });
+        if let Some((title, detail, panes)) = identity {
+            let muted = theme.muted_foreground;
+            let text = theme.foreground;
+            let wash = theme.muted;
+
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .h_full()
+                    .max_w(px(520.0))
+                    .px(px(8.0))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(200.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text)
+                            .child(title),
+                    )
+                    .when_some(detail, |this, detail| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child("·"),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(240.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child(detail),
+                        )
+                    })
+                    .when(panes > 1, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .px(px(7.0))
+                                .py(px(2.0))
+                                .rounded(px(999.0))
+                                .bg(wash)
+                                .text_size(px(10.5))
+                                .text_color(muted)
+                                .child(format!("{panes} 窗格")),
+                        )
+                    }),
+            );
+        }
+
+        // Everything between the identity and the controls is drag area.
         strip = strip
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
@@ -2979,42 +3290,42 @@ fn sidebar_handle(
 /// it.
 ///
 /// It only appears once the window is divided. A lone terminal is already named
-/// by the tab above it, and repeating that name in a second bar would spend
-/// forty pixels saying nothing.
+/// by the tab beside it, and repeating that name in a second bar would spend
+/// thirty pixels saying nothing.
+///
+/// The name starts on the grid's own leading spine. State sits at the trailing
+/// edge next to the actions, because a dot where the eye starts reading was
+/// competing with the name it was meant to annotate.
+#[allow(clippy::too_many_arguments)]
 fn pane_header(
     id: u64,
     name: String,
+    detail: Option<String>,
+    status: PaneStatus,
     focused: bool,
     zoomed: bool,
-    exited: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let dot = dot_color(
-        if exited {
-            PaneStatus::Exited
-        } else {
-            PaneStatus::Idle
-        },
-        focused,
-        theme,
-    );
-
     div()
         .flex_shrink_0()
         .h(px(PANE_HEADER_HEIGHT))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
-        .pl(px(11.0))
-        .pr(px(5.0))
-        .child(div().size(px(6.0)).rounded(px(999.0)).bg(dot))
+        .gap(px(8.0))
+        .pl(px(PANE_TEXT_INSET))
+        .pr(px(4.0))
         .child(
             div()
+                .flex_shrink_0()
+                .max_w(px(200.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .text_size(px(12.0))
                 .font_weight(if focused {
-                    FontWeight::BOLD
+                    FontWeight::SEMIBOLD
                 } else {
                     FontWeight::NORMAL
                 })
@@ -3025,17 +3336,41 @@ fn pane_header(
                 })
                 .child(name),
         )
-        .child(div().flex_1())
         .child(
-            // The pane's own actions. They fade in with the pointer, the way a
-            // hover toolbar does, so the header is a label at rest and a set of
-            // controls when it is being used.
+            // The shell's own title when it says more than its name — a path is
+            // what tells two `pwsh` panes apart. Quiet, allowed to vanish.
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(10.5))
+                .text_color(theme.muted_foreground)
+                .child(detail.unwrap_or_default()),
+        )
+        .child(
+            // State, as a shape first and a colour second: filled means writing,
+            // hollow means waiting, square means gone. Colour alone would leave
+            // the two commonest states identical to a colour-blind reader.
+            div()
+                .flex_shrink_0()
+                .w(px(8.0))
+                .flex()
+                .justify_center()
+                .mr(px(4.0))
+                .child(status_glyph(status, theme)),
+        )
+        .child(
+            // The pane's own actions. Quieter than a label, never gone: a
+            // control that only exists under the pointer does not exist for a
+            // keyboard or for a first run.
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(1.0))
-                .opacity(0.0)
+                .opacity(0.55)
                 .group_hover("pane", |this| this.opacity(1.0))
                 .child(pane_action(
                     ("pane-split-right", id),
@@ -3346,6 +3681,7 @@ fn sidebar_group_row(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let hover_bg = theme.muted;
+    let row_group = format!("side-tab-row-{tab_index}");
 
     div()
         .id(ElementId::Name(format!("side-tab-{tab_index}").into()))
@@ -3357,10 +3693,25 @@ fn sidebar_group_row(
         .px(px(8.0))
         .rounded(px(CHIP_RADIUS))
         .cursor_pointer()
+        .group(row_group.clone())
         .hover(move |this| this.bg(hover_bg))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
             workspace.select_tab(tab_index, cx);
         }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                workspace.open_tab_menu(tab_index, event.position, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |workspace, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                workspace.close_tab(tab_index, cx);
+            }),
+        )
         .child(
             div()
                 .flex_1()
@@ -3368,7 +3719,7 @@ fn sidebar_group_row(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(11.0))
+                .text_size(px(11.5))
                 .font_weight(if current {
                     FontWeight::SEMIBOLD
                 } else {
@@ -3377,24 +3728,30 @@ fn sidebar_group_row(
                 .text_color(if current {
                     theme.foreground
                 } else {
-                    theme.muted_foreground.opacity(0.8)
+                    theme.muted_foreground
                 })
                 .child(title),
         )
         .child(
             div()
                 .flex_shrink_0()
-                .text_size(px(10.0))
-                .text_color(theme.muted_foreground.opacity(0.6))
+                .text_size(px(10.5))
+                .text_color(theme.muted_foreground)
                 .child(pane_count.to_string()),
         )
         .when(closable, |this| {
-            this.child(sidebar_close_button(
-                format!("side-close-tab-{tab_index}"),
-                tab_index,
-                theme,
-                cx,
-            ))
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .opacity(if current { 1.0 } else { 0.0 })
+                    .group_hover(row_group, move |this| this.opacity(1.0))
+                    .child(sidebar_close_button(
+                        format!("side-close-tab-{tab_index}"),
+                        tab_index,
+                        theme,
+                        cx,
+                    )),
+            )
         })
 }
 
@@ -3451,6 +3808,11 @@ fn sidebar_pane_row(
     } else {
         theme.muted_foreground
     };
+    // The cross belongs to the row, not to the column: it appears when the
+    // pointer is on the row it would close, so close is one gesture away on any
+    // tab without turning the list into a stack of identical buttons.
+    let row_group = format!("side-row-{tab_index}-{id}");
+    let cross = if selected { 1.0 } else { 0.0 };
 
     div()
         // Pane ids restart at 1 in every tab, so the row has to carry the tab
@@ -3470,19 +3832,36 @@ fn sidebar_pane_row(
         .pr(px(8.0))
         .rounded(px(CHIP_RADIUS))
         .cursor_pointer()
+        .group(row_group.clone())
         .when(selected, |this| this.bg(selected_bg))
         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
             workspace.select_tab(tab_index, cx);
             workspace.focus_pane(id, cx);
         }))
+        // Right click asks the row what can be done to it. Middle click is the
+        // desktop shorthand for "close this", and it works on any tab without
+        // the row having to be current first.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                workspace.open_tab_menu(tab_index, event.position, cx);
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |workspace, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                workspace.close_tab(tab_index, cx);
+            }),
+        )
         .child(
-            div().w(px(7.0)).flex().justify_center().child(
-                div()
-                    .size(px(6.0))
-                    .rounded(px(999.0))
-                    .bg(dot_color(status, selected, theme)),
-            ),
+            div()
+                .w(px(7.0))
+                .flex()
+                .justify_center()
+                .child(status_glyph(status, theme)),
         )
         .child(
             div()
@@ -3499,18 +3878,24 @@ fn sidebar_pane_row(
             this.child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(10.0))
-                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .text_size(px(10.5))
+                    .text_color(theme.muted_foreground)
                     .child(label),
             )
         })
         .when(closable, |this| {
-            this.child(sidebar_close_button(
-                format!("side-close-pane-tab-{tab_index}-{id}"),
-                tab_index,
-                theme,
-                cx,
-            ))
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .opacity(cross)
+                    .group_hover(row_group, move |this| this.opacity(1.0))
+                    .child(sidebar_close_button(
+                        format!("side-close-pane-tab-{tab_index}-{id}"),
+                        tab_index,
+                        theme,
+                        cx,
+                    )),
+            )
         })
 }
 
@@ -3837,18 +4222,41 @@ fn pane_status(pane: &Pane) -> PaneStatus {
     }
 }
 
-/// The colour of a pane's status dot.
+/// The colour of a pane's state marker.
 ///
-/// One rule for every dot in the app. Focus outranks status because the dot sits
-/// where the eye already is; a pane that has exited outranks both, because a dead
-/// shell is the one thing worth interrupting for.
-fn dot_color(status: PaneStatus, focused: bool, theme: &gpui_kit::component::Theme) -> Hsla {
+/// Focus is not part of this: a card's focus is already said by its name weight
+/// and its outline, and letting focus recolour the state marker would mean the
+/// marker stops describing the pane. The colour is the second line of the
+/// encoding; the shape carries it on its own.
+fn status_color(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
     match status {
-        PaneStatus::Exited => theme.danger,
-        _ if focused => theme.ring,
         PaneStatus::Working => theme.ring,
-        PaneStatus::Idle => theme.muted_foreground.opacity(0.45),
+        PaneStatus::Idle => theme.muted_foreground,
+        PaneStatus::Exited => theme.danger,
     }
+}
+
+/// The marker itself: filled circle while writing, hollow circle while waiting,
+/// square once the process is gone.
+///
+/// Shape first, colour second. A dot that only changed hue would leave `working`
+/// and `idle` identical for a reader who cannot separate lime from grey — and
+/// those are the two states a person checks most often.
+fn status_glyph(status: PaneStatus, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    let color = status_color(status, theme);
+
+    div()
+        .flex_shrink_0()
+        .size(px(6.0))
+        .when(matches!(status, PaneStatus::Idle), |this| {
+            this.rounded(px(999.0)).border_1().border_color(color)
+        })
+        .when(matches!(status, PaneStatus::Working), |this| {
+            this.rounded(px(999.0)).bg(color)
+        })
+        .when(matches!(status, PaneStatus::Exited), |this| {
+            this.rounded(px(1.0)).bg(color)
+        })
 }
 
 /// The surface a rail chip wears when it is not the focused one.
@@ -3871,8 +4279,19 @@ fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
 /// The shell's OSC title when it sets one, otherwise the program it was started
 /// with. Both end up with any path stripped, because a pane is named by what it
 /// is, not by where it lives.
-fn pane_label(pane: &Pane) -> String {
-    tab_title(pane).unwrap_or_else(|| {
+/// Anything the pane's title says beyond its name.
+///
+/// A shell sets the title to a path often enough that the difference is worth
+/// showing; when it only repeats the program name, there is nothing to add and
+/// the header keeps its space.
+fn pane_detail(pane: &Pane) -> Option<String> {
+    let title = pane.session.frame().title.trim();
+    let name = pane_label(pane);
+
+    (!title.is_empty() && title != name).then(|| title.to_owned())
+}
+
+fn pane_label(pane: &Pane) -> String {    tab_title(pane).unwrap_or_else(|| {
         // `Path` handles both separators, which matters on Windows where a
         // program path arrives with backslashes.
         let program = &pane.command.program;

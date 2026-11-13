@@ -40,14 +40,14 @@ struct Tokens {
 }
 
 const DARK: Tokens = Tokens {
-    bg: 0x111310,
-    bg_soft: 0x161915,
-    surface: 0x191c17,
-    stroke: 0x2a2f27,
-    text: 0xf4f6f0,
-    text_2: 0xa4ab9b,
-    text_3: 0x6f7768,
-    brand: 0xc3ec74,
+    bg: 0x101210,
+    bg_soft: 0x1a1d18,
+    surface: 0x22261e,
+    stroke: 0x33382d,
+    text: 0xf2f5ec,
+    text_2: 0xa6ada0,
+    text_3: 0x8a9281,
+    brand: 0xc6ee7a,
     brand_soft: 0x262b23,
     scrim: 0x000000,
     pill: 0x262b23,
@@ -56,20 +56,24 @@ const DARK: Tokens = Tokens {
     sky: 0x7cc7ff,
 };
 
+/// Light keeps a white grid, so the chrome has to be visibly deeper than it:
+/// a raised row is still lighter than the surface it sits on, the same
+/// direction as dark. A white card on a near-white ground was 1.10:1 and
+/// left the card with no edge at all.
 const LIGHT: Tokens = Tokens {
     bg: 0xffffff,
-    bg_soft: 0xf4f5f1,
-    surface: 0xf7f8f4,
-    stroke: 0xe4e6df,
-    text: 0x13160f,
-    text_2: 0x5d6356,
-    text_3: 0x8b9184,
-    brand: 0x4f7d14,
-    brand_soft: 0xeef0ea,
+    bg_soft: 0xe7eadf,
+    surface: 0xffffff,
+    stroke: 0xd2d6c6,
+    text: 0x14170f,
+    text_2: 0x555b4d,
+    text_3: 0x656b5c,
+    brand: 0x3f6b12,
+    brand_soft: 0xedf4dc,
     scrim: 0x1b1f18,
-    pill: 0xeef0ea,
-    red: 0xc02b2b,
-    amber: 0x9a6b00,
+    pill: 0xdfe3d7,
+    red: 0xb12b26,
+    amber: 0x8a5e00,
     sky: 0x1f5fb4,
 };
 
