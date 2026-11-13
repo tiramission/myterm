@@ -8,6 +8,9 @@ use std::ffi::c_void;
 
 use vt_sys as sys;
 
+/// The libghostty-vt release this crate wraps, as a version string.
+pub const GHOSTTY_VERSION: &str = sys::VERSION;
+
 /// An 8-bit RGB color.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rgb {

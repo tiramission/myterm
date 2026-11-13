@@ -40,4 +40,8 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", vendor.display());
     println!("cargo:rustc-link-lib=static=ghostty-vt-static");
     println!("cargo:rerun-if-changed={}", lib.display());
+    // The version the archive was built from, for the crate to publish. One
+    // constant, in the file that already has to know it to name the tag, so the
+    // about panel cannot drift away from the library that is actually linked.
+    println!("cargo:rustc-env=LIBGHOSTTY_VT_VERSION={VERSION}");
 }

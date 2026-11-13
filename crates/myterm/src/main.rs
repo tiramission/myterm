@@ -4855,7 +4855,7 @@ fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
                 .flex_col()
                 .gap(px(9.0))
                 .mt(px(14.0))
-                .child(row("终端解析", "libghostty-vt 1.0.0"))
+                .child(row("终端解析", ghostty_label()))
                 .child(row("界面框架", "GPUI Kit 0.9"))
                 .child(row("平台", "Windows")),
         )
@@ -4978,6 +4978,16 @@ fn version_label() -> &'static str {
     // `current_version` is `env!`-derived, so this is one short string per
     // process; the leak is deliberate and bounded.
     Box::leak(format!("v{}", update::current_version()).into_boxed_str())
+}
+
+/// The terminal library's version, read from the crate that links it.
+///
+/// The about card used to spell this out by hand, and it drifted: it still said
+/// 1.0.0 while the vendored archive was 1.0.1. `vt-sys` publishes the number its
+/// `build.rs` builds against, so this row now describes the library that is
+/// actually linked into this binary.
+fn ghostty_label() -> &'static str {
+    Box::leak(format!("libghostty-vt {}", vt::GHOSTTY_VERSION).into_boxed_str())
 }
 
 /// A small control in a pane header.

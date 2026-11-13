@@ -10,6 +10,11 @@
 
 use std::ffi::c_void;
 
+/// The libghostty-vt release the vendored archive was built from.
+///
+/// Published from `build.rs`, which is the one place that has to name the tag.
+pub const VERSION: &str = env!("LIBGHOSTTY_VT_VERSION");
+
 /// `GhosttyResult`: the library returns one of these from every fallible call.
 pub type GhosttyResult = i32;
 
