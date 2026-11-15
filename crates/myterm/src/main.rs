@@ -82,6 +82,15 @@ const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 /// this program", and it is deliberately not the app mark: that glyph already
 /// sits at the leading edge as the window's identity, and using it twice in one
 /// bar leaves the second copy with no reason to look clickable.
+/// The search glyph: the command entry in the top bar, and the find field.
+const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
+
+/// Three dots: the app menu. A menu that needs a word would need a wider bar.
+const MENU_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round"><path d="M6 12h.01M12 12h.01M18 12h.01"/></svg>"#;
+
+/// A chevron pointing at the edge the list folds toward.
+const COLLAPSE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
+
 const INFO_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></svg>"#;
 
 /// Three sliders: the settings entry in the title bar.
@@ -92,21 +101,23 @@ const INFO_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 /// are small, and they name the idea rather than the object.
 const SETTINGS_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 5h-7"/><path d="M10 5H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 19h-5"/><path d="M12 19H3"/><circle cx="12" cy="5" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="19" r="2"/></svg>"#;
 
-/// The theme toggle: a sun in light mode, a moon in dark mode.
-const THEME_SUN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
-const THEME_MOON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>"#;
-
 /// Height of the drawn title bar.
 ///
-/// 38 px matches the caption Windows draws for itself, so the tabs sit where
-/// the eye expects a title to be rather than where a toolbar would go.
-const TITLE_BAR_HEIGHT: f32 = 38.0;
+/// The bar is not the system caption any more: it carries the workspace's
+/// identity and the command entry, so it is a row of the window rather than a
+/// strip above one. 44 px is the height that fits a 28 px control with air on
+/// both sides.
+const TITLE_BAR_HEIGHT: f32 = 44.0;
 
 /// Height of the strip naming a pane.
-const PANE_HEADER_HEIGHT: f32 = 32.0;
+const PANE_HEADER_HEIGHT: f32 = 30.0;
+
+/// Height of the conditional status bar. It only exists while it has
+/// something to say, so this is the cost of speaking, not a permanent edge.
+const STATUS_BAR_HEIGHT: f32 = 26.0;
 
 /// Corner radius of a pane card.
-const PANE_RADIUS: f32 = 12.0;
+const PANE_RADIUS: f32 = 10.0;
 
 /// Corner radius of a small card — a tab, a sidebar row. The pane card is
 /// larger and takes its own, but every 28 px-high card in the app wears this
@@ -115,14 +126,14 @@ const CHIP_RADIUS: f32 = 10.0;
 
 /// Space between two panes. The gap is the divider: nothing is drawn in it
 /// at rest, and the pointer is the only thing that shows it can be moved.
-const PANE_GAP: f32 = 10.0;
+const PANE_GAP: f32 = 8.0;
 
 /// The leading inset of a pane's contents. The header's name and the grid's
 /// first cell both start here, which is what makes them read as one column.
 const PANE_TEXT_INSET: f32 = 10.0;
 
-/// Width of the tab list.
-const SIDEBAR_WIDTH: f32 = 214.0;
+/// Width of the workspace list.
+const SIDEBAR_WIDTH: f32 = 238.0;
 
 /// Narrowest the list gets: a chip of glyphs with room to aim at.
 const RAIL_WIDTH: f32 = 56.0;
@@ -540,6 +551,10 @@ pub struct Workspace {
     find: Option<FindState>,
     /// The command palette, while it is open.
     palette: Option<Palette>,
+    /// The app menu under the bar's `⋯`, while it is open.
+    app_menu: bool,
+    /// Whether the about card is on screen.
+    about: bool,
     /// Set when a close would end more than one shell and is waiting on
     /// confirmation. Nothing is torn down until it is answered.
     closing: bool,
@@ -600,6 +615,8 @@ impl Workspace {
             menu: None,
             find: None,
             palette: None,
+            app_menu: false,
+            about: false,
             closing: false,
             config,
             settings: false,
@@ -1698,11 +1715,15 @@ impl Render for Workspace {
 
         let theme = gpui_kit::component::Theme::global(cx).clone();
 
+        // The window is two columns, not two rows: the workspace column runs the
+        // full height, so its own controls sit beside the top bar rather than
+        // under a strip that spans the whole window. That is what lets the list
+        // own the top-left corner — the corner it opens onto.
         let mut body = div()
             .size_full()
             .relative()
             .flex()
-            .flex_col()
+            .flex_row()
             // One chrome surface, painted here so it continues under the title
             // bar and the sidebar without a seam.
             //
@@ -1743,25 +1764,22 @@ impl Render for Workspace {
                 }),
             );
 
-        body = body.child(self.render_title_bar(window, cx));
+        body = body.child(self.render_sidebar(&theme, cx));
+
+        let mut content = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(self.render_top_bar(window, cx));
 
         // An uninstalled copy says so once, in a band that can be dismissed. It
         // is not a dialog: installing is an offer, and a terminal that blocks
         // its own grid until you accept one is not a terminal.
         if self.show_install_prompt {
-            body = body.child(self.render_install_prompt(&theme, cx));
+            content = content.child(self.render_install_prompt(&theme, cx));
         }
-
-        // The list and the panes sit side by side under the bar, so the window
-        // still has exactly one title row. The list is always there: it is the
-        // tab surface now, not an accessory that can be switched off.
-        let mut content = div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_row()
-            .child(self.render_sidebar(&theme, cx));
 
         if let Some(error) = &self.error {
             // A failure is the one moment the grid is not there, so it gets the
@@ -1826,10 +1844,11 @@ impl Render for Workspace {
                     this.child(self.render_find_bar(&theme, cx))
                 })
                 // The leading and top edges have no gutter: the cards meet the
-                // title bar and the sidebar directly, so the chrome reads as an
-                // L wrapped around the work instead of a frame floating ten
-                // pixels away from it. Only the trailing and bottom edges keep
-                // the gap, where the window edge would otherwise cut the card.
+                // top bar and the workspace column directly, so the chrome reads
+                // as an L wrapped around the work instead of a frame floating
+                // ten pixels away from it. Only the trailing and bottom edges
+                // keep the gap, where the window edge would otherwise cut the
+                // card.
                 .child(
                     div()
                         .flex_1()
@@ -1842,6 +1861,14 @@ impl Render for Workspace {
                 ),
         );
 
+        // The status bar is not furniture. It appears only while it has a line
+        // to say — a zoom to release, an update to take — and costs nothing the
+        // rest of the time. A permanent 26 px strip repeating what the bar above
+        // already says is a row of chrome bought for an occasional glance.
+        if let Some(hint) = self.status_hint() {
+            content = content.child(self.render_status_bar(&hint, &theme, cx));
+        }
+
         // The settings sheet is a child of `content`, not of the window body:
         // hung from the body it would start at the window's top edge and cover
         // the title bar — including the controls that close it. Anchored here it
@@ -1851,6 +1878,14 @@ impl Render for Workspace {
         }
 
         body = body.child(content);
+
+        if self.app_menu {
+            body = body.child(self.render_app_menu(&theme, cx));
+        }
+
+        if self.about {
+            body = body.child(self.render_about(&theme, cx));
+        }
 
         if let Some(menu) = self.menu {
             let size = window.bounds().size;
@@ -3576,16 +3611,17 @@ impl Workspace {
         };
 
         let mut band = div()
-            .mx(px(PANE_GAP))
-            .mt(px(PANE_GAP))
+            .mr(px(PANE_GAP))
+            .mb(px(PANE_GAP))
             .flex()
             .flex_row()
             .items_center()
+            .flex_shrink_0()
             .gap(px(10.0))
             .h(px(38.0))
             .px(px(12.0))
-            .rounded(px(CHIP_RADIUS))
-            .bg(theme.background)
+            .rounded(px(9.0))
+            .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
             .child(icon_data(INFO_ICON, 14.0, tint))
@@ -3666,30 +3702,71 @@ impl Workspace {
         band.into_any_element()
     }
 
-    /// Every tab and pane, with enough state to jump to one.
+    /// The workspace column: the window's only tab surface.
     ///
-    /// This is the whole model the sidebar reads: it is rebuilt from the
-    /// workspace each frame rather than kept in step with it, so there is
-    /// nothing to keep in sync.
-    ///
-    /// The list holds one place per row, and every row can be clicked. A tab
-    /// holding one pane is one place, so its row *is* the tab; a tab holding
-    /// several is a group, and the header above its rows is clickable too. A
-    /// list that names a place and cannot go there is decoration.
+    /// It runs the full height of the window, including the corner the bar would
+    /// otherwise own, so the list opens onto the mark that toggles it. Width is
+    /// the whole state — below `RAIL_THRESHOLD` the list draws as a rail of
+    /// chips, which is how it collapses without a second control to learn.
     fn render_sidebar(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // The list sits under either the heading or the title bar itself, so it
-        // brings its own top gap rather than inheriting one from a header that
-        // may not be there.
+        let width = self.sidebar_width;
+        let rail = width < RAIL_THRESHOLD;
+        let wash = theme.muted;
+
+        // The mark and the fold control. The mark is the app's identity and the
+        // switch for this column in one object: it sits in the corner the column
+        // opens onto, so the thing you press is next to the thing it opens.
+        let mut top = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_shrink_0()
+            .h(px(TITLE_BAR_HEIGHT))
+            .gap(px(6.0))
+            .when(!rail, |this| this.pl(px(14.0)).pr(px(10.0)))
+            .when(rail, |this| this.justify_center())
+            .child(
+                div()
+                    .id("toggle-rail")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(28.0))
+                    .rounded(px(9.0))
+                    .bg(theme.ring.opacity(0.13))
+                    .border_1()
+                    .border_color(theme.ring.opacity(0.42))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                        workspace.toggle_rail(cx);
+                    }))
+                    .child(icon_data(APP_MARK, 15.0, theme.ring)),
+            );
+        if !rail {
+            top = top.child(div().flex_1()).child(
+                icon_button("rail-collapse", COLLAPSE_ICON, 24.0, theme, cx).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, _, cx| {
+                        workspace.toggle_rail(cx);
+                    },
+                )),
+            );
+        }
+
+        // Every workspace and pane, with enough state to jump to one.
+        //
+        // This is the whole model the list reads: it is rebuilt from the
+        // workspace each frame rather than kept in step with it, so there is
+        // nothing to keep in sync.
         let mut list = div()
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .px(px(6.0))
-            .pt(px(4.0))
+            .px(px(8.0))
+            .pt(px(2.0))
             .pb(px(8.0))
             // A drag released over the empty part of the column still has to
             // end, or the insertion rule stays on screen until the next click.
@@ -3712,25 +3789,20 @@ impl Workspace {
             let current_tab = tab_index == self.active_tab;
             let grouped = tab.panes.len() > 1;
 
-            // Groups are separated by air rather than a rule: the selected fill
-            // already marks the current place, and a line drawn across the
+            // Workspaces are separated by air rather than a rule: the selected
+            // fill already marks the current place, and a line drawn across the
             // column would be a second edge saying the same thing louder.
             if tab_index > 0 {
-                list = list.child(div().h(px(8.0)));
+                list = list.child(div().h(px(6.0)));
             }
 
-            // Where the tab would land. A two-pixel rule in the accent colour,
-            // placed between rows rather than drawn on one: an insertion point
-            // is a gap in the list, not a property of a row.
+            // Where the workspace would land. A two-pixel rule in the accent
+            // colour, placed between rows rather than drawn on one: an insertion
+            // point is a gap in the list, not a property of a row.
             if drop_target == Some(tab_index) && dragging_tab != Some(tab_index) {
                 list = list.child(div().h(px(2.0)).mx(px(8.0)).rounded(px(1.0)).bg(theme.ring));
             }
 
-            // The cross belongs to the tab you are looking at: on every tab it
-            // turns the list into a column of identical buttons, and the one you
-            // might hit by accident is the one you did not mean to close.
-            // It is revealed on hover for the rest, so closing another tab no
-            // longer costs a select first.
             let closable = self.tabs.len() > 1;
 
             if grouped {
@@ -3754,14 +3826,15 @@ impl Workspace {
                     tab_index,
                     id,
                     pane_label(pane),
+                    pane_cwd(pane),
                     pane_status(pane),
                     // A row under a header belongs to it and steps in; a row
-                    // that stands for its own tab stays on the top spine.
+                    // that stands for its own workspace stays on the top spine.
                     grouped,
                     selected,
                     tab.unseen,
-                    // A one-pane tab is closed from its own row, because that
-                    // row is the tab. A grouped tab closes from its header.
+                    // A one-pane workspace is closed from its own row, because
+                    // that row is the workspace.
                     closable && !grouped,
                     dragging_tab == Some(tab_index),
                     theme,
@@ -3774,46 +3847,7 @@ impl Workspace {
             list = list.child(sidebar_empty_row(theme, cx));
         }
 
-        // The column's head carries the one action the list cannot express:
-        // opening a tab. It is here because the title bar no longer has tabs to
-        // hang a plus beside, and the list is where the result will appear.
-        //
-        // Short on purpose. It is a label for the column, not a second title
-        // bar: the bar above it already holds the window's own controls, and
-        // two full-height rows of chrome in a row is a lot of weight for one
-        // word and one button.
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(PANE_HEADER_HEIGHT))
-            // On the same leading spine as the grouped rows below: a heading
-            // two pixels off its list is the kind of drift that makes a column
-            // look assembled rather than drawn.
-            .pl(px(14.0))
-            .pr(px(4.0))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(10.5))
-                    .text_color(theme.muted_foreground)
-                    .child("标签"),
-            )
-            .child(
-                icon_button("side-new-tab", PLUS_SMALL, 24.0, theme, cx).on_click(cx.listener(
-                    |workspace, _: &ClickEvent, window, cx| {
-                        workspace.new_tab(window, cx);
-                    },
-                )),
-            );
-
-        let width = self.sidebar_width;
-        let rail = width < RAIL_THRESHOLD;
-
-        let column = if rail {
-            // The rail scrolls for the same reason the list does: the rows are
-            // as tall as they need to be, and a split workspace outgrows the
-            // window before the workspace runs out of panes.
+        let scroll = if rail {
             div()
                 .id("side-rail")
                 .w_full()
@@ -3821,23 +3855,58 @@ impl Workspace {
                 .min_h_0()
                 .overflow_y_scroll()
                 .child(self.render_rail(theme, cx))
-                .into_any_element()
         } else {
             div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(header)
-                .child(
-                    div()
-                        .id("side-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(list),
-                )
-                .into_any_element()
+                .id("side-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(list)
         };
+
+        // The foot holds the two things that are about the column rather than
+        // about a row in it: adding another workspace, and opening settings.
+        let mut foot = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .when(rail, |this| this.flex_col());
+
+        let mut new_button = div()
+            .id("new-session")
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .h(px(30.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .text_color(theme.muted_foreground)
+            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+            .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                workspace.new_tab(window, cx);
+            }))
+            .child(icon_data(PLUS_SMALL, 13.0, theme.muted_foreground));
+        new_button = if rail {
+            new_button.flex_shrink_0().justify_center().w(px(30.0))
+        } else {
+            new_button
+                .flex_1()
+                .min_w_0()
+                .px(px(9.0))
+                .child("新建工作区")
+        };
+        foot = foot.child(new_button).child(
+            icon_button("side-settings", SETTINGS_ICON, 30.0, theme, cx).on_click(cx.listener(
+                |workspace, _: &ClickEvent, _, cx| {
+                    workspace.toggle_settings(cx);
+                },
+            )),
+        );
 
         div()
             .w(px(width))
@@ -3847,12 +3916,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(theme.title_bar)
-            // The column hangs from the title bar like the cards do: its first
-            // row and the card's top edge are on the same line, so the L of
-            // chrome and the work area start together. Only the bottom keeps a
-            // gutter, matching the card's.
-            .pb(px(PANE_GAP))
-            .child(column)
+            .child(top)
+            .child(scroll)
+            .child(foot)
             // The edge is the control: it is where a pointer already goes when
             // it wants to resize a column, and dragging it to the narrow end is
             // how the list collapses into the rail.
@@ -4050,353 +4116,453 @@ impl Workspace {
             rail = rail.child(capsule);
         }
 
-        // The rail still has to open tabs, because it is the whole tab surface
-        // at this width and there is no title-bar strip to fall back on.
-        let hover_bg = theme.muted;
-        rail = rail.child(
-            div()
-                .id("rail-new-tab")
-                .flex()
-                .items_center()
-                .justify_center()
-                // The same capsule as a one-pane tab, so a new tab lands in the
-                // shape the list already uses for tabs.
-                .w(px(44.0))
-                .h(px(40.0))
-                .rounded(px(16.0))
-                .border_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .hover(move |this| this.bg(hover_bg))
-                .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    workspace.new_tab(window, cx);
-                }))
-                .child(icon_data(PLUS_SMALL, 14.0, theme.muted_foreground)),
-        );
-
         rail.into_any_element()
     }
 
-    /// Draws the title bar: the window drag area and the window's controls.
+    /// Draws the bar across the top of the work area.
     ///
-    /// This is the window chrome, not a strip under one, and it no longer
-    /// carries the tab list — that moved to the sidebar. Two things have to be
-    /// true at once: the empty area must drag the window, and the buttons must
-    /// not. The drag area is a `WindowControlArea::Drag` hitbox behind the
-    /// content, and the buttons sit on top of it and swallow their own clicks.
-    fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// It answers two questions and nothing else: which workspace this is — its
+    /// name, where the focused shell is, the branch when the shell reports one —
+    /// and how to reach everything else without knowing a chord, through the
+    /// command entry and the menu. The workspace column owns the top-left
+    /// corner, so this bar starts where the work starts.
+    fn render_top_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let maximized = window.is_maximized();
-        // The bar drops its split buttons once panes have their own; see the
-        // comment at their call site.
-        let multi = self.active_tab().is_some_and(|tab| tab.panes.len() > 1);
-
+        let muted = theme.muted_foreground;
         // Copied before the closures below capture `theme` by move.
-        let mark_hover = theme.muted;
+        let field = theme.background;
+        let accent_line = theme.ring.opacity(0.45);
+        let kbd_bg = theme.muted;
 
-        // The bar is chrome: one step warmer than the grid, flat rather than
-        // glossy, and separated from the panes by a single hairline. The app mark
-        // is the only thing allowed to wear the accent colour at rest, which is
-        // what makes it read as the mark rather than another button.
-        let mut strip = div()
+        let mut bar = div()
             .flex()
             .flex_row()
             .items_center()
+            .flex_shrink_0()
             .h(px(TITLE_BAR_HEIGHT))
-            .relative()
-            // Fourteen pixels puts the mark on the sidebar's own leading spine.
-            // With the list open that is the left edge of its heading; with the
-            // rail it is the centre of the column, because the mark's box and
-            // the rail's chips are both twenty-eight wide. One number, both
-            // widths, no second alignment to keep.
-            .pl(px(14.0))
+            .pl(px(16.0))
             .pr(px(6.0))
-            .gap(px(6.0))
+            .gap(px(12.0))
             .bg(theme.title_bar)
-            // The mark is also the list switch. It already sits at the leading
-            // edge of the bar, which is the edge the list opens onto, and the
-            // two widths are one gesture apart: press it to open the list, press
-            // it again to fold it back to the rail. It is not a drag area — a
-            // control that moves the window instead of acting is a control that
-            // does not work.
+            .text_color(theme.foreground);
+
+        // The workspace, not the window: a name the user gave this place, and
+        // the one line of context that matters while reading output — where the
+        // shell thinks it is.
+        let identity = self.active_tab().map(|tab| {
+            let pane = tab
+                .panes
+                .get(&tab.active)
+                .or_else(|| tab.panes.values().next());
+            (tab.title.clone(), pane.and_then(pane_cwd))
+        });
+        let (name, detail) = identity.unwrap_or_else(|| ("myterm".to_owned(), None));
+
+        let mut crumbs = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .min_w_0()
+            .h_full()
+            // The crumbs are not controls, so the space they cover is drag
+            // area: the bar keeps no strip reserved for moving the window, and
+            // the part that carries text is as good a handle as any.
+            .window_control_area(WindowControlArea::Drag)
             .child(
                 div()
-                    .id("toggle-rail")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // The same box as an icon button, so the mark and the
-                    // controls beside it share one centre line instead of the
-                    // mark sitting two pixels off it.
-                    .size(px(28.0))
-                    .rounded(px(8.0))
-                    .cursor_pointer()
-                    .hover(move |this| this.bg(mark_hover))
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                        workspace.toggle_rail(cx);
-                    }))
-                    .child(icon_data(APP_MARK, 16.0, theme.ring)),
+                    .flex_shrink_0()
+                    .max_w(px(200.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(name),
             );
+        if let Some(detail) = detail {
+            crumbs = crumbs.child(
+                div()
+                    .min_w_0()
+                    .max_w(px(240.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(11.0))
+                    .text_color(muted)
+                    .child(detail),
+            );
+        }
 
-        // Everything between the mark and the controls was drag area, and the
-        // tabs used to live here. They are in the sidebar now, which left the
-        // bar with one job — moving the window — and no answer to "which window
-        // is this". The platform only ever reads the title, so the title is
-        // where the answer goes: the current tab, and whatever its shell says
-        // about where it is.
-        let identity = self.active_tab().map(|tab| {
-            (
-                tab.title.clone(),
-                tab.panes.values().next().and_then(pane_detail),
-                tab.panes.len(),
+        bar = bar.child(crumbs);
+
+        // The rest of the bar's left half is drag area too, so the window can be
+        // moved from the emptiest part of it as well as from the name.
+        bar = bar.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .window_control_area(WindowControlArea::Drag),
+        );
+
+        // A keycap in the bar. Small, quiet, and never the only way to find the
+        // command it names.
+        let kbd = |label: &'static str| {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(16.0))
+                .px(px(4.0))
+                .rounded(px(4.0))
+                .bg(kbd_bg)
+                .text_size(px(9.5))
+                .text_color(theme.muted_foreground)
+                .child(label)
+        };
+
+        bar = bar
+            .child(
+                div()
+                    .id("cmd-trigger")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(px(8.0))
+                    .w(px(300.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(field)
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(move |this| this.border_color(accent_line))
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                        workspace.open_palette(window, cx);
+                    }))
+                    .child(icon_data(SEARCH_ICON, 12.0, muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(11.0))
+                            .text_color(muted)
+                            .child("输入命令或搜索会话"),
+                    )
+                    .child(kbd("Ctrl"))
+                    .child(kbd("K")),
             )
-        });
-        if let Some((title, detail, panes)) = identity {
-            let muted = theme.muted_foreground;
-            let text = theme.foreground;
-            let wash = theme.muted;
-
-            strip = strip.child(
+            // Splitting and opening live here as well as in the pane header:
+            // with one pane there is no header to hold them, and a window whose
+            // only way to start a second shell is a chord is a window with one
+            // shell.
+            .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(7.0))
-                    .h_full()
-                    .max_w(px(520.0))
-                    .px(px(8.0))
+                    .gap(px(2.0))
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .max_w(px(200.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(text)
-                            .child(title),
-                    )
-                    .when_some(detail, |this, detail| {
-                        this.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(11.0))
-                                .text_color(muted)
-                                .child("·"),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .max_w(px(240.0))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(11.0))
-                                .text_color(muted)
-                                .child(detail),
-                        )
-                    })
-                    .when(panes > 1, |this| {
-                        this.child(
-                            div()
-                                .flex_shrink_0()
-                                .px(px(7.0))
-                                .py(px(2.0))
-                                .rounded(px(999.0))
-                                .bg(wash)
-                                .text_size(px(10.5))
-                                .text_color(muted)
-                                .child(format!("{panes} 窗格")),
-                        )
-                    }),
-            );
-        }
-
-        // Everything between the identity and the controls is drag area.
-        strip = strip
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .window_control_area(WindowControlArea::Drag),
-            )
-            // Once there is more than one pane, every pane header carries its own
-            // split, zoom and close controls, so the title bar's copies are a
-            // second set of the same buttons pointing at a pane the user did not
-            // choose. They go away, and come back when there is one pane again —
-            // a single pane has no header to hold them.
-            .when(!multi, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        // Tighter than the bar's own gap: these two are one
-                        // control in two parts, and the pair should read that
-                        // way next to the app controls' looser spacing.
-                        .gap(px(2.0))
-                        .child(
-                            icon_button("split-h", SPLIT_HORIZONTAL, 28.0, &theme, cx).on_click(
-                                cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                                    workspace.split_active(Axis::Horizontal, window, cx);
-                                }),
-                            ),
-                        )
-                        .child(
-                            icon_button("split-v", SPLIT_VERTICAL, 28.0, &theme, cx).on_click(
-                                cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                                    workspace.split_active(Axis::Vertical, window, cx);
-                                }),
-                            ),
+                        icon_button("top-split-h", SPLIT_HORIZONTAL, 30.0, &theme, cx).on_click(
+                            cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                                workspace.split_active(Axis::Horizontal, window, cx);
+                            }),
                         ),
-                )
-            })
-            // The app's own controls: the build, the theme, and any pending
-            // update. They answer a different question from the pane actions, so
-            // they sit further along the bar — separated by the gap rather than
-            // by a rule, which would be a fourth line in a row that already has
-            // the pane edges and the card corners.
-            // The version is a control rather than a line of text: it is the
-            // one place that answers "which build is this", which matters when
-            // the app updates itself and two machines can be a version apart.
-            // Where the hairline used to be. The boundary is the same — the
-            // window's controls on one side, the app's on the other — but it is
-            // drawn with space instead of a rule, because the bar already has
-            // the pane edges and the card corners to carry.
-            .child(div().w(px(8.0)).h_full())
-            //
-            // Its detail is a popover anchored to the button, not a modal. This
-            // is reference information: nothing here needs a decision, and
-            // dimming the terminal to show it would interrupt work to answer a
-            // passing question.
-            .child({
-                // Copied out before the closure below captures `theme`.
-                let card_theme = theme.clone();
-                let mark = theme.muted_foreground;
-                // The trigger is a circled `i`, not the app mark: the mark is
-                // already at the leading edge of this same bar, and a second
-                // copy reads as decoration rather than as a control.
-                let trigger = Button::new("about")
-                    .text()
-                    .compact()
-                    .tooltip("关于 myterm")
-                    .accessibility_label("关于 myterm")
-                    .child(icon_data(INFO_ICON, 16.0, mark));
-
-                gpui_kit::component::popover::Popover::new("about-popover")
-                    .anchor(Anchor::TopRight)
-                    .offset(px(6.0))
-                    .trigger(trigger)
-                    .content(move |_, _, _| about_card(&card_theme))
-            })
-            // The theme toggle shows the theme it switches to, not the one in
-            // use, which is the convention every app with this control follows.
+                    )
+                    .child(
+                        icon_button("top-split-v", SPLIT_VERTICAL, 30.0, &theme, cx).on_click(
+                            cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                                workspace.split_active(Axis::Vertical, window, cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        icon_button("top-new", PLUS_SMALL, 30.0, &theme, cx).on_click(cx.listener(
+                            |workspace, _: &ClickEvent, window, cx| {
+                                workspace.new_tab(window, cx);
+                            },
+                        )),
+                    ),
+            )
             .child(
-                icon_button(
-                    "toggle-theme",
-                    if theme.mode == gpui_kit::component::ThemeMode::Light {
-                        THEME_MOON
-                    } else {
-                        THEME_SUN
+                icon_button("app-menu", MENU_ICON, 30.0, &theme, cx).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, _, cx| {
+                        workspace.app_menu = !workspace.app_menu;
+                        cx.notify();
                     },
-                    28.0,
-                    &theme,
-                    cx,
+                )),
+            )
+            // A gap wide enough that the caption buttons read as window controls
+            // and not as more of the app's own toolbar.
+            .child(div().w(px(8.0)));
+
+        bar.child(window_button(
+            "win-min",
+            WINDOW_MINIMIZE,
+            WindowControlArea::Min,
+            false,
+            &theme,
+            cx.listener(|_workspace, _: &ClickEvent, window, _cx| {
+                window.minimize_window();
+            }),
+        ))
+        .child(window_button(
+            "win-max",
+            if maximized {
+                WINDOW_RESTORE
+            } else {
+                WINDOW_MAXIMIZE
+            },
+            WindowControlArea::Max,
+            false,
+            &theme,
+            cx.listener(|_workspace, _: &ClickEvent, window, _cx| {
+                window.zoom_window();
+            }),
+        ))
+        .child(window_button(
+            "win-close",
+            WINDOW_CLOSE,
+            WindowControlArea::Close,
+            true,
+            &theme,
+            cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                workspace.close_window(window, cx);
+            }),
+        ))
+    }
+
+    /// The app menu under the bar's `⋯`.
+    ///
+    /// The controls that used to be icons on the bar — theme, settings, about,
+    /// update — live here now. None of them is used often enough to spend a
+    /// button of its own on in a bar that also has to hold the workspace's name,
+    /// and a menu is what the `⋯` in that bar already promises.
+    fn render_app_menu(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = theme.muted_foreground;
+        let wash = theme.muted;
+        let hint = theme.muted_foreground.opacity(0.7);
+
+        let row = move |id: &'static str, label: String, key: Option<&'static str>| {
+            div()
+                .id(ElementId::Name(id.into()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.0))
+                .h(px(31.0))
+                .px(px(9.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .hover(move |this| this.bg(wash))
+                .text_size(px(11.5))
+                .text_color(muted)
+                .child(label)
+                .when_some(key, |this, key| {
+                    this.child(
+                        div()
+                            .ml_auto()
+                            .flex_shrink_0()
+                            .text_size(px(10.0))
+                            .text_color(hint)
+                            .child(key),
+                    )
+                })
+        };
+
+        let update = self.update_badge();
+        let menu = div()
+            .w(px(210.0))
+            .p(px(5.0))
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .rounded(px(11.0))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                row("menu-settings", "设置".to_owned(), Some("Ctrl+,")).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, _, cx| {
+                        workspace.app_menu = false;
+                        workspace.settings = true;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                row("menu-about", "关于 myterm".to_owned(), None).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, _, cx| {
+                        workspace.app_menu = false;
+                        workspace.about = true;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(match &update {
+                Some((label, true)) => row("menu-update", label.clone(), None)
+                    .text_color(theme.ring)
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                        workspace.app_menu = false;
+                        workspace.install_update(cx);
+                    })),
+                _ => row(
+                    "menu-check",
+                    if self.updating {
+                        "正在下载…".to_owned()
+                    } else {
+                        "检查更新".to_owned()
+                    },
+                    None,
                 )
                 .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                    workspace.app_menu = false;
+                    workspace.check_for_update(cx);
+                })),
+            })
+            .child(
+                row(
+                    "menu-theme",
+                    if theme.mode == gpui_kit::component::ThemeMode::Light {
+                        "切换到深色主题".to_owned()
+                    } else {
+                        "切换到浅色主题".to_owned()
+                    },
+                    Some("Ctrl+Shift+L"),
+                )
+                .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                    workspace.app_menu = false;
                     workspace.toggle_theme(cx);
                 })),
             )
-            // Settings is a visible object in the bar, not a chord people have to
-            // know: the sheet holds the preferences that change the whole window,
-            // and a window that can only be configured through a hidden key is a
-            // window you cannot configure. `Ctrl+,` stays as the fast path.
-            .child({
-                let mark = theme.muted_foreground;
-                Button::new("settings")
-                    .text()
-                    .compact()
-                    .tooltip("设置 (Ctrl+,)")
-                    .accessibility_label("设置")
-                    .on_click(cx.listener(|workspace, _, _, cx| {
-                        workspace.toggle_settings(cx);
-                    }))
-                    .child(icon_data(SETTINGS_ICON, 16.0, mark))
-            })
-            // The update badge sits with the app's own controls, not with the
-            // window's: it is about this program, not about the window.
-            .when_some(self.update_badge(), |this, (label, ready)| {
-                // Copied out of `theme` before the closures below capture it.
-                let ready_bg = theme.ring.opacity(0.16);
-                let ready_hover = theme.ring.opacity(0.24);
-                let ready_fg = theme.ring;
-                let idle_bg = theme.muted;
-                let idle_fg = theme.muted_foreground;
+            .child(div().h(px(1.0)).mx(px(8.0)).my(px(5.0)).bg(theme.border))
+            .child(
+                row("menu-quit", "退出".to_owned(), None).on_click(cx.listener(
+                    |workspace, _: &ClickEvent, window, cx| {
+                        workspace.app_menu = false;
+                        workspace.close_window(window, cx);
+                    },
+                )),
+            );
+
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.app_menu = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(TITLE_BAR_HEIGHT))
+                    .right(px(140.0))
+                    .child(menu),
+            )
+            .into_any_element()
+    }
+
+    /// The about card, as a centred sheet over a scrim.
+    fn render_about(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.about = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(about_card(theme)),
+            )
+            .into_any_element()
+    }
+
+    /// What the status bar has to say, if anything.
+    ///
+    /// Everything that used to sit there permanently — the session count, the
+    /// branch, a reminder about keys — already has a better home in the bar
+    /// above or the list beside it. What is left is the state that exists only
+    /// while it is true.
+    fn status_hint(&self) -> Option<String> {
+        if self.zoomed.is_some() {
+            return Some("已缩放 · Esc 退出".to_owned());
+        }
+        None
+    }
+
+    /// The status bar: 26 px that exist only while `status_hint` has a line.
+    fn render_status_bar(
+        &self,
+        hint: &str,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(STATUS_BAR_HEIGHT))
+            .pl(px(16.0))
+            .pr(px(10.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .text_size(px(10.5))
+            .text_color(theme.muted_foreground)
+            .child(hint.to_owned())
+            .child(div().flex_1())
+            .when(self.zoomed.is_some(), |this| {
                 this.child(
                     div()
-                        .id("update")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .h(px(24.0))
-                        .px(px(10.0))
-                        .rounded(px(999.0))
-                        .bg(if ready { ready_bg } else { idle_bg })
-                        .text_size(px(11.5))
-                        .text_color(if ready { ready_fg } else { idle_fg })
-                        .when(ready, |this| this.cursor_pointer())
-                        .when(ready, |this| this.hover(move |this| this.bg(ready_hover)))
+                        .id("status-unzoom")
+                        .px(px(6.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(move |this| this.bg(theme.muted))
                         .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                            workspace.install_update(cx);
+                            if let Some(id) = workspace.zoomed {
+                                workspace.toggle_zoom(id, cx);
+                            }
                         }))
-                        .child(label),
+                        .child("退出缩放"),
                 )
             })
-            // A gap wide enough that the caption buttons read as window controls
-            // and not as more of the app's own toolbar.
-            .child(div().w(px(10.0)));
-
-        strip
-            .child(window_button(
-                "win-min",
-                WINDOW_MINIMIZE,
-                WindowControlArea::Min,
-                false,
-                &theme,
-                cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    window.minimize_window();
-                    let _ = workspace;
-                    let _ = cx;
-                }),
-            ))
-            .child(window_button(
-                "win-max",
-                if maximized {
-                    WINDOW_RESTORE
-                } else {
-                    WINDOW_MAXIMIZE
-                },
-                WindowControlArea::Max,
-                false,
-                &theme,
-                cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    window.zoom_window();
-                    let _ = workspace;
-                    let _ = cx;
-                }),
-            ))
-            .child(window_button(
-                "win-close",
-                WINDOW_CLOSE,
-                WindowControlArea::Close,
-                true,
-                &theme,
-                cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                    workspace.close_window(window, cx);
-                }),
-            ))
+            .into_any_element()
     }
 }
 
@@ -5278,8 +5444,9 @@ fn sidebar_pane_row(
     tab_index: usize,
     id: u64,
     label: String,
+    detail: Option<String>,
     status: PaneStatus,
-    indented: bool,
+    _indented: bool,
     selected: bool,
     unseen: bool,
     closable: bool,
@@ -5288,7 +5455,7 @@ fn sidebar_pane_row(
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let hover_bg = theme.muted;
-    let selected_bg = theme.background;
+    let selected_bg = theme.popover;
     let text_color = if selected {
         theme.foreground
     } else {
@@ -5296,27 +5463,30 @@ fn sidebar_pane_row(
     };
     // The cross belongs to the row, not to the column: it appears when the
     // pointer is on the row it would close, so close is one gesture away on any
-    // tab without turning the list into a stack of identical buttons.
+    // workspace without turning the list into a stack of identical buttons.
     let row_group = format!("side-row-{tab_index}-{id}");
     let cross = if selected { 1.0 } else { 0.0 };
 
     div()
-        // Pane ids restart at 1 in every tab, so the row has to carry the tab
-        // too: without it two rows share an id and only one of them can be hit
-        // or highlighted.
+        // Pane ids restart at 1 in every workspace, so the row has to carry the
+        // workspace too: without it two rows share an id and only one of them
+        // can be hit or highlighted.
         .id(ElementId::Name(
             format!("side-pane-{tab_index}-{id}").into(),
         ))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
-        .h(px(30.0))
+        .gap(px(8.0))
+        // Two lines fit in one row: what this shell *is*, and where it is. The
+        // second line is what tells three PowerShell tabs apart, and it costs
+        // twelve pixels that the column has and the window does not.
+        .h(px(42.0))
         // The dot keeps its lane through the indent, so the status column runs
         // straight down the group while the names step in behind it.
-        .pl(px(if indented { 16.0 } else { 8.0 }))
-        .pr(px(8.0))
-        .rounded(px(CHIP_RADIUS))
+        .pl(px(10.0))
+        .pr(px(6.0))
+        .rounded(px(8.0))
         .cursor_pointer()
         .when(dragging, |this| this.opacity(0.5))
         .group(row_group.clone())
@@ -5348,8 +5518,8 @@ fn sidebar_pane_row(
             }),
         )
         // Right click asks the row what can be done to it. Middle click is the
-        // desktop shorthand for "close this", and it works on any tab without
-        // the row having to be current first.
+        // desktop shorthand for "close this", and it works on any workspace
+        // without the row having to be current first.
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
@@ -5367,6 +5537,7 @@ fn sidebar_pane_row(
         .child(
             div()
                 .w(px(7.0))
+                .flex_shrink_0()
                 .flex()
                 .justify_center()
                 .child(status_glyph(status, theme)),
@@ -5375,13 +5546,33 @@ fn sidebar_pane_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_size(px(12.0))
-                .text_color(text_color)
-                .child(label),
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.0))
+                        .text_color(text_color)
+                        .child(label),
+                )
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.0))
+                            .text_color(theme.muted_foreground)
+                            .child(detail),
+                    )
+                }),
         )
+        // The word is the third encoding, and the only one that survives a
+        // reader who cannot separate lime from grey. `Idle` says nothing: it is
+        // what a pane is most of the time.
         .when_some(status.label(), |this, label| {
             this.child(
                 div()
@@ -5416,11 +5607,6 @@ fn sidebar_pane_row(
         })
 }
 
-/// The row a list with nothing in it shows: the way to put something in it.
-///
-/// It is an action rather than a sentence, because the only thing an empty list
-/// can say that the user does not already know is where the next place comes
-/// from.
 fn sidebar_empty_row(
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
@@ -5536,9 +5722,9 @@ fn window_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(40.0))
-        .h(px(28.0))
-        .rounded(px(6.0))
+        .w(px(42.0))
+        .h(px(32.0))
+        .rounded(px(7.0))
         .window_control_area(area)
         .cursor_pointer()
         .hover(move |this| this.bg(wash))
@@ -5771,6 +5957,49 @@ fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
         PaneStatus::Working => theme.ring.opacity(0.22),
         PaneStatus::Exited => theme.danger.opacity(0.18),
         PaneStatus::Idle => theme.background.opacity(0.0),
+    }
+}
+
+/// The directory a shell is working in, when it reports one.
+///
+/// There is no process inspection here: the shell's OSC title is the only
+/// thing a terminal is told for free, and on Windows it is often the full
+/// path of the executable rather than the working directory. That case is
+/// dropped — a bar that says
+/// `C:\Program Files\WindowsApps\Microsoft.PowerShell_...\pwsh.exe` next to
+/// `pwsh` has said the program's name twice and where it is zero times.
+fn pane_cwd(pane: &Pane) -> Option<String> {
+    let title = pane.session.frame().title.trim();
+    if title.is_empty() || title.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    let looks_like_path = title.contains('\\') || title.contains('/') || title.starts_with('~');
+    if !looks_like_path {
+        return None;
+    }
+    Some(shorten_path(title))
+}
+
+/// Replaces the user's home directory with `~`, which is how every shell
+/// prompt already writes it.
+fn shorten_path(path: &str) -> String {
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| std::env::var("USERPROFILE").ok());
+    match home {
+        Some(home) if !home.is_empty() => {
+            let lower = path.to_ascii_lowercase();
+            let home_lower = home.to_ascii_lowercase();
+            if lower.starts_with(&home_lower) {
+                let rest = &path[home.len()..];
+                return if rest.is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~{}", rest.replace('\\', "/"))
+                };
+            }
+            path.replace('\\', "/")
+        }
+        _ => path.to_owned(),
     }
 }
 
