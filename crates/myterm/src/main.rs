@@ -2535,9 +2535,24 @@ impl Render for Workspace {
                         .min_w_0()
                         .min_h_0()
                         .flex()
+                        .flex_row()
                         .pr(px(PANE_GAP))
                         .pb(px(PANE_GAP))
-                        .child(self.render_panes(tab, style, cx)),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .child(self.render_panes(tab, style, cx)),
+                        )
+                        // The sheet is the work area's last column, not an
+                        // overlay: the panes keep their full height and their
+                        // rounded corners, and a font size can be tried on while
+                        // watching the grid change beside the control.
+                        .when(self.settings, |this| {
+                            this.child(self.render_settings(&theme, cx))
+                        }),
                 ),
         );
 
@@ -2547,14 +2562,6 @@ impl Render for Workspace {
         // already says is a row of chrome bought for an occasional glance.
         if let Some(hint) = self.status_hint() {
             content = content.child(self.render_status_bar(&hint, &theme, cx));
-        }
-
-        // The settings sheet is a child of `content`, not of the window body:
-        // hung from the body it would start at the window's top edge and cover
-        // the title bar — including the controls that close it. Anchored here it
-        // opens under the bar, beside the sidebar, over the work it is tuning.
-        if self.settings {
-            content = content.child(self.render_settings(&theme, cx));
         }
 
         body = body.child(content);
@@ -3187,8 +3194,6 @@ impl Workspace {
             .gap(px(6.0))
             .h(px(34.0))
             .px(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
             .bg(theme.title_bar)
             .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
             .child(
@@ -3371,8 +3376,6 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .px(px(16.0))
-                            .border_b_1()
-                            .border_color(theme.border)
                             .child(Input::new(&input).appearance(false).bordered(false).small()),
                     )
                     .child(
@@ -3388,10 +3391,8 @@ impl Workspace {
                             .flex_row()
                             .items_center()
                             .gap(px(14.0))
-                            .px(px(14.0))
-                            .py(px(8.0))
-                            .border_t_1()
-                            .border_color(theme.border)
+                            .px(px(16.0))
+                            .py(px(10.0))
                             .child(hint("↑↓ 选择"))
                             .child(hint("Enter 执行"))
                             .child(hint("Esc 关闭")),
@@ -3877,9 +3878,7 @@ impl Workspace {
                             .flex_row()
                             .items_center()
                             .gap(px(10.0))
-                            .h(px(32.0))
-                            .border_t_1()
-                            .border_color(theme.border)
+                            .h(px(34.0))
                             .text_size(px(11.5))
                             .text_color(muted)
                             .child(*label)
@@ -3912,41 +3911,24 @@ impl Workspace {
             // Under the bar, not over it: the sheet is a workspace tool, and
             // covering the window's own controls with it would make closing the
             // window depend on closing settings first.
-            .top(px(TITLE_BAR_HEIGHT))
-            .left_0()
-            .right_0()
-            .bottom_0()
+            .relative()
+            .flex_shrink_0()
+            .w(px(436.0))
+            .h_full()
             .flex()
-            .flex_row()
-            .justify_end()
-            // The scrim is a sheet's worth of dimming, not a dialog's: the point
-            // of a live preview is to watch the window behind it.
+            .flex_col()
+            .overflow_hidden()
+            .bg(theme.title_bar)
+            // The column starts at the bar's own line, so its title sits on the
+            // same row as the workspace's rather than a row above it.
+            .pt(px(0.0))
+            // The sheet is a column of the window, not a card over one: laid
+            // over the work area it covered the panes' rounded corners and sat
+            // on a scrim that swallowed clicks. As a sibling it takes its own
+            // width and the panes narrow beside it, which is what a live preview
+            // was always meant to look like.
             .child(
                 div()
-                    .id("settings-scrim")
-                    .absolute()
-                    .inset_0()
-                    .bg(theme.overlay.opacity(0.32))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
-                            workspace.settings = false;
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .w(px(436.0))
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .bg(theme.title_bar)
-                    .border_l_1()
-                    .border_color(theme.border)
-                    .shadow_lg()
                     // A press inside the sheet is the sheet's. Without this the
                     // click falls through to the pane underneath and puts the
                     // caret there, which is a strange thing to have happen while
@@ -5267,7 +5249,6 @@ impl Workspace {
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let current_tab = tab_index == self.active_tab;
-            let grouped = tab.panes.len() > 1;
 
             // Workspaces are separated by air rather than a rule: the selected
             // fill already marks the current place, and a line drawn across the
@@ -5285,38 +5266,38 @@ impl Workspace {
 
             let closable = self.tabs.len() > 1;
 
-            if grouped {
-                list = list.child(sidebar_group_row(
-                    tab_index,
-                    tab.title.clone(),
-                    tab.panes.len(),
-                    current_tab,
-                    tab.unseen,
-                    closable,
-                    dragging_tab == Some(tab_index),
-                    theme,
-                    cx,
-                ));
-            }
+            list = list.child(sidebar_group_row(
+                tab_index,
+                tab.title.clone(),
+                tab.panes.len(),
+                current_tab,
+                tab.unseen,
+                closable,
+                dragging_tab == Some(tab_index),
+                theme,
+                cx,
+            ));
 
             for (id, pane) in &tab.panes {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
+                let label = pane_label(pane);
+                let detail = pane_cwd(pane).or_else(|| Some(self.shell_label()));
                 list = list.child(sidebar_pane_row(
                     tab_index,
                     id,
-                    pane_label(pane),
-                    pane_cwd(pane),
+                    label,
+                    detail,
                     pane_status(pane),
                     self.config.density,
-                    // A row under a header belongs to it and steps in; a row
-                    // that stands for its own workspace stays on the top spine.
-                    grouped,
+                    // Every row sits under its workspace's header now, so every
+                    // row steps in.
+                    true,
                     selected,
                     tab.unseen,
-                    // A one-pane workspace is closed from its own row, because
-                    // that row is the workspace.
-                    closable && !grouped,
+                    // Closing a workspace is the header's job: it is the row
+                    // that stands for the workspace itself.
+                    false,
                     dragging_tab == Some(tab_index),
                     theme,
                     cx,
@@ -5353,8 +5334,7 @@ impl Workspace {
             .items_center()
             .gap(px(6.0))
             .p(px(8.0))
-            .border_t_1()
-            .border_color(theme.border)
+            .pt(px(12.0))
             .when(rail, |this| this.flex_col());
 
         let mut new_button = div()
@@ -6032,8 +6012,6 @@ impl Workspace {
             .h(px(STATUS_BAR_HEIGHT))
             .pl(px(16.0))
             .pr(px(10.0))
-            .border_t_1()
-            .border_color(theme.border)
             .text_size(px(10.5))
             .text_color(theme.muted_foreground)
             .child(hint.to_owned())
