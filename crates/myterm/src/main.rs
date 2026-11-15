@@ -3462,7 +3462,11 @@ impl Workspace {
                 .cursor_pointer()
                 .text_size(px(11.0))
                 .text_color(if active { theme.foreground } else { muted })
-                .when(active, |this| this.bg(theme.popover))
+                .when(active, |this| {
+                    this.bg(theme.popover)
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow_sm()
+                })
                 .when(!active, |this| {
                     this.hover(move |this| this.text_color(theme.muted_foreground))
                 })
@@ -3476,7 +3480,10 @@ impl Workspace {
                 .gap(px(2.0))
                 .p(px(2.0))
                 .rounded(px(8.0))
-                .bg(theme.background)
+                // The track is the neutral pill, not the window background: in
+                // light mode the background is white and so is the chip that
+                // sits on it, which made every selector invisible.
+                .bg(theme.muted)
         };
 
         // Each tab body is built here and the sheet picks one, so the sheet's
@@ -5281,8 +5288,7 @@ impl Workspace {
             for (id, pane) in &tab.panes {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
-                let label = pane_label(pane);
-                let detail = pane_cwd(pane).or_else(|| Some(self.shell_label()));
+                let (label, detail) = pane_row_titles(pane);
                 list = list.child(sidebar_pane_row(
                     tab_index,
                     id,
@@ -7332,6 +7338,55 @@ fn shorten_path(path: &str) -> String {
             path.replace('\\', "/")
         }
         _ => path.to_owned(),
+    }
+}
+
+/// The two lines a row in the column shows.
+///
+/// A terminal is identified by *where* it is, not by what it runs: three panes
+/// all running `pwsh` are told apart by their directories and by nothing else.
+/// So the path leads, and the program is only a fallback.
+///
+/// The one exception is a shell that reports a real title — `vim` naming the
+/// file it has open, a build naming its target. That is more specific than the
+/// directory and it is what the user is looking at, so it takes the first line
+/// and the path moves down to the second.
+fn pane_row_titles(pane: &Pane) -> (String, Option<String>) {
+    let cwd = pane_cwd(pane);
+    let program = pane_label(pane);
+
+    // A title worth showing is one the shell chose: not the program's own name,
+    // and not a path (Windows shells title themselves with the exe's path).
+    let reported = pane.session.frame().title.trim();
+    let is_path = reported.contains('\\') || reported.contains('/');
+    let interesting = !reported.is_empty()
+        && !is_path
+        && !reported.eq_ignore_ascii_case(&program)
+        && !reported.to_ascii_lowercase().ends_with(".exe");
+
+    match (interesting, cwd) {
+        (true, Some(cwd)) => {
+            let name = reported
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(reported)
+                .trim_end_matches(".exe")
+                .to_owned();
+            (name, Some(cwd))
+        }
+        (true, None) => (reported.to_owned(), None),
+        (false, Some(cwd)) => (directory_name(&cwd), Some(cwd)),
+        (false, None) => (program, None),
+    }
+}
+
+/// The last segment of a shortened path — what a person would call the place.
+fn directory_name(path: &str) -> String {
+    // `~` on its own is home, and its last segment is the whole string.
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => trimmed.to_owned(),
     }
 }
 

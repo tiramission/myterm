@@ -76,6 +76,83 @@ const LIGHT: Tokens = Tokens {
     sky: 0x1f5fb4,
 };
 
+/// The hue each accent sits on, in degrees.
+///
+/// The neutrals are pulled toward this so the window reads as one family. The
+/// amount is small on purpose: a chrome that is visibly coloured would compete
+/// with the accent, which is the one colour allowed to mean something.
+fn accent_hue(accent: Accent) -> f32 {
+    match accent {
+        // Lime sits in the yellow-green band; the neutrals are already there.
+        Accent::Lime => 78.0,
+        Accent::Amber => 42.0,
+        Accent::Sky => 200.0,
+        Accent::Violet => 268.0,
+    }
+}
+
+/// Pulls a neutral toward `hue`, keeping its lightness.
+///
+/// The neutrals carry a little saturation already (they are warm, not grey), so
+/// this replaces that trace with the accent's rather than adding to it. Dark
+/// chrome takes a little more: a few points of saturation is invisible on a
+/// near-black surface until it is not.
+fn tint(value: u32, hue: f32, dark: bool) -> u32 {
+    let r = ((value >> 16) & 0xff) as f32 / 255.0;
+    let g = ((value >> 8) & 0xff) as f32 / 255.0;
+    let b = (value & 0xff) as f32 / 255.0;
+
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let light = (max + min) / 2.0;
+
+    // The trace of colour the surface carries. Enough to read as a family with
+    // the accent, not enough to read as a colour.
+    let saturation = if dark { 0.14 } else { 0.10 };
+
+    let (r, g, b) = hsl_to_rgb(hue, saturation, light);
+    let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (to(r) << 16) | (to(g) << 8) | to(b)
+}
+
+/// HSL to RGB, all in 0..=1 (hue in degrees).
+fn hsl_to_rgb(hue: f32, saturation: f32, light: f32) -> (f32, f32, f32) {
+    if saturation == 0.0 {
+        return (light, light, light);
+    }
+    let q = if light < 0.5 {
+        light * (1.0 + saturation)
+    } else {
+        light + saturation - light * saturation
+    };
+    let p = 2.0 * light - q;
+    let h = hue / 360.0;
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 1.0 / 2.0 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
+}
+
 /// The ink and wash for an accent, for the settings swatches.
 pub fn accent_ink(accent: Accent, mode: gpui_kit::component::ThemeMode) -> (Hsla, Hsla) {
     let dark = !matches!(mode, gpui_kit::component::ThemeMode::Light);
@@ -137,6 +214,19 @@ impl Palette {
             _ => (&DARK, true),
         };
         let (brand, brand_soft) = accents(accent, dark);
+        // The neutrals are tinted toward the accent's hue. Without this the
+        // chrome stayed warm olive whatever accent was chosen, so "sky" or
+        // "violet" recoloured one outline in a greenish window.
+        let hue = accent_hue(accent);
+        let t = Tokens {
+            bg: tint(t.bg, hue, dark),
+            bg_soft: tint(t.bg_soft, hue, dark),
+            surface: tint(t.surface, hue, dark),
+            stroke: tint(t.stroke, hue, dark),
+            stroke_strong: tint(t.stroke_strong, hue, dark),
+            pill: tint(t.pill, hue, dark),
+            ..*t
+        };
 
         Self {
             bg: hex(t.bg),
