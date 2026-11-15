@@ -91,6 +91,10 @@ const THEME_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 /// The branch pill in the crumbs.
 const BRANCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.4" stroke-linecap="round"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="8" r="2"/><path d="M7 8v8M17 10c0 3-3 3-7 4"/></svg>"#;
 
+/// The terminal glyph: the palette's session rows wear it, the same shape the
+/// app mark uses.
+const TERMINAL_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></svg>"#;
+
 /// The search glyph: the command entry in the top bar, and the find field.
 const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
 
@@ -476,8 +480,6 @@ struct PaletteCommand {
     /// The glyph the row wears. A list of ten commands with no marks is a wall
     /// of text; the glyph is what makes a row findable before it is read.
     icon: &'static [u8],
-    /// Which heading the row sits under.
-    group: &'static str,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
@@ -486,133 +488,134 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
         label: "新建工作区",
         keys: "Ctrl+Shift+T",
         icon: PLUS_SMALL,
-        group: "命令",
     },
     PaletteCommand {
         id: "close-tab",
         label: "关闭工作区",
         keys: "Ctrl+Shift+Q",
         icon: WINDOW_CLOSE,
-        group: "命令",
     },
     PaletteCommand {
         id: "close-pane",
         label: "关闭窗格",
         keys: "Ctrl+Shift+W",
         icon: WINDOW_CLOSE,
-        group: "命令",
     },
     PaletteCommand {
         id: "split-right",
         label: "向右分屏",
         keys: "Ctrl+Shift+D",
         icon: SPLIT_HORIZONTAL,
-        group: "命令",
     },
     PaletteCommand {
         id: "split-down",
         label: "向下分屏",
         keys: "Ctrl+Shift+E",
         icon: SPLIT_VERTICAL,
-        group: "命令",
     },
     PaletteCommand {
         id: "zoom",
         label: "缩放窗格",
         keys: "Ctrl+Shift+Z",
         icon: ZOOM_IN,
-        group: "命令",
     },
     PaletteCommand {
         id: "find",
         label: "查找",
         keys: "Ctrl+Shift+F",
         icon: SEARCH_ICON,
-        group: "命令",
     },
     PaletteCommand {
         id: "rename-tab",
         label: "重命名工作区",
         keys: "",
         icon: WORKSPACE_ICON,
-        group: "命令",
     },
     PaletteCommand {
         id: "settings",
         label: "设置",
         keys: "Ctrl+,",
         icon: SETTINGS_ICON,
-        group: "命令",
     },
     PaletteCommand {
         id: "theme",
         label: "切换明暗主题",
         keys: "Ctrl+Shift+L",
         icon: THEME_ICON,
-        group: "外观",
     },
     PaletteCommand {
         id: "close-window",
         label: "关闭窗口",
         keys: "Alt+F4",
         icon: WINDOW_CLOSE,
-        group: "外观",
     },
 ];
 
-/// One row of the command palette after filtering: a command, or a workspace to
-/// jump to. Both answer "take me there", which is the only question the palette
-/// is for.
+/// One row of the command palette after filtering: a command, or a pane to jump
+/// to. Both answer "take me there", which is the only question the palette is
+/// for.
+///
+/// A pane rather than a workspace, because a workspace is not somewhere you can
+/// land: the keyboard goes to one of its panes, and a workspace row would leave
+/// the choice of which one to the app. The row carries the workspace's name as
+/// its hint, so the two levels are still readable.
 #[derive(Clone, Copy)]
 enum PaletteRow {
     Command(usize),
-    Workspace(usize),
+    Pane(usize, u64),
 }
 
 impl Workspace {
     /// Every row the palette can offer, in group order, filtered by `query`.
     ///
-    /// Commands come first because they are what the field is named after;
-    /// workspaces follow, because jumping to one is the other thing a person
-    /// types here; appearance last, as the one group that changes the window
-    /// rather than what is in it.
+    /// Two groups, the way the prototype has them: what the window can do, and
+    /// where the shells are. A pane is matched on its own name, its directory
+    /// and its workspace's name, so all three ways of remembering it work.
     fn palette_rows(&self, query: &str) -> Vec<PaletteRow> {
         let query = query.trim().to_lowercase();
         let hit = |label: &str| query.is_empty() || label.to_lowercase().contains(&query);
 
         let mut rows = Vec::new();
         for (index, command) in PALETTE_COMMANDS.iter().enumerate() {
-            if command.group == "命令" && hit(command.label) {
+            if hit(command.label) {
                 rows.push(PaletteRow::Command(index));
             }
         }
         for (index, tab) in self.tabs.iter().enumerate() {
-            if hit(&tab.title) {
-                rows.push(PaletteRow::Workspace(index));
-            }
-        }
-        for (index, command) in PALETTE_COMMANDS.iter().enumerate() {
-            if command.group != "命令" && hit(command.label) {
-                rows.push(PaletteRow::Command(index));
+            for (id, pane) in &tab.panes {
+                let cwd = pane_cwd(pane).unwrap_or_default();
+                if hit(&pane_label(pane)) || hit(&cwd) || hit(&tab.title) {
+                    rows.push(PaletteRow::Pane(index, *id));
+                }
             }
         }
         rows
     }
 
-    /// What a row says, and what it is grouped under.
-    fn palette_label(&self, row: PaletteRow) -> (String, &'static str) {
+    /// What a row says, what it is grouped under, and the hint beside it.
+    fn palette_label(&self, row: PaletteRow) -> (String, &'static str, String) {
         match row {
             PaletteRow::Command(index) => {
                 let command = &PALETTE_COMMANDS[index];
-                (command.label.to_owned(), command.group)
+                (command.label.to_owned(), "命令", command.keys.to_owned())
             }
-            PaletteRow::Workspace(index) => (
-                self.tabs
-                    .get(index)
-                    .map(|tab| tab.title.clone())
-                    .unwrap_or_default(),
-                "工作区",
-            ),
+            PaletteRow::Pane(tab, id) => {
+                let Some(tab) = self.tabs.get(tab) else {
+                    return (String::new(), "会话", String::new());
+                };
+                let Some(pane) = tab.panes.get(&id) else {
+                    return (String::new(), "会话", String::new());
+                };
+                // The workspace, then the directory: the same two facts the
+                // column shows, in the order a person scans them.
+                let cwd = pane_cwd(pane).unwrap_or_default();
+                let hint = if cwd.is_empty() {
+                    tab.title.clone()
+                } else {
+                    format!("{} · {cwd}", tab.title)
+                };
+                (pane_label(pane), "会话", hint)
+            }
         }
     }
 }
@@ -620,15 +623,8 @@ impl Workspace {
 /// Runs the row the palette is pointing at.
 fn palette_icon(row: PaletteRow) -> &'static [u8] {
     match row {
-        PaletteRow::Workspace(_) => WORKSPACE_ICON,
+        PaletteRow::Pane(..) => TERMINAL_ICON,
         PaletteRow::Command(index) => PALETTE_COMMANDS[index].icon,
-    }
-}
-
-fn palette_key(row: PaletteRow) -> &'static str {
-    match row {
-        PaletteRow::Workspace(_) => "",
-        PaletteRow::Command(index) => PALETTE_COMMANDS[index].keys,
     }
 }
 
@@ -3230,7 +3226,7 @@ impl Workspace {
             );
         }
         for (index, row) in rows.iter().enumerate() {
-            let (label, group) = self.palette_label(*row);
+            let (label, group, hint) = self.palette_label(*row);
             if group != current_group {
                 current_group = group;
                 list = list.child(
@@ -3245,7 +3241,7 @@ impl Workspace {
             }
 
             let is_selected = index == selected;
-            let keys = palette_key(*row);
+            let keys = hint;
             list = list.child(
                 div()
                     .id(ElementId::Name(format!("palette-{index}").into()))
@@ -4590,7 +4586,10 @@ impl Workspace {
         window.focus(&self.focus, cx);
 
         match row {
-            PaletteRow::Workspace(tab) => self.select_tab(tab, cx),
+            PaletteRow::Pane(tab, id) => {
+                self.select_tab(tab, cx);
+                self.focus_pane(id, cx);
+            }
             PaletteRow::Command(index) => match PALETTE_COMMANDS[index].id {
                 "new-tab" => self.new_tab(window, cx),
                 "close-tab" => self.close_tab(self.active_tab, cx),
