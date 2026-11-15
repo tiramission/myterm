@@ -5918,6 +5918,13 @@ impl Workspace {
         if self.zoomed.is_some() {
             return Some("已缩放 · Esc 退出".to_owned());
         }
+        // A workspace that finished something while you were elsewhere. The
+        // row is the window's answer to "did anything happen"; the dot in the
+        // column says which one.
+        let waiting = self.tabs.iter().filter(|tab| tab.unseen).count();
+        if waiting > 0 {
+            return Some(format!("{waiting} 个工作区有新输出"));
+        }
         // An update that is ready is the other thing worth a row: it is a
         // decision waiting to be made, and the badge in the bar is easy to miss
         // while the terminal has the eye.
@@ -5948,6 +5955,26 @@ impl Workspace {
             .text_color(theme.muted_foreground)
             .child(hint.to_owned())
             .child(div().flex_1())
+            .when(self.tabs.iter().any(|tab| tab.unseen), |this| {
+                this.child(
+                    div()
+                        .id("status-unseen")
+                        .px(px(6.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .text_color(theme.ring)
+                        .hover(move |this| this.bg(theme.ring.opacity(0.13)))
+                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                            // The first workspace that finished something is
+                            // the one you most likely want; the rest follow as
+                            // you work through them.
+                            if let Some(index) = workspace.tabs.iter().position(|tab| tab.unseen) {
+                                workspace.select_tab(index, cx);
+                            }
+                        }))
+                        .child("查看"),
+                )
+            })
             .when(
                 self.update_badge().is_some_and(|(_, ready)| ready),
                 |this| {
