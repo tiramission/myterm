@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- myterm 新界面设计原型（提案，尚未实现）。打开即可交互：Ctrl+K 命令面板，Ctrl+, 设置，Ctrl+F 查找。 -->
+<!-- myterm 新界面设计原型（提案，尚未实现）。打开即可交互：Ctrl+K 命令面板，Ctrl+, 设置，Ctrl+Shift+F 查找。 -->
 <html lang="zh-CN" data-theme="dark" data-accent="lime">
 <head>
 <meta charset="utf-8">
@@ -198,6 +198,7 @@ html[data-theme="light"] .term .m{color:#8b5a86}
 .findbar .fn:hover{background:var(--surface);color:var(--text)}
 
 .status{height:var(--status);flex:0 0 auto;display:flex;align-items:center;gap:14px;padding:0 10px 0 16px;border-top:1px solid var(--line);color:var(--text3);font-size:10.5px}
+.status[hidden]{display:none}
 .status .lab{display:flex;align-items:center;gap:6px}
 .status .spacer{flex:1}
 
@@ -347,6 +348,7 @@ html[data-theme="light"] .term .m{color:#8b5a86}
         <button class="mitem" data-open-settings>设置<span class="k">Ctrl+,</span></button>
         <button class="mitem" data-open-about>关于 myterm</button>
         <button class="mitem" data-check-update>检查更新</button>
+        <button class="mitem" data-toggle-theme><span data-theme-label>切换到浅色主题</span><span class="k">Ctrl+Shift+L</span></button>
         <div class="msep"></div>
         <button class="mitem" data-quit>退出</button>
       </div>
@@ -360,14 +362,10 @@ html[data-theme="light"] .term .m{color:#8b5a86}
     </div>
 
     <div class="workspace" id="workspace"></div>
-    <footer class="status">
-      <span class="lab" id="stSessions">3 个会话</span>
-      <span class="lab" id="stBranch">main</span>
+    <footer class="status" id="statusbar" hidden>
       <span class="lab" id="stHint"></span>
       <span class="spacer"></span>
-      <span class="lab">Ctrl K 命令</span>
-      <span class="lab">Ctrl F 查找</span>
-      <button class="icon-btn" id="themeBtn" style="width:22px;height:22px" title="切换主题 (Ctrl+Shift+L)"></button>
+      <span class="lab" id="stExtra"></span>
     </footer>
   </div>
 </div>
@@ -605,9 +603,8 @@ function renderCanvas() {
     $('#wsTitle').textContent = 'myterm';
     $('#cwdLabel').textContent = '';
     $('#branchText').textContent = '—';
-    $('#stSessions').textContent = '0 个会话';
-    $('#stBranch').textContent = '—';
     $('#stHint').textContent = '';
+    $('#statusbar').hidden = true;
     return;
   }
   const w = activeWs();
@@ -619,9 +616,9 @@ function renderCanvas() {
   $('#wsTitle').textContent = w.name;
   $('#cwdLabel').textContent = pane.cwd;
   $('#branchText').textContent = pane.branch || '—';
-  $('#stSessions').textContent = wsLeaves(w).length + ' 个会话 · 共 ' + state.workspaces.reduce((n, x) => n + wsLeaves(x).length, 0) + ' 个';
-  $('#stBranch').textContent = pane.branch || '—';
-  $('#stHint').textContent = zoomId ? '已缩放 · Esc 退出' : '';
+  const hint = zoomId ? '已缩放 · Esc 退出' : '';
+  $('#stHint').textContent = hint;
+  $('#statusbar').hidden = !hint;
   if (state.find) setTimeout(() => { const f = $('#findInput'); if (f) f.focus(); }, 0);
 }
 
@@ -669,8 +666,8 @@ function renderSettings() {
     const keys = [
       ['新建工作区','Ctrl Shift T'],['关闭工作区','Ctrl Shift Q'],['关闭会话','Ctrl Shift W'],
       ['向右分屏','Ctrl Shift D'],['向下分屏','Ctrl Shift E'],['缩放窗格','Ctrl Shift Z'],
-      ['查找','Ctrl F'],['命令面板','Ctrl K'],['设置','Ctrl ,'],['切换主题','Ctrl Shift L'],
-      ['收起侧栏','Ctrl B'],['切换窗格','Alt 方向键']
+      ['查找','Ctrl Shift F'],['命令面板','Ctrl K'],['设置','Ctrl ,'],['切换主题','Ctrl Shift L'],
+      ['切换标签','Ctrl Tab'],['直达标签','Ctrl 1..9'],['收起侧栏','Ctrl B'],['切换窗格','Alt 方向键']
     ];
     body.innerHTML = `<div class="sgroup">快捷键</div><div class="klist">` + keys.map(([n,k]) => `<div class="krow"><span>${n}</span><span class="keys">${k.split(' ').map(x=>`<span class="kbd">${x}</span>`).join('')}</span></div>`).join('') + `</div>`;
   }
@@ -693,7 +690,8 @@ function applyLook() {
   document.documentElement.dataset.accent = state.accent;
   document.body.dataset.density = state.density;
   document.documentElement.style.setProperty('--term-fs', state.termFs + 'px');
-  $('#themeBtn').innerHTML = dark ? icon.sun : icon.moon;
+  const themeItem = $('#appMenu [data-theme-label]');
+  if (themeItem) themeItem.textContent = dark ? '切换到浅色主题' : '切换到深色主题';
 }
 
 /* find */
@@ -986,6 +984,7 @@ document.addEventListener('click', (e) => {
   if (t.hasAttribute('data-uninstall')) return uninstallApp();
   if (t.hasAttribute('data-install-app') || t.hasAttribute('data-install')) return installApp();
   if (t.hasAttribute('data-install-dismiss')) { state.installDismissed = true; renderInstall(); return; }
+  if (t.hasAttribute('data-toggle-theme')) { closeMenu(); return toggleTheme(); }
   if (t.hasAttribute('data-quit')) { closeMenu(); toast('原型中不退出应用'); return; }
   if (t.hasAttribute('data-sess-close')) { e.stopPropagation(); return closeSession(t.dataset.sessClose); }
   if (t.hasAttribute('data-ws-close')) { e.stopPropagation(); return closeWorkspace(+t.dataset.wsClose); }
@@ -1049,7 +1048,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (mod && k === ',') { e.preventDefault(); state.settings ? closeSettings() : openSettings(); return; }
   if (mod && k === 'k') { e.preventDefault(); $('#palette').hidden ? openPalette() : closePalette(); return; }
+  if (mod && e.shiftKey && k === 'f') { e.preventDefault(); state.find = !state.find; render(); return; }
   if (mod && k === 'f') { e.preventDefault(); state.find = !state.find; render(); return; }
+  if (mod && k === 'tab') { e.preventDefault(); const n = state.workspaces.length; if (n) focusPane((state.ws + (e.shiftKey ? n - 1 : 1)) % n, activeId()); return; }
   if (mod && k === 'b') { e.preventDefault(); toggleRail(); return; }
   if (mod && e.shiftKey && k === 'l') { e.preventDefault(); toggleTheme(); return; }
   if (mod && e.shiftKey && k === 't') { e.preventDefault(); newWorkspace(); return; }
@@ -1058,7 +1059,7 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.shiftKey && k === 'z') { e.preventDefault(); toggleZoom(activeId()); return; }
   if (mod && e.shiftKey && k === 'w') { e.preventDefault(); closeSession(activeId()); return; }
   if (mod && e.shiftKey && k === 'q') { e.preventDefault(); closeWorkspace(state.ws); return; }
-  if (e.altKey && /^[1-9]$/.test(e.key)) { const i = +e.key - 1; if (state.workspaces[i]) focusPane(i, state.wsActive[String(i)] || wsLeaves(state.workspaces[i])[0]); return; }
+  if ((e.altKey || mod) && /^[1-9]$/.test(e.key)) { const i = +e.key - 1; const target = i === 8 ? state.workspaces.length - 1 : i; if (state.workspaces[target]) focusPane(target, state.wsActive[String(target)] || wsLeaves(state.workspaces[target])[0]); return; }
 });
 
 document.addEventListener('pointerdown', (e) => {
