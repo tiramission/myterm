@@ -2711,7 +2711,11 @@ impl Workspace {
                             theme.border
                         })
                     })
-                    .when(multi && !focused, |this| this.opacity(0.84))
+                    // No dimming on the pane that is not holding the keyboard.
+                    // An opacity step washes the output out — badly in light
+                    // mode, where pale foreground colours go almost white — and
+                    // a terminal whose text fades when you look away is the
+                    // opposite of immersive. Focus is the border alone.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
