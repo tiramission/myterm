@@ -37,6 +37,16 @@ use pty::{Command, Pty};
 use terminal::Session;
 use vt::Rgb;
 
+/// The shell to start, wrapped for shell integration when it is on.
+fn build_command(shell: config::Shell, integration: bool) -> Command {
+    let command = pty_command::profile(shell);
+    if integration {
+        pty_command::with_shell_integration(command)
+    } else {
+        command
+    }
+}
+
 /// The split glyphs, drawn inline.
 ///
 /// The bundled `columns-2` and `rows-2` assets paint nothing on this platform,
@@ -816,7 +826,7 @@ impl Workspace {
         Self {
             tabs: Vec::new(),
             active_tab: 0,
-            command: pty_command::profile(config.shell),
+            command: build_command(config.shell, config.shell_integration),
             ticking: false,
             error: None,
             cached_style: GridStyle::default(),
@@ -1487,6 +1497,18 @@ impl Workspace {
                 pane.retheme(&theme);
             }
         }
+        cx.notify();
+    }
+
+    /// Turns the shell's directory reporting on or off.
+    ///
+    /// It only changes what the *next* pane starts with: a running shell cannot
+    /// have its prompt rewritten from outside, and quietly restarting one to
+    /// apply a setting would throw away whatever it was doing.
+    fn set_shell_integration(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.config.shell_integration = on;
+        self.config.save();
+        self.command = build_command(self.config.shell, on);
         cx.notify();
     }
 
@@ -2662,11 +2684,16 @@ impl Workspace {
                     // three places claim it at once. The pane that is not
                     // holding the keyboard steps back by a sixteenth instead.
                     .bg(style.background)
-                    .border_1()
-                    .border_color(if multi && focused {
-                        palette::Palette::current(cx).stroke_strong
-                    } else {
-                        theme.border
+                    // One pane fills the whole work area, so an edge around it
+                    // would be drawing a box around the view itself. A split
+                    // needs one: those cards sit next to each other and the gap
+                    // between them is not enough on its own.
+                    .when(multi, |this| {
+                        this.border_1().border_color(if focused {
+                            palette::Palette::current(cx).stroke_strong
+                        } else {
+                            theme.border
+                        })
                     })
                     .when(multi && !focused, |this| this.opacity(0.84))
                     .on_mouse_down(
@@ -3670,6 +3697,32 @@ impl Workspace {
                             .child("+"),
                     );
 
+                let integration_row = track()
+                    .child(
+                        seg(
+                            id("sh-integration-off"),
+                            "关闭",
+                            !self.config.shell_integration,
+                        )
+                        .on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_shell_integration(false, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        seg(
+                            id("sh-integration-on"),
+                            "启用",
+                            self.config.shell_integration,
+                        )
+                        .on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_shell_integration(true, cx);
+                            },
+                        )),
+                    );
+
                 let mut cursor_row = track();
                 for option in [
                     None,
@@ -3797,6 +3850,12 @@ impl Workspace {
                         "超出后丢弃最旧的输出，搜索也只看这么多",
                         theme,
                         scrollback_row.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "shell 集成",
+                        "让 shell 报告自己的目录，侧栏与窗格头才会显示路径和分支；只对 PowerShell 生效，会改写它的提示符函数，新窗格开始使用",
+                        theme,
+                        integration_row.into_any_element(),
                     ))
                     .child(setting_row(
                         "光标",
@@ -7605,7 +7664,7 @@ fn main() {
     // colors the window will use.
     let saved = config::Config::load();
     let light = saved.light.unwrap_or_else(system_prefers_light);
-    let command = pty_command::profile(saved.shell);
+    let command = build_command(saved.shell, saved.shell_integration);
 
     // The pane needs the palette the window will end up with, and the theme is
     // only installed later in `gpui_kit::init`, so the colors are resolved

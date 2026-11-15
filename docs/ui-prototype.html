@@ -159,6 +159,10 @@ body.narrow .new-sess span{display:none}
 .pane.focus{border-color:var(--line2)}
 .pane-head{height:30px;flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:0 6px 0 11px;color:var(--text2);font-size:11px}
 .single .pane-head{display:none}
+/* One pane is the whole work area: an edge around it would be drawing a box
+   around the view itself. It keeps its shadow, which reads as depth rather than
+   as a boundary. */
+.single .pane{border-color:transparent;box-shadow:none}
 .pane-head .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
 .pane-title{font-weight:500;color:var(--text2);white-space:nowrap}
 .pane.focus .pane-title{color:var(--text)}
@@ -478,6 +482,7 @@ const state = {
   theme:'dark', rail:'wide', find:false, ws:0, zoom:null, menu:false,
   settings:false, stTab:'外观',
   density:'standard', accent:'lime', cursor:'block', termFs:12.5, scrollback:10000, shell:'pwsh',
+  integration:'off',
   installed:true, installDismissed:false, update:'latest',
   wsActive:{ '0':'p1', '1':'p4', '2':'p6' },
   workspaces:[
@@ -681,7 +686,9 @@ function renderSettings() {
       <div class="srow"><div class="slabel"><div>光标</div><div class="shint">块状时会反色重绘左下的字符</div></div>
         <div class="seg">${seg('cursor','bar','竖线')}${seg('cursor','block','块')}${seg('cursor','underline','下划线')}</div></div>
       <div class="srow"><div class="slabel"><div>回滚行数</div><div class="shint">超出后丢弃最旧的输出</div></div>
-        <div class="stepper"><button data-step="scrollback" data-dir="-1000">−</button><span class="val">${state.scrollback}</span><button data-step="scrollback" data-dir="1000">+</button></div></div>`;
+        <div class="stepper"><button data-step="scrollback" data-dir="-1000">−</button><span class="val">${state.scrollback}</span><button data-step="scrollback" data-dir="1000">+</button></div></div>
+      <div class="srow"><div class="slabel"><div>shell 集成</div><div class="shint">让 shell 报告自己的目录，侧栏和窗格头才能显示路径与分支；会改写 PowerShell 的提示符函数</div></div>
+        <div class="seg">${seg('integration','off','关闭')}${seg('integration','on','启用')}</div></div>`;
   } else {
     const keys = [
       ['新建工作区','Ctrl Shift T'],['关闭工作区','Ctrl Shift Q'],['关闭会话','Ctrl Shift W'],
@@ -887,6 +894,18 @@ function newWorkspace() {
   render();
 }
 
+/* shell integration: the panes only know where they are because the shell
+   says so. Turning it on in the prototype fills in the directory line the
+   default PowerShell would otherwise leave empty. */
+function applyIntegration() {
+  const on = state.integration === 'on';
+  document.body.dataset.integration = on ? 'on' : 'off';
+  for (const p of Object.values(state.panes)) {
+    if (on && !p.cwd) p.cwd = '~';
+  }
+  render();
+}
+
 function toggleTheme() {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
   applyLook();
@@ -987,7 +1006,11 @@ document.addEventListener('click', (e) => {
   if (t.hasAttribute('data-confirm-cancel')) { closeConfirm(); return; }
   if (t.hasAttribute('data-i')) return runItem(+t.dataset.i);
   if (t.hasAttribute('data-tab')) { state.stTab = t.dataset.tab; renderSettings(); return; }
-  if (t.hasAttribute('data-seg')) { state[t.dataset.seg] = t.dataset.val; applyLook(); render(); renderSettings(); return; }
+  if (t.hasAttribute('data-seg')) {
+    state[t.dataset.seg] = t.dataset.val;
+    if (t.dataset.seg === 'integration') applyIntegration();
+    applyLook(); render(); renderSettings(); return;
+  }
   if (t.hasAttribute('data-accent')) { state.accent = t.dataset.accent; applyLook(); renderSettings(); return; }
   if (t.hasAttribute('data-step')) {
     const key = t.dataset.step, d = +t.dataset.dir;

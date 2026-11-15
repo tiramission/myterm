@@ -52,6 +52,55 @@ pub fn default_profile() -> Command {
     }
 }
 
+/// Wraps a PowerShell command so its prompt reports the working directory.
+///
+/// The shell only tells a terminal where it is if something asks it to, and the
+/// usual way is OSC 7 in the prompt. PowerShell has no hook for that, so the
+/// prompt function is wrapped: the original is kept and called, and the sequence
+/// is written just before it. The wrapper is built as a single `-Command` string
+/// rather than a script file, so nothing is written to disk.
+///
+/// Only PowerShell is covered. `cmd` has no prompt function to wrap, and `wsl`
+/// runs another shell whose integration is that shell's business.
+pub fn with_shell_integration(command: Command) -> Command {
+    let name = std::path::Path::new(&command.program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !name.starts_with("pwsh") && !name.starts_with("powershell") {
+        return command;
+    }
+
+    // The whole snippet is one argument. It saves the current prompt, installs
+    // one that emits OSC 7 then delegates, and leaves `-NoExit` in place so the
+    // shell stays interactive.
+    let script = r#"
+if (-not $global:__myterm_prompt) {
+  $global:__myterm_prompt = $function:prompt
+  function global:prompt {
+    try {
+      $p = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath
+      if ($p) { [Console]::Write([string][char]27 + ']7;file:///' + $p.Replace('\','/') + [char]7) }
+    } catch {}
+    if ($global:__myterm_prompt) { & $global:__myterm_prompt } else { "PS $($ExecutionContext.SessionState.Path.CurrentLocation)> " }
+  }
+}
+"#
+    .trim()
+    .to_owned();
+
+    Command {
+        program: command.program,
+        args: vec![
+            "-NoLogo".to_owned(),
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            script,
+        ],
+    }
+}
+
 /// Resolves `program` against `PATH`.
 fn find_on_path(program: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;

@@ -27,6 +27,13 @@ pub struct Config {
     pub cursor: Option<Cursor>,
     /// How many lines to keep above the screen.
     pub scrollback: usize,
+    /// Whether new shells are started with a prompt that reports the working
+    /// directory.
+    ///
+    /// A shell says nothing about where it is unless it is told to, and the
+    /// directory line and the branch pill both depend on hearing it. This is
+    /// opt-in because it rewrites the user's prompt function.
+    pub shell_integration: bool,
 }
 
 impl Default for Config {
@@ -39,6 +46,7 @@ impl Default for Config {
             shell: Shell::Auto,
             cursor: Some(Cursor::Block),
             scrollback: DEFAULT_SCROLLBACK,
+            shell_integration: false,
         }
     }
 }
@@ -268,6 +276,11 @@ impl Config {
                         config.shell = shell;
                     }
                 }
+                "shell_integration" => match value {
+                    "on" | "true" => config.shell_integration = true,
+                    "off" | "false" => config.shell_integration = false,
+                    _ => {}
+                },
                 "scrollback" => {
                     if let Ok(lines) = value.parse::<usize>()
                         && (MIN_SCROLLBACK..=MAX_SCROLLBACK).contains(&lines)
@@ -309,14 +322,14 @@ impl Config {
         text.push_str(&format!("density = {}\n", self.density.as_str()));
         text.push_str(&format!("accent = {}\n", self.accent.as_str()));
         text.push_str(&format!("shell = {}\n", self.shell.as_str()));
-        text.push_str(&format!(
-            "scrollback = {}
-",
-            self.scrollback
-        ));
+        text.push_str(&format!("scrollback = {}\n", self.scrollback));
         text.push_str(&format!(
             "cursor = {}\n",
             self.cursor.map_or("auto", |cursor| cursor.as_str())
+        ));
+        text.push_str(&format!(
+            "shell_integration = {}\n",
+            if self.shell_integration { "on" } else { "off" }
         ));
 
         text
@@ -353,6 +366,7 @@ mod tests {
             shell: Shell::Cmd,
             cursor: Some(Cursor::Underline),
             scrollback: 20_000,
+            shell_integration: true,
         };
         let read = Config::parse(&config.encode());
 
@@ -363,6 +377,7 @@ mod tests {
         assert_eq!(read.shell, Shell::Cmd);
         assert_eq!(read.cursor, Some(Cursor::Underline));
         assert_eq!(read.scrollback, 20_000);
+        assert!(read.shell_integration);
     }
 
     #[test]
@@ -391,6 +406,34 @@ shell = bash
         assert_eq!(read.shell, Shell::Auto);
         // The default is the prototype's block; an unknown value leaves it.
         assert_eq!(read.cursor, Some(Cursor::Block));
+    }
+
+    #[test]
+    fn shell_integration_is_off_until_it_is_asked_for() {
+        assert!(!Config::default().shell_integration);
+        assert!(!Config::parse("").shell_integration);
+        assert!(
+            Config::parse(
+                "shell_integration = on
+"
+            )
+            .shell_integration
+        );
+        assert!(
+            !Config::parse(
+                "shell_integration = off
+"
+            )
+            .shell_integration
+        );
+        // An unknown value leaves the default rather than guessing.
+        assert!(
+            !Config::parse(
+                "shell_integration = maybe
+"
+            )
+            .shell_integration
+        );
     }
 
     #[test]
