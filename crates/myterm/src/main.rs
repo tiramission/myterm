@@ -262,7 +262,15 @@ fn to_rgb(color: Hsla) -> Rgb {
 
 /// One tab: a title, the panes it holds, and how they are arranged.
 struct Tab {
+    /// The name this workspace was given. It is not the shell's title: a
+    /// workspace is a place the user made — `myterm`, `日志`, `部署` — and
+    /// naming it after whatever shell happens to be focused would rename it
+    /// every time a build starts.
     title: String,
+    /// Whether the name above is still the one generated at creation. A
+    /// generated name is replaced by the first shell's title; a chosen one is
+    /// never touched.
+    auto_named: bool,
     /// Panes keyed by the id the layout tree refers to. A map rather than a vec
     /// so removing a pane never invalidates the others' identity.
     panes: BTreeMap<u64, Pane>,
@@ -296,6 +304,7 @@ impl Tab {
 
         Self {
             title: "终端".to_owned(),
+            auto_named: true,
             panes,
             layout: Layout::Leaf(1),
             active: 1,
@@ -508,6 +517,13 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
         group: "命令",
     },
     PaletteCommand {
+        id: "rename-tab",
+        label: "重命名工作区",
+        keys: "",
+        icon: WORKSPACE_ICON,
+        group: "命令",
+    },
+    PaletteCommand {
         id: "settings",
         label: "设置",
         keys: "Ctrl+,",
@@ -661,6 +677,13 @@ struct ClosedTab {
     at: Instant,
 }
 
+/// The rename field and the workspace it will rename.
+struct Rename {
+    tab: usize,
+    input: Entity<InputState>,
+    _sub: Subscription,
+}
+
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
     tabs: Vec<Tab>,
@@ -731,6 +754,8 @@ pub struct Workspace {
     find: Option<FindState>,
     /// The command palette, while it is open.
     palette: Option<Palette>,
+    /// The rename field, while it is open.
+    rename: Option<Rename>,
     /// The app menu under the bar's `⋯`, while it is open.
     app_menu: bool,
     /// Whether the about card is on screen.
@@ -809,6 +834,7 @@ impl Workspace {
             menu: None,
             find: None,
             palette: None,
+            rename: None,
             app_menu: false,
             about: false,
             closing: None,
@@ -831,6 +857,7 @@ impl Workspace {
         panes.insert(1, pane);
         self.tabs = vec![Tab {
             title: "终端".to_owned(),
+            auto_named: true,
             panes,
             layout: Layout::Leaf(1),
             active: 1,
@@ -1055,9 +1082,11 @@ impl Workspace {
                     pane.working = working;
                 }
             }
-            // The shell announces its directory and command through OSC
-            // sequences; adopting the title it sets keeps the tab honest.
-            if let Some(pane) = tab.active_pane()
+            // A generated name follows the shell; a chosen one does not. A
+            // workspace someone named `日志` should still say `日志` when a
+            // build starts in one of its panes.
+            if tab.auto_named
+                && let Some(pane) = tab.active_pane()
                 && let Some(title) = tab_title(pane)
                 && title != tab.title
             {
@@ -1222,6 +1251,23 @@ impl Workspace {
     fn prompt_close(&mut self, target: CloseTarget, cx: &mut Context<Self>) {
         self.closing = Some(target);
         cx.notify();
+    }
+
+    /// Renames a workspace and stops following its shell.
+    ///
+    /// The name is trimmed and an empty one is refused: a row with no label is
+    /// a row you cannot pick out of a list, which is the one thing the column
+    /// exists to do.
+    fn rename_tab(&mut self, index: usize, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.title = name.to_owned();
+            tab.auto_named = false;
+            cx.notify();
+        }
     }
 
     /// Closes the workspace, asking first when something in it is still writing.
@@ -1589,6 +1635,33 @@ impl Workspace {
                 }
                 "enter" => {
                     self.confirm_close(window, cx);
+                    cx.stop_propagation();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The rename card owns the keyboard while it is up. Enter and Escape
+        // mean what they mean in every rename field; everything else falls
+        // through to the text field.
+        if self.rename.is_some() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.rename = None;
+                    window.focus(&self.focus, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    if let Some(rename) = self.rename.as_ref() {
+                        let index = rename.tab;
+                        let name = rename.input.read(cx).value().to_string();
+                        self.rename_tab(index, &name, cx);
+                    }
+                    self.rename = None;
+                    window.focus(&self.focus, cx);
+                    cx.notify();
                     cx.stop_propagation();
                 }
                 _ => {}
@@ -2443,6 +2516,10 @@ impl Render for Workspace {
             ));
         }
 
+        if self.rename.is_some() {
+            body = body.child(self.render_rename(&theme, cx));
+        }
+
         if self.closed.is_some() {
             body = body.child(self.render_toast(&theme, cx));
         }
@@ -2786,6 +2863,12 @@ impl Workspace {
                 workspace.close_others(tab, cx);
             }),
         );
+        let rename = menu_row("menu-rename", "重命名工作区", true, &theme).on_click(cx.listener(
+            move |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
+                workspace.menu = None;
+                workspace.open_rename(tab, window, cx);
+            },
+        ));
         let copy = menu_row("menu-copy", "复制工作区标题", true, &theme).on_click(cx.listener(
             move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(title.clone()));
@@ -2831,15 +2914,158 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                     })
-                    .child(close)
-                    .child(close_others)
+                    .child(rename)
+                    .child(copy)
                     .child(div().h(px(1.0)).mx(px(6.0)).my(px(4.0)).bg(theme.border))
-                    .child(copy),
+                    .child(close)
+                    .child(close_others),
             )
             .into_any_element()
     }
 
     /// The find bar: a field, a count, and a way out.
+    /// Opens the rename field for a workspace.
+    fn open_rename(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("工作区名字")
+                .default_value(tab.title.clone())
+        });
+        let sub = cx.subscribe(&input, |_: &mut Workspace, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+
+        self.rename = Some(Rename {
+            tab: index,
+            input,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// The rename card: one field, one button, and Enter.
+    fn render_rename(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(rename) = self.rename.as_ref() else {
+            return div().into_any_element();
+        };
+        let index = rename.tab;
+        let input = rename.input.clone();
+        let muted = theme.muted_foreground;
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.rename = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(320.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .p(px(18.0))
+                    .rounded(px(14.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("重命名工作区"),
+                    )
+                    .child(Input::new(&input).small())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("rename-cancel")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .px(px(14.0))
+                                    .rounded(px(7.0))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .cursor_pointer()
+                                    .text_size(px(11.5))
+                                    .text_color(muted)
+                                    .hover(move |this| this.bg(theme.muted))
+                                    .on_click(cx.listener(
+                                        |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
+                                            workspace.rename = None;
+                                            window.focus(&workspace.focus, cx);
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("rename-save")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .px(px(14.0))
+                                    .rounded(px(7.0))
+                                    .bg(theme.ring.opacity(0.13))
+                                    .cursor_pointer()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.ring)
+                                    .hover(move |this| this.bg(theme.ring.opacity(0.2)))
+                                    .on_click(cx.listener(
+                                        move |workspace: &mut Workspace,
+                                              _: &ClickEvent,
+                                              window,
+                                              cx| {
+                                            let name = workspace
+                                                .rename
+                                                .as_ref()
+                                                .map(|rename| {
+                                                    rename.input.read(cx).value().to_string()
+                                                })
+                                                .unwrap_or_default();
+                                            workspace.rename_tab(index, &name, cx);
+                                            workspace.rename = None;
+                                            window.focus(&workspace.focus, cx);
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("保存"),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The find strip, inside the pane it searches.
     ///
     /// It takes its own row above the grid rather than floating over the
@@ -4322,6 +4548,7 @@ impl Workspace {
             PaletteRow::Command(index) => match PALETTE_COMMANDS[index].id {
                 "new-tab" => self.new_tab(window, cx),
                 "close-tab" => self.close_tab(self.active_tab, cx),
+                "rename-tab" => self.open_rename(self.active_tab, window, cx),
                 "close-pane" => self.close_pane(cx),
                 "split-right" => self.split_active(Axis::Horizontal, window, cx),
                 "split-down" => self.split_active(Axis::Vertical, window, cx),
