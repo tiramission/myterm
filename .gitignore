@@ -1,2 +1,5 @@
 target/
 docs/screenshot.html
+
+# OpenDesign plugin workspace (drafts, revision snapshots)
+opendesign-projects/
