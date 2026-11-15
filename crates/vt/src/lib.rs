@@ -4,6 +4,10 @@
 //! exposes is a value type or an owner that frees on `Drop`, so the app never
 //! has to reason about the C lifetime rules.
 
+mod search;
+
+pub use search::{Match as SearchMatch, Search};
+
 use std::ffi::c_void;
 
 use vt_sys as sys;

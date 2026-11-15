@@ -67,6 +67,15 @@ pub struct GhosttySelection {
     pub rectangle: bool,
 }
 
+/// A caller-owned buffer of selections: what a search hands back its matches in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GhosttySelectionBuffer {
+    pub ptr: *mut GhosttySelection,
+    pub cap: usize,
+    pub len: usize,
+}
+
 /// `GhosttyAllocator`: pass a null pointer to use the library's own allocator.
 pub type GhosttyAllocator = c_void;
 
@@ -622,10 +631,24 @@ unsafe extern "C" {
     pub fn ghostty_search_select_next(search: GhosttySearch) -> GhosttyResult;
     pub fn ghostty_search_select_prev(search: GhosttySearch) -> GhosttyResult;
     pub fn ghostty_search_get(search: GhosttySearch, data: i32, out: *mut c_void) -> GhosttyResult;
+    pub fn ghostty_search_tick(search: GhosttySearch, out_status: *mut i32) -> GhosttyResult;
+    pub fn ghostty_search_feed(search: GhosttySearch) -> GhosttyResult;
+    pub fn ghostty_terminal_point_from_grid_ref(
+        terminal: GhosttyTerminal,
+        grid_ref: *const GhosttyGridRef,
+        tag: i32,
+        out: *mut GhosttyPointCoordinate,
+    ) -> GhosttyResult;
 
     // ---- Memory ----
     pub fn ghostty_free(allocator: *const GhosttyAllocator, ptr: *mut u8, len: usize);
 }
+
+/// Search options.
+pub const GHOSTTY_SEARCH_OPT_SELECT_SCROLL: i32 = 4;
+
+/// Search data.
+pub const GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES: i32 = 7;
 
 // ---- Key codes (generated from the 1.0.1 headers) ----
 pub const GHOSTTY_KEY_UNIDENTIFIED: i32 = 0;

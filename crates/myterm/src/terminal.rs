@@ -53,6 +53,19 @@ impl Default for Frame {
     }
 }
 
+/// What the find bar shows for one frame.
+#[derive(Clone, Debug, Default)]
+pub struct FindView {
+    /// Matches in the whole terminal, scrollback included.
+    pub total: usize,
+    /// Which match is selected, counting from the newest.
+    pub selected: Option<usize>,
+    /// The selected match, when it is on screen.
+    pub current: Option<(usize, usize, usize)>,
+    /// Every match on screen, as (row, first cell, last cell).
+    pub ranges: Vec<(usize, usize, usize)>,
+}
+
 /// A running terminal pane.
 /// Keeps the terminal's cursor where the shell thinks it is.
 ///
@@ -152,6 +165,9 @@ fn align_rows(bytes: &[u8], rows: i32) -> Cow<'_, [u8]> {
 
 pub struct Session {
     pty: Pty,
+    /// The find bar's search, while one is open. Declared before the terminal
+    /// because it borrows it: the search has to be released first.
+    search: Option<vt::Search>,
     term: Terminal,
     state: RenderState,
     frame: Frame,
@@ -218,6 +234,7 @@ impl Session {
 
         let mut session = Self {
             pty,
+            search: None,
             term,
             state,
             frame: Frame::default(),
@@ -422,6 +439,86 @@ impl Session {
     pub fn clear_selection(&mut self) {
         self.term.clear_selection();
         self.capture();
+    }
+
+    /// What the find bar needs to draw one frame: how many matches exist in the
+    /// whole terminal, which one is selected, and where the visible ones are.
+    pub fn find_view(&mut self) -> FindView {
+        let Some(search) = self.search.as_ref() else {
+            return FindView::default();
+        };
+        search.pump();
+        let (total, selected) = search.counts();
+        let current = search.selected();
+        let ranges: Vec<(usize, usize, usize)> = search
+            .viewport_matches()
+            .into_iter()
+            .map(|hit| (hit.row, hit.start, hit.end))
+            .collect();
+        FindView {
+            total,
+            selected,
+            current,
+            ranges,
+        }
+    }
+
+    /// Starts searching for `needle`, dropping any previous search.
+    ///
+    /// An empty needle closes the search: the library would treat it as idle,
+    /// but keeping a handle bound to the terminal for nothing is worse.
+    pub fn find(&mut self, needle: &str) -> FindView {
+        if needle.is_empty() {
+            self.end_find();
+            return FindView::default();
+        }
+        if self.search.is_none() {
+            match vt::Search::new(&self.term) {
+                Ok(search) => self.search = Some(search),
+                Err(_) => return FindView::default(),
+            }
+        }
+        if let Some(search) = self.search.as_ref() {
+            search.set_needle(needle);
+            search.pump();
+            // Typing jumps to the newest match, the way every find bar does:
+            // a counter reading 0/41 with nothing highlighted looks broken even
+            // though it is only waiting for Enter.
+            if search.counts().1.is_none() && search.counts().0 > 0 {
+                // Newest first, which is where a find bar starts.
+                search.step(true);
+                // Stepping scrolls the viewport, and the cached viewport
+                // matches still describe the old one; feeding is what re-reads
+                // them, and without it the highlight sits a screen away from
+                // the text it belongs to.
+                search.pump();
+            }
+        }
+        self.find_view()
+    }
+
+    /// Selects the next (`forward`) or previous match, scrolling it into view.
+    pub fn find_step(&mut self, forward: bool) -> FindView {
+        let moved = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.step(forward));
+        if moved {
+            // The library scrolled the viewport; both the frame cache and the
+            // cached viewport matches are now stale.
+            if let Some(search) = self.search.as_ref() {
+                search.pump();
+            }
+            self.capture();
+        }
+        self.find_view()
+    }
+
+    /// Drops the search and any selection it left behind.
+    pub fn end_find(&mut self) {
+        if self.search.take().is_some() {
+            self.capture();
+        }
     }
 
     /// The selected text, if anything is selected.

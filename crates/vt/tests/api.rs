@@ -275,3 +275,64 @@ fn cleared_selection_has_no_text() {
         "a cleared selection should not format as text"
     );
 }
+
+#[test]
+fn search_reaches_into_the_scrollback() {
+    let mut term = Terminal::new(20, 4, None).expect("terminal");
+    // More lines than the screen holds, so the first one is pushed into
+    // history: the point of this test is that the search can still see it.
+    for index in 0..12 {
+        term.feed(format!("line-{index}\r\n").as_bytes());
+    }
+    term.feed(b"needle-here\r\n");
+
+    let search = vt::Search::new(&term).expect("search");
+    search.set_needle("needle-here");
+    search.pump();
+
+    let (total, selected) = search.counts();
+    assert_eq!(total, 1, "expected the match to be found");
+    assert_eq!(
+        selected, None,
+        "nothing is selected until Enter moves to it"
+    );
+
+    // Selecting scrolls the viewport, which is the only way a match in the
+    // scrollback becomes visible at all.
+    assert!(search.step(true));
+    let current = search.selected().expect("a selected match");
+    assert!(
+        search
+            .viewport_matches()
+            .iter()
+            .any(|hit| (hit.row, hit.start, hit.end) == current),
+        "the selected match should be one of the highlighted ones"
+    );
+}
+
+#[test]
+fn search_counts_every_occurrence() {
+    let mut term = Terminal::new(20, 4, None).expect("terminal");
+    term.feed(b"alpha beta alpha\r\nALPHA\r\n");
+
+    let search = vt::Search::new(&term).expect("search");
+    // Matching is case-insensitive for ASCII, which is what a find bar does.
+    search.set_needle("alpha");
+    search.pump();
+
+    let (total, _) = search.counts();
+    assert_eq!(total, 3, "two on the first row, one on the second");
+}
+
+#[test]
+fn an_empty_needle_finds_nothing() {
+    let mut term = Terminal::new(20, 4, None).expect("terminal");
+    term.feed(b"something\r\n");
+
+    let search = vt::Search::new(&term).expect("search");
+    search.set_needle("");
+    search.pump();
+
+    assert_eq!(search.counts().0, 0);
+    assert!(search.viewport_matches().is_empty());
+}

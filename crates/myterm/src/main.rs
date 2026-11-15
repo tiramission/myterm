@@ -416,9 +416,16 @@ struct TabMenu {
 struct FindState {
     input: Entity<InputState>,
     /// Matches on visible rows, as the row and the first and last cell it covers.
+    /// The search covers the whole terminal; this is the part of it that can be
+    /// drawn.
     matches: Vec<(usize, usize, usize)>,
-    /// Which match Enter would move to.
+    /// Which of the visible matches is the selected one.
     current: usize,
+    /// Matches in the whole terminal, scrollback included.
+    total: usize,
+    /// Which match is selected, counting from the newest. Zero-based, as the
+    /// library reports it.
+    selected: Option<usize>,
     _sub: Subscription,
 }
 
@@ -958,6 +965,31 @@ impl Workspace {
 
     /// Drains every pane. Returns true when a frame changed.
     fn poll(&mut self) -> bool {
+        // A search over a lot of scrollback makes progress a little at a time;
+        // this is the beat that lets it finish while the bar stays responsive.
+        if self.find.is_some()
+            && let Some(pane) = self.active_pane_mut()
+        {
+            let view = pane.session.find_view();
+            let changed = self
+                .find
+                .as_ref()
+                .is_some_and(|find| find.total != view.total || find.selected != view.selected);
+            if changed {
+                let current = view
+                    .current
+                    .and_then(|hit| view.ranges.iter().position(|range| *range == hit))
+                    .unwrap_or(0);
+                if let Some(find) = self.find.as_mut() {
+                    find.matches = view.ranges;
+                    find.total = view.total;
+                    find.selected = view.selected;
+                    find.current = current;
+                }
+                return true;
+            }
+        }
+
         // The undo offer expires here, which is also what ends the shells of the
         // workspace it was holding.
         if self
@@ -2777,11 +2809,11 @@ impl Workspace {
             return div().into_any_element();
         };
 
-        let total = find.matches.len();
+        let total = find.total;
         let counter = if total == 0 {
             "0/0".to_owned()
         } else {
-            format!("{}/{total}", find.current + 1)
+            format!("{}/{}", find.selected.map_or(0, |index| index + 1), total)
         };
         let input = find.input.clone();
         let wash = theme.muted;
@@ -4008,7 +4040,7 @@ impl Workspace {
             return;
         }
 
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("在当前屏幕内查找"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("查找…"));
         let sub = cx.subscribe(
             &input,
             |workspace: &mut Workspace, _, event: &InputEvent, cx| {
@@ -4023,6 +4055,8 @@ impl Workspace {
             input,
             matches: Vec::new(),
             current: 0,
+            total: 0,
+            selected: None,
             _sub: sub,
         });
         cx.notify();
@@ -4034,40 +4068,56 @@ impl Workspace {
             return;
         };
         let query = find.input.read(cx).value().to_string();
-        let matches = self
-            .active_pane()
-            .map(|pane| find_matches(pane.session.frame(), &query))
-            .unwrap_or_default();
-
-        if let Some(find) = self.find.as_mut() {
-            find.matches = matches;
-            find.current = 0;
-        }
-        cx.notify();
+        self.run_find(Some(&query), None, cx);
     }
 
-    /// Moves the highlight to the next or previous match, wrapping.
-    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(find) = self.find.as_mut() else {
+    /// Runs the search — or walks it — and folds the answer into the bar.
+    ///
+    /// The search lives in the terminal, not here: it owns the scrollback, it
+    /// knows where a match currently sits, and it is what scrolls the viewport
+    /// when `Enter` moves to one. The bar only keeps the part it has to draw.
+    fn run_find(&mut self, query: Option<&str>, step: Option<bool>, cx: &mut Context<Self>) {
+        let Some(pane) = self.active_pane_mut() else {
             return;
         };
-        if find.matches.is_empty() {
-            return;
+        let view = match step {
+            Some(forward) => pane.session.find_step(forward),
+            None => pane.session.find(query.unwrap_or_default()),
+        };
+
+        // The selected match is only worth marking when it is one of the ones on
+        // screen; the library reports it in the same viewport cells.
+        let current = view
+            .current
+            .and_then(|hit| view.ranges.iter().position(|range| *range == hit))
+            .unwrap_or(0);
+
+        if let Some(find) = self.find.as_mut() {
+            find.matches = view.ranges;
+            find.total = view.total;
+            find.selected = view.selected;
+            find.current = current;
         }
-        let len = find.matches.len() as isize;
-        find.current = ((find.current as isize + delta).rem_euclid(len)) as usize;
         cx.notify();
     }
 
-    /// Closes the find bar and gives the keyboard back to the terminal.
+    fn step_find(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.find.is_none() {
+            return;
+        }
+        self.run_find(None, Some(delta > 0), cx);
+    }
+
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.take().is_some() {
+            if let Some(pane) = self.active_pane_mut() {
+                pane.session.end_find();
+            }
             window.focus(&self.focus, cx);
             cx.notify();
         }
     }
 
-    /// Opens the command palette.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             return;
@@ -4172,48 +4222,6 @@ fn menu_row(
         .child(label)
 }
 
-/// Finds `query` on the rows a pane is currently showing.
-///
-/// Case-insensitive, and returned as cell spans rather than character offsets:
-/// a cell may hold no text at all (the tail of a wide glyph), so the cell is the
-/// only unit the grid can tint. Overlapping matches on one row are all kept —
-/// `aaa` in `aaaa` is two hits, and silently dropping one would make the count
-/// lie.
-fn find_matches(frame: &terminal::Frame, query: &str) -> Vec<(usize, usize, usize)> {
-    let needle: Vec<char> = query.trim().to_lowercase().chars().collect();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-
-    let mut hits = Vec::new();
-    for (y, row) in frame.rows.iter().enumerate() {
-        let units: Vec<(usize, char)> = row
-            .cells
-            .iter()
-            .enumerate()
-            .flat_map(|(x, cell)| {
-                let lower: Vec<char> = cell.text.to_lowercase().chars().collect();
-                lower.into_iter().map(move |c| (x, c)).collect::<Vec<_>>()
-            })
-            .collect();
-
-        if units.len() < needle.len() {
-            continue;
-        }
-        for start in 0..=units.len() - needle.len() {
-            let window: Vec<char> = units[start..start + needle.len()]
-                .iter()
-                .map(|unit| unit.1)
-                .collect();
-            if window == needle {
-                hits.push((y, units[start].0, units[start + needle.len() - 1].0));
-            }
-        }
-    }
-    hits
-}
-
-/// The palette rows a query leaves.
 impl Workspace {
     /// Starts dragging a tab.
     fn begin_tab_drag(&mut self, from: usize, start: f32) {
