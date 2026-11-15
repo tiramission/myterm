@@ -115,6 +115,7 @@ pub struct Palette {
     pub stroke_strong: Hsla,
     pub text: Hsla,
     pub text_2: Hsla,
+    #[allow(dead_code)]
     pub text_3: Hsla,
     pub brand: Hsla,
     pub brand_soft: Hsla,
@@ -232,7 +233,10 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
 
     colors.muted = p.pill;
     colors.muted_foreground = p.text_2;
-    colors.accent = p.pill;
+    // The accent the library paints with is the accent's *wash*, not its ink:
+    // this token ends up behind inline code and behind text selections, where
+    // the full colour would swallow the text.
+    colors.accent = p.brand_soft;
     colors.accent_foreground = p.text;
 
     colors.secondary = p.pill;
@@ -270,7 +274,10 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
     colors.list_even = p.bg_soft;
 
     colors.selection = p.brand.opacity(tint);
-    colors.caret = p.text;
+    // The caret is the accent, the way the prototype draws it: it is the one
+    // thing in the grid that says where you are, and it belongs to the same
+    // family as the outline on the focused card.
+    colors.caret = p.brand;
     colors.ring = p.brand;
     colors.drag_border = p.brand;
     colors.drop_target = p.brand_soft;
@@ -310,14 +317,16 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
     colors.progress_bar = p.brand;
 
     colors.scrollbar = p.bg_soft;
-    colors.scrollbar_thumb = p.text_3.opacity(0.5);
-    colors.scrollbar_thumb_hover = p.text_3.opacity(0.8);
+    // The thumb is the accent at rest: a terminal's scrollbar is the one piece
+    // of chrome that is always about position, which is what the accent means.
+    colors.scrollbar_thumb = p.brand.opacity(if p.dark { 0.45 } else { 0.35 });
+    colors.scrollbar_thumb_hover = p.brand.opacity(0.7);
 
     colors.sidebar = p.bg_soft;
     colors.sidebar_foreground = p.text;
     colors.sidebar_border = p.stroke;
-    colors.sidebar_accent = p.pill;
-    colors.sidebar_accent_foreground = p.text;
+    colors.sidebar_accent = p.brand_soft;
+    colors.sidebar_accent_foreground = p.brand;
 
     colors.window_border = p.stroke;
     colors.skeleton = p.pill;

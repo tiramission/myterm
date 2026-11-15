@@ -105,6 +105,15 @@ const BRANCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 /// app mark uses.
 const TERMINAL_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></svg>"#;
 
+/// A minus, for the steppers. Drawn rather than typed: a hyphen and a minus
+/// sign are different glyphs in most fonts, and only one of them lines up with
+/// the plus beside it.
+const MINUS_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>"#;
+
+/// The two arrows the find strip walks matches with.
+const ARROW_UP: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>"#;
+const ARROW_DOWN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>"#;
+
 /// The search glyph: the command entry in the top bar, and the find field.
 const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
 
@@ -2975,8 +2984,6 @@ impl Workspace {
                     .p(px(4.0))
                     .rounded(px(10.0))
                     .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -3052,8 +3059,6 @@ impl Workspace {
                     .p(px(18.0))
                     .rounded(px(14.0))
                     .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -3080,12 +3085,11 @@ impl Workspace {
                                     .h(px(28.0))
                                     .px(px(14.0))
                                     .rounded(px(7.0))
-                                    .border_1()
-                                    .border_color(theme.border)
+                                    .bg(theme.muted)
                                     .cursor_pointer()
                                     .text_size(px(11.5))
                                     .text_color(muted)
-                                    .hover(move |this| this.bg(theme.muted))
+                                    .hover(move |this| this.bg(theme.secondary_hover))
                                     .on_click(cx.listener(
                                         |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
                                             workspace.rename = None;
@@ -3157,24 +3161,23 @@ impl Workspace {
         let input = find.input.clone();
         let wash = theme.muted;
 
-        let step = |id: &'static str, glyph: &'static str, delta: isize, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .text_size(px(11.0))
-                .text_color(theme.muted_foreground)
-                .hover(move |this| this.bg(wash).text_color(theme.foreground))
-                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                    workspace.step_find(delta, cx);
-                }))
-                .child(glyph)
-        };
+        let step =
+            |id: &'static str, glyph: &'static [u8], delta: isize, cx: &mut Context<Self>| {
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(move |this| this.bg(wash))
+                    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                        workspace.step_find(delta, cx);
+                    }))
+                    .child(icon_data(glyph, 12.0, theme.muted_foreground))
+            };
 
         div()
             .flex_shrink_0()
@@ -3199,8 +3202,8 @@ impl Workspace {
                     })
                     .child(counter),
             )
-            .child(step("find-prev", "↑", -1, cx))
-            .child(step("find-next", "↓", 1, cx))
+            .child(step("find-prev", ARROW_UP, -1, cx))
+            .child(step("find-next", ARROW_DOWN, 1, cx))
             .child(pane_action(
                 ("find-close", 0u64),
                 WINDOW_CLOSE,
@@ -3357,8 +3360,6 @@ impl Workspace {
                     .flex_col()
                     .rounded(px(14.0))
                     .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
@@ -3572,8 +3573,11 @@ impl Workspace {
                             .justify_center()
                             .size(px(26.0))
                             .rounded(px(999.0))
-                            .border_1()
-                            .border_color(if active { ink } else { theme.border })
+                            // A swatch is a colour chip, so it keeps a ring:
+                            // it is the only control whose job is to show a
+                            // colour, and the ring is what says which one is
+                            // chosen.
+                            .when(active, |this| this.border_1().border_color(ink))
                             .cursor_pointer()
                             .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                                 workspace.set_accent(option, cx);
@@ -3663,7 +3667,7 @@ impl Workspace {
                                     );
                                 },
                             ))
-                            .child("−"),
+                            .child(icon_data(MINUS_ICON, 12.0, muted)),
                     )
                     .child(
                         div()
@@ -3694,7 +3698,7 @@ impl Workspace {
                                     );
                                 },
                             ))
-                            .child("+"),
+                            .child(icon_data(PLUS_SMALL, 12.0, muted)),
                     );
 
                 let integration_row = track()
@@ -3779,7 +3783,7 @@ impl Workspace {
                                     workspace.set_font_size(size - FONT_STEP, cx);
                                 },
                             ))
-                            .child("−"),
+                            .child(icon_data(MINUS_ICON, 12.0, muted)),
                     )
                     .child(
                         div()
@@ -3807,7 +3811,7 @@ impl Workspace {
                                     workspace.set_font_size(size + FONT_STEP, cx);
                                 },
                             ))
-                            .child("+"),
+                            .child(icon_data(PLUS_SMALL, 12.0, muted)),
                     )
                     .child(
                         div()
@@ -3846,6 +3850,12 @@ impl Workspace {
                         font.into_any_element(),
                     ))
                     .child(setting_row(
+                        "光标",
+                        "块状时会反色重绘它下面的字符",
+                        theme,
+                        cursor_row.into_any_element(),
+                    ))
+                    .child(setting_row(
                         "回滚行数",
                         "超出后丢弃最旧的输出，搜索也只看这么多",
                         theme,
@@ -3853,15 +3863,9 @@ impl Workspace {
                     ))
                     .child(setting_row(
                         "shell 集成",
-                        "让 shell 报告自己的目录，侧栏与窗格头才会显示路径和分支；只对 PowerShell 生效，会改写它的提示符函数，新窗格开始使用",
+                        "让 shell 报告自己的目录，路径与分支才有内容；只对 PowerShell 生效，会改写它的提示符函数，新窗格开始使用",
                         theme,
                         integration_row.into_any_element(),
-                    ))
-                    .child(setting_row(
-                        "光标",
-                        "跟随程序时，shell 会自己在提示符处换成竖线",
-                        theme,
-                        cursor_row.into_any_element(),
                     ))
             }
             SettingsTab::Keys => {
@@ -4022,9 +4026,7 @@ impl Workspace {
                             .gap(px(10.0))
                             .flex_shrink_0()
                             .px(px(16.0))
-                            .py(px(10.0))
-                            .border_t_1()
-                            .border_color(theme.border)
+                            .py(px(12.0))
                             .child(
                                 div()
                                     .id("settings-about")
@@ -4081,9 +4083,7 @@ impl Workspace {
                 .flex()
                 .flex_row()
                 .items_center()
-                .h(px(32.0))
-                .border_b_1()
-                .border_color(theme.border)
+                .h(px(34.0))
                 .text_size(px(11.5))
                 .text_color(muted)
                 .child(label)
@@ -4098,12 +4098,11 @@ impl Workspace {
                 .h(px(28.0))
                 .px(px(12.0))
                 .rounded(px(7.0))
-                .border_1()
-                .border_color(theme.border)
+                .bg(theme.muted)
                 .cursor_pointer()
                 .text_size(px(11.5))
                 .text_color(muted)
-                .hover(move |this| this.bg(theme.muted).text_color(theme.foreground))
+                .hover(move |this| this.bg(theme.secondary_hover).text_color(theme.foreground))
                 .child(label)
         };
 
@@ -4124,13 +4123,13 @@ impl Workspace {
             .child(
                 div()
                     .w(px(400.0))
-                    .p(px(18.0))
+                    .p(px(20.0))
                     .flex()
                     .flex_col()
-                    .rounded(px(14.0))
+                    .rounded(px(16.0))
                     .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
+                    // Fill and shadow, no outline: every floating surface in
+                    // the window is separated that way now.
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -4149,8 +4148,6 @@ impl Workspace {
                                     .size(px(38.0))
                                     .rounded(px(11.0))
                                     .bg(accent.opacity(0.13))
-                                    .border_1()
-                                    .border_color(accent.opacity(0.42))
                                     .child(icon_data(APP_MARK, 20.0, accent)),
                             )
                             .child(
@@ -4188,9 +4185,7 @@ impl Workspace {
                         div()
                             .flex()
                             .flex_col()
-                            .mt(px(16.0))
-                            .border_t_1()
-                            .border_color(theme.border)
+                            .mt(px(18.0))
                             .child(row("终端解析", ghostty_label().to_owned()))
                             .child(row("界面框架", "GPUI Kit 0.9".to_owned()))
                             .child(row("默认 shell", self.shell_label()))
@@ -4368,8 +4363,6 @@ impl Workspace {
                     .p(px(18.0))
                     .rounded(px(14.0))
                     .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
                     .shadow_lg()
                     .child(
                         div()
@@ -4399,8 +4392,7 @@ impl Workspace {
                                     .h(px(28.0))
                                     .px(px(14.0))
                                     .rounded(px(7.0))
-                                    .border_1()
-                                    .border_color(theme.border)
+                                    .bg(theme.muted)
                                     .cursor_pointer()
                                     .text_size(px(11.5))
                                     .text_color(theme.muted_foreground)
@@ -5228,8 +5220,6 @@ impl Workspace {
                     .size(px(28.0))
                     .rounded(px(9.0))
                     .bg(theme.ring.opacity(0.13))
-                    .border_1()
-                    .border_color(theme.ring.opacity(0.42))
                     .cursor_pointer()
                     .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
                         workspace.toggle_rail(cx);
@@ -5536,11 +5526,7 @@ impl Workspace {
                         .size(px(30.0))
                         .rounded(px(8.0))
                         .cursor_pointer()
-                        .when(selected, |this| {
-                            this.bg(theme.popover)
-                                .border_1()
-                                .border_color(theme.ring.opacity(0.42))
-                        })
+                        .when(selected, |this| this.bg(theme.popover))
                         .when(!selected, |this| this.hover(move |this| this.bg(wash)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                             workspace.select_tab(tab_index, cx);
@@ -5591,8 +5577,7 @@ impl Workspace {
         let muted = theme.muted_foreground;
         // Copied before the closures below capture `theme` by move.
         let field = theme.background;
-        let accent_line = theme.ring.opacity(0.45);
-        let kbd_bg = theme.muted;
+        let hover_fill = theme.muted;
 
         let mut bar = div()
             .flex()
@@ -5695,6 +5680,7 @@ impl Workspace {
 
         // A keycap in the bar. Small, quiet, and never the only way to find the
         // command it names.
+        let kbd_fg = theme.muted_foreground;
         let kbd = |label: &'static str| {
             div()
                 .flex_shrink_0()
@@ -5704,9 +5690,9 @@ impl Workspace {
                 .h(px(16.0))
                 .px(px(4.0))
                 .rounded(px(4.0))
-                .bg(kbd_bg)
+                .bg(theme.muted)
                 .text_size(px(9.5))
-                .text_color(theme.muted_foreground)
+                .text_color(kbd_fg)
                 .child(label)
         };
 
@@ -5724,10 +5710,8 @@ impl Workspace {
                     .px(px(8.0))
                     .rounded(px(8.0))
                     .bg(field)
-                    .border_1()
-                    .border_color(theme.border)
                     .cursor_pointer()
-                    .hover(move |this| this.border_color(accent_line))
+                    .hover(move |this| this.bg(hover_fill))
                     .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                         workspace.open_palette(window, cx);
                     }))
@@ -6003,15 +5987,11 @@ impl Workspace {
                     .h(px(30.0))
                     .px(px(12.0))
                     .rounded(px(8.0))
-                    .border_1()
-                    .border_color(theme.border)
+                    .bg(theme.muted)
                     .cursor_pointer()
                     .text_size(px(11.5))
                     .text_color(theme.muted_foreground)
-                    .hover(move |this| {
-                        this.border_color(theme.ring.opacity(0.45))
-                            .text_color(theme.foreground)
-                    })
+                    .hover(move |this| this.bg(theme.secondary_hover).text_color(theme.foreground))
                     .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
                         workspace.new_tab(window, cx);
                     }))
@@ -6496,15 +6476,17 @@ fn install_action(
         .flex_row()
         .items_center()
         .justify_center()
-        .h(px(26.0))
+        .h(px(28.0))
         .w_full()
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(color.opacity(0.35))
+        .rounded(px(7.0))
+        // A fill rather than an outline, like every other button in the
+        // window: the card has no rules left, and a bordered button would be
+        // the one rectangle drawn in it.
+        .bg(color.opacity(0.12))
         .text_size(px(11.5))
         .text_color(color)
         .cursor_pointer()
-        .hover(move |this| this.bg(color.opacity(0.12)))
+        .hover(move |this| this.bg(color.opacity(0.2)))
         .on_click(move |_: &ClickEvent, _, cx| {
             // Called on the workspace directly rather than dispatched: the card
             // lives in a popover, which is painted in a deferred layer outside
