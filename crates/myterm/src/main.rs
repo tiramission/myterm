@@ -5918,6 +5918,12 @@ impl Workspace {
         if self.zoomed.is_some() {
             return Some("已缩放 · Esc 退出".to_owned());
         }
+        // An update that is ready is the other thing worth a row: it is a
+        // decision waiting to be made, and the badge in the bar is easy to miss
+        // while the terminal has the eye.
+        if let Some((label, true)) = self.update_badge() {
+            return Some(label);
+        }
         None
     }
 
@@ -5942,6 +5948,24 @@ impl Workspace {
             .text_color(theme.muted_foreground)
             .child(hint.to_owned())
             .child(div().flex_1())
+            .when(
+                self.update_badge().is_some_and(|(_, ready)| ready),
+                |this| {
+                    this.child(
+                        div()
+                            .id("status-update")
+                            .px(px(6.0))
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .text_color(theme.ring)
+                            .hover(move |this| this.bg(theme.ring.opacity(0.13)))
+                            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
+                                workspace.install_update(cx);
+                            }))
+                            .child("查看"),
+                    )
+                },
+            )
             .when(self.zoomed.is_some(), |this| {
                 this.child(
                     div()
