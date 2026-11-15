@@ -139,7 +139,21 @@ const PANE_GAP: f32 = 8.0;
 
 /// The leading inset of a pane's contents. The header's name and the grid's
 /// first cell both start here, which is what makes them read as one column.
-const PANE_TEXT_INSET: f32 = 10.0;
+const PANE_TEXT_INSET: f32 = 11.0;
+
+/// The grid's own padding, inside the card. Wider than the header's inset on
+/// the trailing side so a full line of text is not flush against the border,
+/// and deeper at the bottom so the last row has somewhere to sit.
+const GRID_PAD_X: f32 = 13.0;
+const GRID_PAD_TOP: f32 = 10.0;
+const GRID_PAD_BOTTOM: f32 = 14.0;
+
+/// One press of the font size control. Half a point, so the sizes people
+/// actually want — 12.5, 13.5 — are reachable.
+const FONT_STEP: f32 = 0.5;
+
+/// One press of the scrollback control.
+const SCROLLBACK_STEP: usize = 1_000;
 
 /// Width of the workspace list.
 const SIDEBAR_WIDTH: f32 = 238.0;
@@ -1694,12 +1708,12 @@ impl Workspace {
                 .as_f32();
             match keystroke.key.as_str() {
                 "=" | "+" => {
-                    self.set_font_size(size + 1.0, cx);
+                    self.set_font_size(size + FONT_STEP, cx);
                     cx.stop_propagation();
                     return;
                 }
                 "-" => {
-                    self.set_font_size(size - 1.0, cx);
+                    self.set_font_size(size - FONT_STEP, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2682,19 +2696,21 @@ impl Workspace {
                     card = card.child(self.render_find_bar(theme, cx));
                 }
 
-                // The terminal takes the rest of the card. Insetting it keeps the
-                // text off the rounded corners and gives the block cursor a
-                // margin at the edge of the pane. The leading inset is the same
-                // number the header's name starts on, so the header and the first
-                // line of output share one spine.
+                // The terminal takes the rest of the card. Its padding is its
+                // own: the header's name starts at 11 and the first cell at 13,
+                // which is what keeps a line of output off the card's edge
+                // without dragging the header out with it.
                 card = card.child(
                     div()
                         .flex_1()
                         .min_h_0()
                         .relative()
-                        .mx(px(PANE_TEXT_INSET))
-                        .mb(px(6.0))
-                        .when(!show_header, |this| this.mt(px(6.0)))
+                        .px(px(GRID_PAD_X))
+                        .pb(px(GRID_PAD_BOTTOM))
+                        // With a header above it the grid keeps the header's own
+                        // inset; without one the top padding is all it has.
+                        .when(show_header, |this| this.pt(px(0.0)))
+                        .when(!show_header, |this| this.pt(px(GRID_PAD_TOP)))
                         .child(TerminalGrid::new(
                             ElementId::Name(format!("grid-{id}").into()),
                             frame,
@@ -3590,9 +3606,10 @@ impl Workspace {
                             .hover(move |this| this.bg(wash).text_color(theme.foreground))
                             .on_click(cx.listener(
                                 |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                    let step = workspace.config.scrollback / 4;
-                                    workspace
-                                        .set_scrollback(workspace.config.scrollback - step, cx);
+                                    workspace.set_scrollback(
+                                        workspace.config.scrollback.saturating_sub(SCROLLBACK_STEP),
+                                        cx,
+                                    );
                                 },
                             ))
                             .child("−"),
@@ -3620,9 +3637,10 @@ impl Workspace {
                             .hover(move |this| this.bg(wash).text_color(theme.foreground))
                             .on_click(cx.listener(
                                 |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                    let step = workspace.config.scrollback / 4;
-                                    workspace
-                                        .set_scrollback(workspace.config.scrollback + step, cx);
+                                    workspace.set_scrollback(
+                                        workspace.config.scrollback.saturating_add(SCROLLBACK_STEP),
+                                        cx,
+                                    );
                                 },
                             ))
                             .child("+"),
@@ -3681,7 +3699,7 @@ impl Workspace {
                             .hover(move |this| this.bg(wash).text_color(theme.foreground))
                             .on_click(cx.listener(
                                 move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                    workspace.set_font_size(size - 1.0, cx);
+                                    workspace.set_font_size(size - FONT_STEP, cx);
                                 },
                             ))
                             .child("−"),
@@ -3692,7 +3710,7 @@ impl Workspace {
                             .text_center()
                             .text_size(px(11.5))
                             .text_color(theme.foreground)
-                            .child(format!("{size:.0} pt")),
+                            .child(format!("{size} px")),
                     )
                     .child(
                         div()
@@ -3709,7 +3727,7 @@ impl Workspace {
                             .hover(move |this| this.bg(wash).text_color(theme.foreground))
                             .on_click(cx.listener(
                                 move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                    workspace.set_font_size(size + 1.0, cx);
+                                    workspace.set_font_size(size + FONT_STEP, cx);
                                 },
                             ))
                             .child("+"),
@@ -5454,8 +5472,8 @@ impl Workspace {
                         .child(
                             div()
                                 .absolute()
-                                .top(px(4.0))
-                                .right(px(4.0))
+                                .top(px(5.0))
+                                .right(px(5.0))
                                 .size(px(5.0))
                                 .rounded(px(999.0))
                                 .bg(status_color(status, theme)),
@@ -6102,11 +6120,17 @@ fn card_bounds(tab: &Tab, id: u64) -> Option<Bounds<Pixels>> {
     } else {
         0.0
     };
-    let inset = 6.0;
-    let left = grid.left() - px(inset);
-    let top = grid.top() - px(inset + header);
-    let right = grid.right() + px(inset);
-    let bottom = grid.bottom() + px(inset);
+    // The grid's padding is not symmetric, so the two axes are measured
+    // separately; a single number put the divider four to seven pixels off.
+    let top_pad = if tab.panes.len() > 1 || tab.active == id {
+        0.0
+    } else {
+        GRID_PAD_TOP
+    };
+    let left = grid.left() - px(GRID_PAD_X);
+    let top = grid.top() - px(top_pad + header);
+    let right = grid.right() + px(GRID_PAD_X);
+    let bottom = grid.bottom() + px(GRID_PAD_BOTTOM);
 
     Some(Bounds::new(
         point(left, top),
@@ -6243,7 +6267,7 @@ fn pane_header(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(11.5))
+                .text_size(px(11.0))
                 .font_weight(if focused {
                     FontWeight::MEDIUM
                 } else {
@@ -6351,11 +6375,12 @@ fn pane_header(
                         workspace.split_pane(id, Axis::Vertical, window, cx);
                     }),
                 ))
-                .child(pane_action(
+                .child(pane_action_marked(
                     ("pane-zoom", id),
                     if zoomed { ZOOM_OUT } else { ZOOM_IN },
                     theme,
                     false,
+                    zoomed,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                         workspace.toggle_zoom(id, cx);
                     }),
@@ -6481,11 +6506,25 @@ fn pane_action(
     destructive: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    pane_action_marked(id, icon, theme, destructive, false, on_click)
+}
+
+/// The same button, with the "this mode is on" fill the zoom wears while it is
+/// zoomed.
+fn pane_action_marked(
+    id: impl Into<ElementId>,
+    icon: &'static [u8],
+    theme: &gpui_kit::component::Theme,
+    destructive: bool,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let wash = if destructive {
         theme.danger.opacity(0.16)
     } else {
         theme.muted
     };
+    let accent_wash = theme.ring.opacity(0.13);
 
     div()
         .id(id)
@@ -6502,9 +6541,21 @@ fn pane_action(
         // thing in it. The surface appears when the pointer is on the button,
         // which is also the only moment the button is revealed at all.
         .cursor_pointer()
-        .hover(move |this| this.bg(wash))
+        // A mode that is on says so with a fill, the way the palette's selected
+        // row does — the button is the only thing in the header that has a
+        // state to be in.
+        .when(active, |this| this.bg(accent_wash))
+        .when(!active, |this| this.hover(move |this| this.bg(wash)))
         .on_click(on_click)
-        .child(icon_data(icon, 16.0, theme.muted_foreground))
+        .child(icon_data(
+            icon,
+            16.0,
+            if active {
+                theme.ring
+            } else {
+                theme.muted_foreground
+            },
+        ))
 }
 
 /// A choice inside the settings sheet.

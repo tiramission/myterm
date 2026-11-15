@@ -37,7 +37,7 @@ impl Default for Config {
             density: Density::Standard,
             accent: Accent::Lime,
             shell: Shell::Auto,
-            cursor: None,
+            cursor: Some(Cursor::Block),
             scrollback: DEFAULT_SCROLLBACK,
         }
     }
@@ -335,8 +335,9 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 pub const MIN_FONT_SIZE: f32 = 9.0;
 /// The largest.
 pub const MAX_FONT_SIZE: f32 = 24.0;
-/// What the app starts at, and what "reset" returns to.
-pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// What the app starts at, and what "reset" returns to. Half a point is the
+/// step the size control moves in, so the default sits on one of its stops.
+pub const DEFAULT_FONT_SIZE: f32 = 12.5;
 
 #[cfg(test)]
 mod tests {
@@ -388,7 +389,8 @@ shell = bash
         assert_eq!(read.density, Density::Standard);
         assert_eq!(read.accent, Accent::Lime);
         assert_eq!(read.shell, Shell::Auto);
-        assert_eq!(read.cursor, None);
+        // The default is the prototype's block; an unknown value leaves it.
+        assert_eq!(read.cursor, Some(Cursor::Block));
     }
 
     #[test]
