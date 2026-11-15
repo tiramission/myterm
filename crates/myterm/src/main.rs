@@ -6766,7 +6766,11 @@ fn sidebar_group_row(
             this.child(
                 div()
                     .flex_shrink_0()
-                    .opacity(if current { 1.0 } else { 0.0 })
+                    // Every row reveals its cross under the pointer, the way
+                    // the prototype draws it: a permanent cross on the current
+                    // row makes one row of the column permanently louder than
+                    // the rest, for a control that is used once in a while.
+                    .opacity(0.0)
                     .group_hover(row_group, move |this| this.opacity(1.0))
                     .child(sidebar_close_button(
                         format!("side-close-tab-{tab_index}"),
@@ -6838,8 +6842,9 @@ fn sidebar_pane_row(
     // The cross belongs to the row, not to the column: it appears when the
     // pointer is on the row it would close, so close is one gesture away on any
     // workspace without turning the list into a stack of identical buttons.
+    // The selected row is no exception — the fill already says which one it is.
     let row_group = format!("side-row-{tab_index}-{id}");
-    let cross = if selected { 1.0 } else { 0.0 };
+    let cross = 0.0;
 
     div()
         // Pane ids restart at 1 in every workspace, so the row has to carry the
