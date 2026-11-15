@@ -88,6 +88,9 @@ const WORKSPACE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBo
 /// A sun and a moon: the theme row in the palette toggles between them.
 const THEME_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
 
+/// The branch pill in the crumbs.
+const BRANCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.4" stroke-linecap="round"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="8" r="2"/><path d="M7 8v8M17 10c0 3-3 3-7 4"/></svg>"#;
+
 /// The search glyph: the command entry in the top bar, and the find field.
 const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
 
@@ -740,6 +743,12 @@ pub struct Workspace {
     /// The preferences this window is running with, kept so the settings sheet
     /// can write them back without re-reading the file.
     config: config::Config,
+    /// The branch the focused shell's directory is on, when it is in a
+    /// repository. Refreshed on the ticker rather than per frame: finding it
+    /// means walking up the tree and reading a file.
+    branch: Option<String>,
+    /// The directory the branch above was read from, and when.
+    branch_source: Option<(String, Instant)>,
     /// The last title handed to the platform, so the window is only renamed
     /// when the answer changes rather than every frame.
     window_title: String,
@@ -804,6 +813,8 @@ impl Workspace {
             closing: None,
             closed: None,
             config,
+            branch: None,
+            branch_source: None,
             window_title: String::new(),
             settings: false,
             settings_tab: SettingsTab::default(),
@@ -999,6 +1010,22 @@ impl Workspace {
         {
             self.closed = None;
             return true;
+        }
+
+        // The branch is a file read and a walk up the tree, so it is refreshed
+        // on a slow beat rather than on every tick.
+        let cwd = self.active_pane().and_then(pane_cwd);
+        let stale = self.branch_source.as_ref().is_none_or(|(source, at)| {
+            Some(source.as_str()) != cwd.as_deref() || at.elapsed() > Duration::from_secs(2)
+        });
+        if stale {
+            let branch = cwd.as_deref().and_then(git_branch);
+            let changed = branch != self.branch;
+            self.branch = branch;
+            self.branch_source = cwd.map(|cwd| (cwd, Instant::now()));
+            if changed {
+                return true;
+            }
         }
 
         let mut changed = self.advance_caret_blink();
@@ -5169,6 +5196,28 @@ impl Workspace {
                     .child(detail),
             );
         }
+        // The branch, when the shell's directory is in a checkout. It is a pill
+        // rather than more text because it answers a different question from the
+        // path beside it, and the accent is what says "this one is a place in a
+        // repository" without a second label.
+        if let Some(branch) = &self.branch {
+            crumbs = crumbs.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(px(4.0))
+                    .h(px(18.0))
+                    .px(px(7.0))
+                    .rounded(px(999.0))
+                    .bg(theme.ring.opacity(0.13))
+                    .text_size(px(10.0))
+                    .text_color(theme.ring)
+                    .child(icon_data(BRANCH_ICON, 10.0, theme.ring))
+                    .child(branch.clone()),
+            );
+        }
 
         bar = bar.child(crumbs);
 
@@ -6823,6 +6872,40 @@ fn pane_meta(pane: &Pane) -> Option<String> {
     pane_cwd(pane).or_else(|| {
         pane_detail(pane).filter(|detail| !detail.to_ascii_lowercase().ends_with(".exe"))
     })
+}
+
+/// The branch a directory is on, when it is inside a git checkout.
+///
+/// This reads `.git/HEAD` and walks up a few levels, which is the whole of what
+/// the pill in the bar needs. It does not shell out to git: spawning a process
+/// every couple of seconds to paint one word is a poor trade, and a checkout
+/// without git installed still has a HEAD file.
+fn git_branch(directory: &str) -> Option<String> {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    let start = if let Some(rest) = directory.strip_prefix('~') {
+        format!("{home}{rest}")
+    } else {
+        directory.to_owned()
+    };
+
+    let mut path = std::path::PathBuf::from(start.replace('/', "\\"));
+    for _ in 0..8 {
+        let head = path.join(".git").join("HEAD");
+        if let Ok(text) = std::fs::read_to_string(&head) {
+            let text = text.trim();
+            if let Some(reference) = text.strip_prefix("ref:") {
+                let name = reference.trim().rsplit('/').next().unwrap_or_default();
+                return (!name.is_empty()).then(|| name.to_owned());
+            }
+            // A detached HEAD holds a bare commit id; the short form is what
+            // every prompt shows for it.
+            return Some(text.chars().take(7).collect());
+        }
+        if !path.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// The name a pane shows in its header.
