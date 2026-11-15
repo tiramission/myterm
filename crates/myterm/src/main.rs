@@ -1826,6 +1826,7 @@ impl Render for Workspace {
         }
 
         let Some(tab) = self.active_tab() else {
+            content = content.child(self.render_empty(&theme, cx));
             return body.child(content);
         };
 
@@ -1965,7 +1966,7 @@ impl Workspace {
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
                 let name = pane_label(pane);
-                let detail = pane_detail(pane);
+                let meta = pane_meta(pane);
                 // Only the pane the bar is over shows its matches. Tinting every
                 // pane would answer a question the bar did not ask.
                 let find = if focused {
@@ -2044,7 +2045,7 @@ impl Workspace {
                         id,
                         ordinal,
                         name,
-                        detail,
+                        meta,
                         if exit.is_some() {
                             PaneStatus::Exited
                         } else {
@@ -4480,6 +4481,60 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// What is left when every workspace is closed.
+    ///
+    /// Not a black window and not a consolation sentence: the one thing an
+    /// empty list can still tell you is where the next one comes from, so it says
+    /// that and gives the button.
+    fn render_empty(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
+            .pr(px(PANE_GAP))
+            .pb(px(PANE_GAP))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.muted_foreground)
+                    .child("没有打开的会话"),
+            )
+            .child(
+                div()
+                    .id("empty-new")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(theme.muted_foreground)
+                    .hover(move |this| {
+                        this.border_color(theme.ring.opacity(0.45))
+                            .text_color(theme.foreground)
+                    })
+                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                        workspace.new_tab(window, cx);
+                    }))
+                    .child(icon_data(PLUS_SMALL, 13.0, theme.muted_foreground))
+                    .child("新建工作区"),
+            )
+            .into_any_element()
+    }
+
     /// What the status bar has to say, if anything.
     ///
     /// Everything that used to sit there permanently — the session count, the
@@ -4722,7 +4777,7 @@ fn pane_header(
     id: u64,
     ordinal: Option<usize>,
     name: String,
-    detail: Option<String>,
+    meta: Option<String>,
     status: PaneStatus,
     focused: bool,
     zoomed: bool,
@@ -4733,11 +4788,10 @@ fn pane_header(
     div()
         .flex_shrink_0()
         // The row has to take the card's width rather than its own content's.
-        // The header is a flex row of name, title, state and actions; a shell
-        // that reports a long title — a WindowsApps path is seventy characters —
+        // The header is a flex row of state, name, context and actions; a shell
+        // that reports a long path — a WindowsApps title is seventy characters —
         // otherwise lays the row out at its own preferred width, pushes the
-        // state dot and the actions past the card's edge, and paints the title
-        // out over the chrome and off the window.
+        // actions past the card's edge, and paints the text out over the chrome.
         .w_full()
         .min_w_0()
         .h(px(PANE_HEADER_HEIGHT))
@@ -4746,7 +4800,18 @@ fn pane_header(
         .items_center()
         .gap(px(8.0))
         .pl(px(PANE_TEXT_INSET))
-        .pr(px(4.0))
+        .pr(px(6.0))
+        // State leads, as a shape first and a colour second: filled means
+        // writing, hollow means waiting, square means gone. It describes the
+        // shell, so it sits against the shell's name.
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(7.0))
+                .flex()
+                .justify_center()
+                .child(status_glyph(status, theme)),
+        )
         .child(
             div()
                 .flex_shrink_0()
@@ -4754,9 +4819,9 @@ fn pane_header(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(12.0))
+                .text_size(px(11.5))
                 .font_weight(if focused {
-                    FontWeight::SEMIBOLD
+                    FontWeight::MEDIUM
                 } else {
                     FontWeight::NORMAL
                 })
@@ -4769,56 +4834,46 @@ fn pane_header(
         )
         // The ordinal rides with the name rather than on the header's leading
         // edge: the name shares its 10px spine with the terminal's first column,
-        // and putting a tile in front of it would push that spine 26px right.
-        // Right after the name it reads as part of the label — "pwsh 3" — which
-        // is exactly the question ("is this the pane my chip says 3?").
+        // and a tile in front of it would push that spine 26px right. After the
+        // name it reads as part of the label, which is exactly the question —
+        // "is this the pane my chip calls 3?"
         .when_some(ordinal, |this, number| {
             this.child(
                 div()
                     .flex_shrink_0()
-                    .size(px(18.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.0))
-                    .bg(if focused { theme.ring } else { theme.muted })
-                    .text_size(px(10.0))
+                    .h(px(15.0))
+                    .px(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(if focused {
+                        theme.ring.opacity(0.16)
+                    } else {
+                        theme.muted
+                    })
+                    .text_size(px(9.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if focused {
-                        theme.background
+                        theme.ring
                     } else {
                         theme.muted_foreground
                     })
                     .child(number.to_string()),
             )
         })
+        // Where this shell is, when it says. It is the line that tells three
+        // PowerShell panes apart, and it is allowed to vanish.
         .child(
-            // State, as a shape first and a colour second: filled means writing,
-            // hollow means waiting, square means gone. Colour alone would leave
-            // the two commonest states identical to a colour-blind reader.
-            //
-            // It annotates the name, so it sits with the name. At the trailing
-            // edge, next to buttons that are hidden until hovered, the dot hung
-            // alone in the middle of the row with nothing to belong to.
-            div()
-                .flex_shrink_0()
-                .w(px(8.0))
-                .flex()
-                .justify_center()
-                .child(status_glyph(status, theme)),
-        )
-        .child(
-            // The shell's own title when it says more than its name — a path is
-            // what tells two `pwsh` panes apart. Quiet, allowed to vanish.
             div()
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(10.5))
+                .text_size(px(10.0))
                 .text_color(theme.muted_foreground)
-                .child(detail.unwrap_or_default()),
+                .child(meta.unwrap_or_default()),
         )
         .when_some(live_size, |this, (cols, rows)| {
             this.child(
@@ -4828,18 +4883,18 @@ fn pane_header(
                 div()
                     .flex_shrink_0()
                     .mr(px(6.0))
-                    .text_size(px(10.5))
+                    .text_size(px(10.0))
                     .text_color(theme.muted_foreground)
                     .child(format!("{cols}×{rows}")),
             )
         })
         .child(
-            // The pane's own actions, only on the pane under the pointer. Four
-            // glyphs repeated in every header is the same command set printed
-            // once per pane, and in a split the addresses were the loudest thing
-            // in an otherwise quiet row. Nothing is lost by hiding them: each
-            // command has a key (Ctrl+Shift+D / E, Ctrl+Shift+W) and the pane is
-            // focused by the same click that reveals the buttons.
+            // The pane's own actions, on the pane under the pointer or holding
+            // the keyboard. Four glyphs repeated in every header is the same
+            // command set printed once per pane, and in a split those addresses
+            // were the loudest thing in an otherwise quiet row. Nothing is lost:
+            // each command has a key, and the pane is focused by the same click
+            // that reveals the buttons.
             //
             // Hidden, not dimmed. At 0.55 the buttons read as a disabled row the
             // user could not press; the row is either there or it is not.
@@ -4847,11 +4902,13 @@ fn pane_header(
                 .flex()
                 .flex_row()
                 .items_center()
-                // No shared fill, so the buttons need real air between them:
-                // at one pixel four glyphs read as one smear.
-                .gap(px(2.0))
-                .opacity(0.0)
-                .group_hover("pane", |this| this.opacity(1.0))
+                // No shared fill, so the buttons need real air between them: at
+                // one pixel four glyphs read as one smear.
+                .gap(px(1.0))
+                .opacity(if focused { 1.0 } else { 0.0 })
+                .when(!focused, |this| {
+                    this.group_hover("pane", |this| this.opacity(1.0))
+                })
                 .child(pane_action(
                     ("pane-split-right", id),
                     SPLIT_HORIZONTAL,
@@ -4891,24 +4948,6 @@ fn pane_header(
         )
 }
 
-// Asks the workspace to install or remove this app. An action rather than a
-// callback so the button can be built by a plain function without threading a
-// `Context<Workspace>` through it; the handler lives on the workspace, which is
-// what owns the busy flag and the quit.
-gpui::actions!(myterm, [InstallRequested]);
-
-/// The about card: what this is, which build, and where it comes from.
-///
-/// Kept short on purpose. A version panel that lists every dependency is a
-/// debug screen; the useful facts are the version, the runtime, and the address
-/// of the project.
-///
-/// The version is the headline, not a row among equals: it is the one fact
-/// anyone opens this for, and the only one that changes between builds.
-///
-/// The surface, ring and shadow belong to the popover that hosts this, so the
-/// card contributes only its contents and its own width. Drawing a second
-/// background here would nest one sheet inside another.
 fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
     let muted = theme.muted_foreground;
     let faint = theme.border;
@@ -5955,6 +5994,14 @@ fn shorten_path(path: &str) -> String {
         }
         _ => path.to_owned(),
     }
+}
+
+/// The one line of context a pane header carries: where the shell is, or the
+/// title it set for itself when that title is not just its own path.
+fn pane_meta(pane: &Pane) -> Option<String> {
+    pane_cwd(pane).or_else(|| {
+        pane_detail(pane).filter(|detail| !detail.to_ascii_lowercase().ends_with(".exe"))
+    })
 }
 
 /// The name a pane shows in its header.
