@@ -1845,9 +1845,6 @@ impl Render for Workspace {
                 .flex()
                 .flex_col()
                 .bg(theme.title_bar)
-                .when(self.find.is_some(), |this| {
-                    this.child(self.render_find_bar(&theme, cx))
-                })
                 // The leading and top edges have no gutter: the cards meet the
                 // top bar and the workspace column directly, so the chrome reads
                 // as an L wrapped around the work instead of a frame floating
@@ -2057,6 +2054,10 @@ impl Workspace {
                         theme,
                         cx,
                     ));
+                }
+
+                if focused && self.find.is_some() {
+                    card = card.child(self.render_find_bar(theme, cx));
                 }
 
                 // The terminal takes the rest of the card. Insetting it keeps the
@@ -2432,6 +2433,12 @@ impl Workspace {
     }
 
     /// The find bar: a field, a count, and a way out.
+    /// The find strip, inside the pane it searches.
+    ///
+    /// It takes its own row above the grid rather than floating over the
+    /// output: the matches are in the output, and a bar laid on top of them
+    /// hides the answer it is taking the user to. Being in the card also says
+    /// which pane is being searched without a label spelling it out.
     fn render_find_bar(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -2443,33 +2450,48 @@ impl Workspace {
 
         let total = find.matches.len();
         let counter = if total == 0 {
-            "无匹配".to_owned()
+            "0/0".to_owned()
         } else {
-            format!("{} / {total}", find.current + 1)
+            format!("{}/{total}", find.current + 1)
         };
         let input = find.input.clone();
+        let wash = theme.muted;
+
+        let step = |id: &'static str, glyph: &'static str, delta: isize, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .size(px(22.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.step_find(delta, cx);
+                }))
+                .child(glyph)
+        };
 
         div()
             .flex_shrink_0()
-            .h(px(38.0))
-            .px(px(PANE_GAP))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(6.0))
+            .h(px(34.0))
+            .px(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
             .bg(theme.title_bar)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(11.0))
-                    .text_color(theme.muted_foreground)
-                    .child("查找"),
-            )
             .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(11.0))
+                    .text_size(px(10.0))
                     .text_color(if total == 0 {
                         theme.muted_foreground
                     } else {
@@ -2477,8 +2499,10 @@ impl Workspace {
                     })
                     .child(counter),
             )
+            .child(step("find-prev", "↑", -1, cx))
+            .child(step("find-next", "↓", 1, cx))
             .child(pane_action(
-                "find-close",
+                ("find-close", 0u64),
                 WINDOW_CLOSE,
                 theme,
                 false,
