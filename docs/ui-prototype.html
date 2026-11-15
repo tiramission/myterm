@@ -885,11 +885,11 @@ const commands = [
   { title:'缩放当前窗格',     hint:'Ctrl+Shift+Z', ico:icon.zoom,   run:() => toggleZoom(activeId()) },
   { title:'关闭当前会话',     hint:'Ctrl+Shift+W', ico:icon.close,  run:() => closeSession(activeId()) },
   { title:'关闭当前工作区',   hint:'Ctrl+Shift+Q', ico:icon.close,  run:() => closeWorkspace(state.ws) },
-  { title:'在终端中查找',     hint:'Ctrl+F',       ico:icon.find,   run:() => { state.find = !state.find; render(); } },
+  { title:'在终端中查找',     hint:'Ctrl+Shift+F', ico:icon.find,   run:() => { state.find = !state.find; render(); } },
   { title:'设置',             hint:'Ctrl+,',       ico:icon.split,  run:() => openSettings() },
   { title:'关于 myterm',      hint:'',             ico:icon.term,   run:openAbout },
   { title:'切换深浅主题',     hint:'Ctrl+Shift+L', ico:icon.moon,   run:toggleTheme },
-  { title:'收起 / 展开侧栏',   hint:'Ctrl+B',       ico:icon.split,  run:toggleRail }
+  { title:'收起 / 展开侧栏',   hint:'Ctrl+Shift+B', ico:icon.split,  run:toggleRail }
 ];
 
 function paletteItems(q) {
@@ -1049,8 +1049,11 @@ document.addEventListener('keydown', (e) => {
   if (mod && k === ',') { e.preventDefault(); state.settings ? closeSettings() : openSettings(); return; }
   if (mod && k === 'k') { e.preventDefault(); $('#palette').hidden ? openPalette() : closePalette(); return; }
   if (mod && e.shiftKey && k === 'f') { e.preventDefault(); state.find = !state.find; render(); return; }
+  // The browser habit; the product key is Ctrl+Shift+F, because a terminal has
+  // to leave Ctrl+F to the shell (forward one character).
   if (mod && k === 'f') { e.preventDefault(); state.find = !state.find; render(); return; }
   if (mod && k === 'tab') { e.preventDefault(); const n = state.workspaces.length; if (n) focusPane((state.ws + (e.shiftKey ? n - 1 : 1)) % n, activeId()); return; }
+  // Same for Ctrl+B: readline uses it to move back one character.
   if (mod && k === 'b') { e.preventDefault(); toggleRail(); return; }
   if (mod && e.shiftKey && k === 'l') { e.preventDefault(); toggleTheme(); return; }
   if (mod && e.shiftKey && k === 't') { e.preventDefault(); newWorkspace(); return; }

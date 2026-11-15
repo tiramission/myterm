@@ -3804,16 +3804,6 @@ impl Workspace {
                         theme,
                         cursor_row.into_any_element(),
                     ))
-                    .child(setting_row(
-                        "当前 shell",
-                        "把 shell 的 OSC 标题当作它的目录",
-                        theme,
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(muted)
-                            .child(self.shell_label())
-                            .into_any_element(),
-                    ))
             }
             SettingsTab::Keys => {
                 let mut list = div().flex().flex_col();
@@ -3991,32 +3981,6 @@ impl Workspace {
                                         },
                                     ))
                                     .child("关于 myterm"),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-reveal-config")
-                                    .min_w_0()
-                                    .cursor_pointer()
-                                    .text_size(px(10.5))
-                                    .text_color(muted)
-                                    .hover(move |this| this.text_color(accent))
-                                    .on_click(cx.listener(
-                                        |_: &mut Workspace, _: &ClickEvent, _, _cx| {
-                                            if let Some(path) = config::Config::location()
-                                                && let Some(dir) =
-                                                    std::path::Path::new(&path).parent()
-                                            {
-                                                // Explorer, not a URL: a `file://`
-                                                // link opens a second Explorer
-                                                // window for the file rather than
-                                                // the folder it is in.
-                                                let _ = std::process::Command::new("explorer")
-                                                    .arg(dir)
-                                                    .spawn();
-                                            }
-                                        },
-                                    ))
-                                    .child("配置文件"),
                             )
                             .child(div().flex_1())
                             .child(
@@ -4221,18 +4185,55 @@ impl Workspace {
                                     .child("好"),
                             ),
                     )
+                    // Two pointers out of the card: the project, and the file
+                    // the settings live in. The sheet's footer lost its copy of
+                    // the second one — this card is already the place that
+                    // answers "where is this program".
                     .child(
                         div()
-                            .id("about-link")
                             .mt(px(14.0))
-                            .text_size(px(10.0))
-                            .text_color(muted)
-                            .cursor_pointer()
-                            .hover(move |this| this.text_color(accent))
-                            .on_click(|_: &ClickEvent, _, cx| {
-                                cx.open_url("https://github.com/tiramission/myterm");
-                            })
-                            .child("github.com/tiramission/myterm"),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(14.0))
+                            .child(
+                                div()
+                                    .id("about-link")
+                                    .text_size(px(10.0))
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(move |this| this.text_color(accent))
+                                    .on_click(|_: &ClickEvent, _, cx| {
+                                        cx.open_url("https://github.com/tiramission/myterm");
+                                    })
+                                    .child("github.com/tiramission/myterm"),
+                            )
+                            .child(
+                                div()
+                                    .id("about-config")
+                                    .text_size(px(10.0))
+                                    .font_family(TERMINAL_FONT)
+                                    .text_color(muted)
+                                    .cursor_pointer()
+                                    .hover(move |this| this.text_color(accent))
+                                    .on_click(cx.listener(
+                                        |_: &mut Workspace, _: &ClickEvent, _, _cx| {
+                                            if let Some(path) = config::Config::location()
+                                                && let Some(dir) =
+                                                    std::path::Path::new(&path).parent()
+                                            {
+                                                // Explorer, not a URL: a `file://`
+                                                // link opens a second Explorer
+                                                // window for the file rather than
+                                                // the folder it is in.
+                                                let _ = std::process::Command::new("explorer")
+                                                    .arg(dir)
+                                                    .spawn();
+                                            }
+                                        },
+                                    ))
+                                    .child("配置文件"),
+                            ),
                     ),
             )
             .into_any_element()
