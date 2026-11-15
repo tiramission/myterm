@@ -12,6 +12,7 @@
 
 use gpui_kit::*;
 
+use crate::config::Accent;
 use vt::Rgb;
 
 /// Raw `0xRRGGBB` values for one mode.
@@ -27,9 +28,6 @@ struct Tokens {
     text: u32,
     text_2: u32,
     text_3: u32,
-    brand: u32,
-    /// The accent at the opacity used for tints and washes.
-    brand_soft: u32,
     /// The scrim behind an overlay. Always darker than the surfaces under it,
     /// in both modes: a scrim the colour of the background covers nothing.
     scrim: u32,
@@ -47,8 +45,6 @@ const DARK: Tokens = Tokens {
     text: 0xf2f5ec,
     text_2: 0xa6ada0,
     text_3: 0x8a9281,
-    brand: 0xc6ee7a,
-    brand_soft: 0x262b23,
     scrim: 0x000000,
     pill: 0x262b23,
     red: 0xff6b6b,
@@ -68,14 +64,37 @@ const LIGHT: Tokens = Tokens {
     text: 0x14170f,
     text_2: 0x555b4d,
     text_3: 0x656b5c,
-    brand: 0x3f6b12,
-    brand_soft: 0xedf4dc,
     scrim: 0x1b1f18,
     pill: 0xdfe3d7,
     red: 0xb12b26,
     amber: 0x8a5e00,
     sky: 0x1f5fb4,
 };
+
+/// The ink and wash for an accent, for the settings swatches.
+pub fn accent_ink(accent: Accent, mode: gpui_kit::component::ThemeMode) -> (Hsla, Hsla) {
+    let dark = !matches!(mode, gpui_kit::component::ThemeMode::Light);
+    let (ink, wash) = accents(accent, dark);
+    (hex(ink), hex(wash))
+}
+
+/// The four accents, as `(ink, wash)` per mode.
+///
+/// The wash is the accent laid on its mode's chrome at low strength, resolved
+/// here rather than multiplied at every use site: a tint that has to be computed
+/// per frame is a tint that drifts.
+fn accents(accent: Accent, dark: bool) -> (u32, u32) {
+    match (accent, dark) {
+        (Accent::Lime, true) => (0xc6ee7a, 0x262b23),
+        (Accent::Lime, false) => (0x3f6b12, 0xedf4dc),
+        (Accent::Amber, true) => (0xe3c06c, 0x2b271c),
+        (Accent::Amber, false) => (0x8a6a1f, 0xf5efdc),
+        (Accent::Sky, true) => (0x7cc4e8, 0x1d262b),
+        (Accent::Sky, false) => (0x1f6a8a, 0xdcecf5),
+        (Accent::Violet, true) => (0xc9a7f5, 0x262230),
+        (Accent::Violet, false) => (0x6b3fa0, 0xefe6f9),
+    }
+}
 
 fn hex(value: u32) -> Hsla {
     gpui_kit::rgb(value).into()
@@ -105,11 +124,12 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn for_mode(mode: gpui_kit::component::ThemeMode) -> Self {
+    pub fn for_mode(mode: gpui_kit::component::ThemeMode, accent: Accent) -> Self {
         let (t, dark) = match mode {
             gpui_kit::component::ThemeMode::Light => (&LIGHT, false),
             _ => (&DARK, true),
         };
+        let (brand, brand_soft) = accents(accent, dark);
 
         Self {
             bg: hex(t.bg),
@@ -119,8 +139,8 @@ impl Palette {
             text: hex(t.text),
             text_2: hex(t.text_2),
             text_3: hex(t.text_3),
-            brand: hex(t.brand),
-            brand_soft: hex(t.brand_soft),
+            brand: hex(brand),
+            brand_soft: hex(brand_soft),
             scrim: hex(t.scrim),
             pill: hex(t.pill),
             red: hex(t.red),
@@ -132,7 +152,10 @@ impl Palette {
 
     /// The palette for the theme that is currently installed.
     pub fn current(cx: &App) -> Self {
-        Self::for_mode(gpui_kit::component::Theme::global(cx).mode)
+        Self::for_mode(
+            gpui_kit::component::Theme::global(cx).mode,
+            crate::config::Config::load().accent,
+        )
     }
 
     /// How strongly a selection tints a cell.
@@ -298,11 +321,11 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
 /// `Theme::change` re-applies the registered theme file, which still holds the
 /// library's own colours, so the palette is written immediately afterwards. Every
 /// mode change goes through here, which is what keeps the two from disagreeing.
-pub fn install(cx: &mut App, mode: gpui_kit::component::ThemeMode) {
+pub fn install(cx: &mut App, mode: gpui_kit::component::ThemeMode, accent: Accent) {
     use gpui_kit::component::Theme;
 
     Theme::change(mode, None, cx);
 
-    let palette = Palette::for_mode(mode);
+    let palette = Palette::for_mode(mode, accent);
     Theme::update(cx, |theme| recolour(&mut theme.colors, palette));
 }

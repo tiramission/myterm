@@ -2,6 +2,32 @@
 
 use pty::Command;
 
+use crate::config::Shell;
+
+/// The shell the user asked for, or the best one on this machine.
+///
+/// A chosen shell that is not installed falls back to the default rather than
+/// failing: a preference is not a promise that the program exists, and a
+/// terminal that will not start because of one is worse than a terminal that
+/// starts in another shell.
+pub fn profile(shell: Shell) -> Command {
+    let (program, args) = match shell {
+        Shell::Auto => return default_profile(),
+        Shell::Pwsh => ("pwsh.exe", vec!["-NoLogo".to_owned()]),
+        Shell::Windows => ("powershell.exe", vec!["-NoLogo".to_owned()]),
+        Shell::Cmd => ("cmd.exe", Vec::new()),
+        Shell::Wsl => ("wsl.exe", Vec::new()),
+    };
+
+    match find_on_path(program) {
+        Some(path) => Command {
+            program: path,
+            args,
+        },
+        None => default_profile(),
+    }
+}
+
 /// Picks the best shell installed on this machine.
 ///
 /// PowerShell 7 first, then Windows PowerShell, then `cmd`. Windows always has

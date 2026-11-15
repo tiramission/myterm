@@ -16,6 +16,125 @@ pub struct Config {
     pub light: Option<bool>,
     /// The terminal's font size. `None` means the theme's own default.
     pub font_size: Option<f32>,
+    /// How tall a row in the workspace list is.
+    pub density: Density,
+    /// The one colour the app uses to say "here" and "something happened".
+    pub accent: Accent,
+    /// Which shell a new pane starts.
+    pub shell: Shell,
+}
+
+/// Row heights for the workspace list.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Density {
+    /// 34 px, and no second line: the name only.
+    Compact,
+    /// 42 px, name over directory.
+    #[default]
+    Standard,
+    /// 50 px, the same two lines with more air.
+    Comfy,
+}
+
+impl Density {
+    pub fn row_height(self) -> f32 {
+        match self {
+            Self::Compact => 34.0,
+            Self::Standard => 42.0,
+            Self::Comfy => 50.0,
+        }
+    }
+
+    /// Whether a row has the height to say where its shell is.
+    pub fn shows_directory(self) -> bool {
+        !matches!(self, Self::Compact)
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "compact" => Some(Self::Compact),
+            "standard" => Some(Self::Standard),
+            "comfy" => Some(Self::Comfy),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Standard => "standard",
+            Self::Comfy => "comfy",
+        }
+    }
+}
+
+/// The accent choices. One colour, four answers: the accent is a budget, not a
+/// palette.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Accent {
+    #[default]
+    Lime,
+    Amber,
+    Sky,
+    Violet,
+}
+
+impl Accent {
+    pub const ALL: [Self; 4] = [Self::Lime, Self::Amber, Self::Sky, Self::Violet];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lime" => Some(Self::Lime),
+            "amber" => Some(Self::Amber),
+            "sky" => Some(Self::Sky),
+            "violet" => Some(Self::Violet),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lime => "lime",
+            Self::Amber => "amber",
+            Self::Sky => "sky",
+            Self::Violet => "violet",
+        }
+    }
+}
+
+/// Which shell a new pane starts. `Auto` is the one the machine already has the
+/// best of.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Shell {
+    #[default]
+    Auto,
+    Pwsh,
+    Windows,
+    Cmd,
+    Wsl,
+}
+
+impl Shell {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "pwsh" => Some(Self::Pwsh),
+            "powershell" => Some(Self::Windows),
+            "cmd" => Some(Self::Cmd),
+            "wsl" => Some(Self::Wsl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Pwsh => "pwsh",
+            Self::Windows => "powershell",
+            Self::Cmd => "cmd",
+            Self::Wsl => "wsl",
+        }
+    }
 }
 
 impl Config {
@@ -88,6 +207,21 @@ impl Config {
                     }
                 }
 
+                "density" => {
+                    if let Some(density) = Density::parse(value) {
+                        config.density = density;
+                    }
+                }
+                "accent" => {
+                    if let Some(accent) = Accent::parse(value) {
+                        config.accent = accent;
+                    }
+                }
+                "shell" => {
+                    if let Some(shell) = Shell::parse(value) {
+                        config.shell = shell;
+                    }
+                }
                 _ => {}
             }
         }
@@ -107,6 +241,21 @@ impl Config {
         text.push_str(&format!(
             "font_size = {}\n",
             self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
+        ));
+        text.push_str(&format!(
+            "density = {}
+",
+            self.density.as_str()
+        ));
+        text.push_str(&format!(
+            "accent = {}
+",
+            self.accent.as_str()
+        ));
+        text.push_str(&format!(
+            "shell = {}
+",
+            self.shell.as_str()
         ));
 
         text
@@ -129,11 +278,17 @@ mod tests {
         let config = Config {
             light: Some(false),
             font_size: Some(16.0),
+            density: Density::Comfy,
+            accent: Accent::Sky,
+            shell: Shell::Cmd,
         };
         let read = Config::parse(&config.encode());
 
         assert_eq!(read.light, Some(false));
         assert_eq!(read.font_size, Some(16.0));
+        assert_eq!(read.density, Density::Comfy);
+        assert_eq!(read.accent, Accent::Sky);
+        assert_eq!(read.shell, Shell::Cmd);
     }
 
     #[test]
@@ -147,6 +302,19 @@ mod tests {
     fn an_out_of_range_size_is_not_adopted() {
         let read = Config::parse("font_size = 200\n");
         assert_eq!(read.font_size, None);
+    }
+
+    #[test]
+    fn an_unknown_value_leaves_the_default() {
+        let read = Config::parse(
+            "density = huge
+accent = pink
+shell = bash
+",
+        );
+        assert_eq!(read.density, Density::Standard);
+        assert_eq!(read.accent, Accent::Lime);
+        assert_eq!(read.shell, Shell::Auto);
     }
 
     #[test]

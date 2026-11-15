@@ -86,6 +86,9 @@ const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 /// workspace holding more than one shell looks like.
 const WORKSPACE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M3 12h18"/></svg>"#;
 
+/// A sun and a moon: the theme row in the palette toggles between them.
+const THEME_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>"#;
+
 /// The search glyph: the command entry in the top bar, and the find field.
 const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
 
@@ -150,7 +153,9 @@ const RAIL_THRESHOLD: f32 = 118.0;
 /// Builds the 256-entry palette the parser should report: the ANSI sixteen
 /// followed by the library's defaults for the rest.
 fn palette(mode: gpui_kit::component::ThemeMode) -> [Rgb; 256] {
-    let ansi = palette::Palette::for_mode(mode).ansi();
+    // The ANSI sixteen are the terminal's own colours; only the shell's accent
+    // follows the setting, and that is applied with the rest of the theme.
+    let ansi = palette::Palette::for_mode(mode, config::Accent::Lime).ansi();
     let mut palette = [Rgb::default(); 256];
     palette[..ansi.len()].copy_from_slice(&ansi);
     palette
@@ -432,58 +437,202 @@ struct Palette {
 struct PaletteCommand {
     id: &'static str,
     label: &'static str,
-    /// The key it already has. The palette is a discovery surface, not a
-    /// second place for commands to live: everything here works without it.
+    /// The key it already has. The palette is a discovery surface, not a second
+    /// place for commands to live: everything here works without it.
     keys: &'static str,
+    /// The glyph the row wears. A list of ten commands with no marks is a wall
+    /// of text; the glyph is what makes a row findable before it is read.
+    icon: &'static [u8],
+    /// Which heading the row sits under.
+    group: &'static str,
 }
 
 const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         id: "new-tab",
-        label: "新建标签",
+        label: "新建工作区",
         keys: "Ctrl+Shift+T",
+        icon: PLUS_SMALL,
+        group: "命令",
     },
     PaletteCommand {
         id: "close-tab",
-        label: "关闭标签",
+        label: "关闭工作区",
+        keys: "Ctrl+Shift+Q",
+        icon: WINDOW_CLOSE,
+        group: "命令",
+    },
+    PaletteCommand {
+        id: "close-pane",
+        label: "关闭窗格",
         keys: "Ctrl+Shift+W",
+        icon: WINDOW_CLOSE,
+        group: "命令",
     },
     PaletteCommand {
         id: "split-right",
-        label: "拆分到右侧",
+        label: "向右分屏",
         keys: "Ctrl+Shift+D",
+        icon: SPLIT_HORIZONTAL,
+        group: "命令",
     },
     PaletteCommand {
         id: "split-down",
-        label: "拆分到下方",
+        label: "向下分屏",
         keys: "Ctrl+Shift+E",
+        icon: SPLIT_VERTICAL,
+        group: "命令",
     },
     PaletteCommand {
         id: "zoom",
-        label: "缩放当前窗格",
+        label: "缩放窗格",
         keys: "Ctrl+Shift+Z",
-    },
-    PaletteCommand {
-        id: "theme",
-        label: "切换明暗主题",
-        keys: "Ctrl+Shift+L",
+        icon: ZOOM_IN,
+        group: "命令",
     },
     PaletteCommand {
         id: "find",
-        label: "在当前窗格内查找",
+        label: "查找",
         keys: "Ctrl+Shift+F",
+        icon: SEARCH_ICON,
+        group: "命令",
     },
     PaletteCommand {
         id: "settings",
         label: "设置",
         keys: "Ctrl+,",
+        icon: SETTINGS_ICON,
+        group: "命令",
+    },
+    PaletteCommand {
+        id: "theme",
+        label: "切换明暗主题",
+        keys: "Ctrl+Shift+L",
+        icon: THEME_ICON,
+        group: "外观",
     },
     PaletteCommand {
         id: "close-window",
         label: "关闭窗口",
-        keys: "Ctrl+Shift+Q",
+        keys: "Alt+F4",
+        icon: WINDOW_CLOSE,
+        group: "外观",
     },
 ];
+
+/// One row of the command palette after filtering: a command, or a workspace to
+/// jump to. Both answer "take me there", which is the only question the palette
+/// is for.
+#[derive(Clone, Copy)]
+enum PaletteRow {
+    Command(usize),
+    Workspace(usize),
+}
+
+impl Workspace {
+    /// Every row the palette can offer, in group order, filtered by `query`.
+    ///
+    /// Commands come first because they are what the field is named after;
+    /// workspaces follow, because jumping to one is the other thing a person
+    /// types here; appearance last, as the one group that changes the window
+    /// rather than what is in it.
+    fn palette_rows(&self, query: &str) -> Vec<PaletteRow> {
+        let query = query.trim().to_lowercase();
+        let hit = |label: &str| query.is_empty() || label.to_lowercase().contains(&query);
+
+        let mut rows = Vec::new();
+        for (index, command) in PALETTE_COMMANDS.iter().enumerate() {
+            if command.group == "命令" && hit(command.label) {
+                rows.push(PaletteRow::Command(index));
+            }
+        }
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if hit(&tab.title) {
+                rows.push(PaletteRow::Workspace(index));
+            }
+        }
+        for (index, command) in PALETTE_COMMANDS.iter().enumerate() {
+            if command.group != "命令" && hit(command.label) {
+                rows.push(PaletteRow::Command(index));
+            }
+        }
+        rows
+    }
+
+    /// What a row says, and what it is grouped under.
+    fn palette_label(&self, row: PaletteRow) -> (String, &'static str) {
+        match row {
+            PaletteRow::Command(index) => {
+                let command = &PALETTE_COMMANDS[index];
+                (command.label.to_owned(), command.group)
+            }
+            PaletteRow::Workspace(index) => (
+                self.tabs
+                    .get(index)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_default(),
+                "工作区",
+            ),
+        }
+    }
+}
+
+/// Runs the row the palette is pointing at.
+fn palette_icon(row: PaletteRow) -> &'static [u8] {
+    match row {
+        PaletteRow::Workspace(_) => WORKSPACE_ICON,
+        PaletteRow::Command(index) => PALETTE_COMMANDS[index].icon,
+    }
+}
+
+fn palette_key(row: PaletteRow) -> &'static str {
+    match row {
+        PaletteRow::Workspace(_) => "",
+        PaletteRow::Command(index) => PALETTE_COMMANDS[index].keys,
+    }
+}
+
+/// Which page of the settings sheet is open.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Look,
+    Terminal,
+    Keys,
+}
+
+/// The shortcut sheet, as data: the settings page and the palette both read it,
+/// and neither is allowed to invent a key the other does not have.
+const KEYMAP: &[(&str, &str)] = &[
+    ("Ctrl+Shift+T", "新建工作区"),
+    ("Ctrl+Shift+Q", "关闭工作区"),
+    ("Ctrl+Shift+W", "关闭窗格"),
+    ("Ctrl+Shift+D", "向右分屏"),
+    ("Ctrl+Shift+E", "向下分屏"),
+    ("Ctrl+Shift+Z", "缩放窗格"),
+    ("Ctrl+Shift+B", "收起 / 展开侧栏"),
+    ("Ctrl+Shift+F", "查找"),
+    ("Ctrl+K", "命令面板"),
+    ("Ctrl+,", "设置"),
+    ("Ctrl+Shift+L", "切换主题"),
+    ("Ctrl+Tab", "切换工作区"),
+    ("Ctrl+1..9", "直达工作区"),
+    ("Alt+方向", "切换窗格"),
+    ("Ctrl+=", "放大字号"),
+    ("Ctrl+-", "缩小字号"),
+];
+
+/// A labelled block inside a settings page.
+fn sgroup(label: &'static str, theme: &gpui_kit::component::Theme) -> AnyElement {
+    div()
+        .px(px(4.0))
+        .pt(px(12.0))
+        .pb(px(6.0))
+        .text_size(px(10.0))
+        .text_color(theme.muted_foreground)
+        .child(label)
+        .into_any_element()
+}
 
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
@@ -567,6 +716,8 @@ pub struct Workspace {
     config: config::Config,
     /// Whether the settings sheet is open.
     settings: bool,
+    /// Which page of it is showing.
+    settings_tab: SettingsTab,
     /// The split being dragged, as the two panes on either side plus the span
     /// the divider travels across. Present only while the divider is held.
     resize_drag: Option<ResizeDrag>,
@@ -588,7 +739,7 @@ impl Workspace {
         Self {
             tabs: Vec::new(),
             active_tab: 0,
-            command: pty_command::default_profile(),
+            command: pty_command::profile(config.shell),
             ticking: false,
             error: None,
             cached_style: GridStyle::default(),
@@ -624,6 +775,7 @@ impl Workspace {
             closing: false,
             config,
             settings: false,
+            settings_tab: SettingsTab::default(),
             resize_drag: None,
             focus: cx.focus_handle(),
             images: Rc::new(RefCell::new(ImageCache::default())),
@@ -1036,11 +1188,12 @@ impl Workspace {
         }
 
         if self.palette.is_some() {
-            let rows = self
+            let query = self
                 .palette
                 .as_ref()
-                .map(|palette| palette_matches(&palette.query).len())
-                .unwrap_or(0);
+                .map(|palette| palette.query.clone())
+                .unwrap_or_default();
+            let rows = self.palette_rows(&query).len();
             match keystroke.key.as_str() {
                 "escape" => {
                     self.palette = None;
@@ -2257,9 +2410,28 @@ impl Workspace {
         self.config.light = Some(mode == gpui_kit::component::ThemeMode::Light);
         self.config.save();
 
-        palette::install(cx, mode);
+        palette::install(cx, mode, self.config.accent);
         apply_terminal_font(cx, self.config.font_size);
 
+        let theme = gpui_kit::component::Theme::global(cx).clone();
+        for tab in &mut self.tabs {
+            for pane in tab.panes.values_mut() {
+                pane.retheme(&theme);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Repaints the window in another accent and remembers the choice.
+    ///
+    /// Only the accent moves: the mode stays whatever it was, which is what
+    /// makes this a one-row decision rather than a second theme picker.
+    fn set_accent(&mut self, accent: config::Accent, cx: &mut Context<Self>) {
+        self.config.accent = accent;
+        self.config.save();
+
+        let mode = gpui_kit::component::Theme::global(cx).mode;
+        palette::install(cx, mode, accent);
         let theme = gpui_kit::component::Theme::global(cx).clone();
         for tab in &mut self.tabs {
             for pane in tab.panes.values_mut() {
@@ -2518,6 +2690,13 @@ impl Workspace {
     /// Every command here already has a key; the palette exists so the keys can
     /// be discovered, not so commands can have a second home. That is why each
     /// row prints its shortcut instead of hiding it.
+    /// The command palette.
+    ///
+    /// Every command here already has a key; the palette exists so the keys can
+    /// be discovered, not so commands can have a second home. That is why each
+    /// row prints its shortcut instead of hiding it — and why the rows are
+    /// grouped: a flat list of ten answers says nothing about what kind of
+    /// answer each one is.
     fn render_palette(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -2527,11 +2706,14 @@ impl Workspace {
             return div().into_any_element();
         };
 
-        let rows = palette_matches(&palette.query);
+        let rows = self.palette_rows(&palette.query);
         let selected = palette.selected.min(rows.len().saturating_sub(1));
         let input = palette.input.clone();
+        let wash = theme.muted;
+        let accent = theme.ring;
 
-        let mut list = div().flex().flex_col().gap(px(1.0)).p(px(4.0));
+        let mut list = div().flex().flex_col().p(px(6.0));
+        let mut current_group = "";
         if rows.is_empty() {
             list = list.child(
                 div()
@@ -2541,51 +2723,89 @@ impl Workspace {
                     .text_color(theme.muted_foreground)
                     .child("没有匹配的命令"),
             );
-        } else {
-            for (index, command) in rows.iter().enumerate() {
-                let is_selected = index == selected;
-                let hover = theme.muted;
+        }
+        for (index, row) in rows.iter().enumerate() {
+            let (label, group) = self.palette_label(*row);
+            if group != current_group {
+                current_group = group;
                 list = list.child(
                     div()
-                        .id(ElementId::Name(format!("palette-{index}").into()))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(12.0))
-                        .h(px(30.0))
                         .px(px(10.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .when(is_selected, |this| this.bg(hover))
-                        .when(!is_selected, |this| this.hover(move |this| this.bg(hover)))
-                        .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
-                            workspace.run_command(index, window, cx);
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(12.0))
-                                .text_color(if is_selected {
-                                    theme.foreground
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(command.label),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(10.5))
-                                .text_color(theme.muted_foreground)
-                                .child(command.keys),
-                        ),
+                        .pt(px(8.0))
+                        .pb(px(4.0))
+                        .text_size(px(9.5))
+                        .text_color(theme.muted_foreground)
+                        .child(group),
                 );
             }
+
+            let is_selected = index == selected;
+            let keys = palette_key(*row);
+            list = list.child(
+                div()
+                    .id(ElementId::Name(format!("palette-{index}").into()))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .when(is_selected, |this| this.bg(accent.opacity(0.13)))
+                    .when(!is_selected, |this| this.hover(move |this| this.bg(wash)))
+                    .on_click(cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                        workspace.run_command(index, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_center()
+                            .child(icon_data(
+                                palette_icon(*row),
+                                13.0,
+                                if is_selected {
+                                    accent
+                                } else {
+                                    theme.muted_foreground
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(12.0))
+                            .text_color(if is_selected {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(label),
+                    )
+                    .when(!keys.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.0))
+                                .text_color(theme.muted_foreground)
+                                .child(keys),
+                        )
+                    }),
+            );
         }
+
+        let hint = |text: &'static str| {
+            div()
+                .text_size(px(10.0))
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
 
         div()
             .absolute()
@@ -2594,6 +2814,7 @@ impl Workspace {
             .flex_col()
             .items_center()
             .pt(px(96.0))
+            .bg(theme.overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
@@ -2603,10 +2824,10 @@ impl Workspace {
             )
             .child(
                 div()
-                    .w(px(520.0))
+                    .w(px(580.0))
                     .flex()
                     .flex_col()
-                    .rounded(px(12.0))
+                    .rounded(px(14.0))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
@@ -2617,11 +2838,35 @@ impl Workspace {
                     })
                     .child(
                         div()
-                            .p(px(8.0))
-                            .child(Input::new(&input).appearance(false).bordered(false)),
+                            .h(px(46.0))
+                            .flex()
+                            .items_center()
+                            .px(px(16.0))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(Input::new(&input).appearance(false).bordered(false).small()),
                     )
-                    .child(div().h(px(1.0)).bg(theme.border))
-                    .child(list),
+                    .child(
+                        div()
+                            .id("palette-list")
+                            .max_h(px(340.0))
+                            .overflow_y_scroll()
+                            .child(list),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(14.0))
+                            .px(px(14.0))
+                            .py(px(8.0))
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(hint("↑↓ 选择"))
+                            .child(hint("Enter 执行"))
+                            .child(hint("Esc 关闭")),
+                    ),
             )
             .into_any_element()
     }
@@ -2630,15 +2875,14 @@ impl Workspace {
     ///
     /// One surface, not two. An earlier version pinned the sheet to the window
     /// and then drew a second card inside it — 430px wide in a 360px drawer,
-    /// with its own padding, border, fill and shadow. The rows were laid out at
-    /// 398px inside a 328px box, so the right-hand controls were clipped, and the
-    /// panel read as a card floating on a card that happened to be a drawer. The
-    /// sheet is the surface now: its own edge, its own inset, nothing nested.
+    /// with its own padding, border, fill and shadow. The sheet is the surface
+    /// now: its own edge, its own inset, nothing nested.
     ///
-    /// It hangs under the title bar (`render` mounts it inside the content
+    /// It hangs under the top bar (`render` mounts it inside the content
     /// region), so it never covers the bar or the controls that close it, and it
-    /// keeps no scrim: every row takes effect immediately, and half the value of
-    /// a font-size setting is watching the terminal behind it change size.
+    /// keeps only a 12% scrim: every row takes effect immediately, and half the
+    /// value of a font-size setting is watching the terminal behind it change
+    /// size.
     fn render_settings(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -2647,261 +2891,509 @@ impl Workspace {
         let muted = theme.muted_foreground;
         let size = theme.mono_font_size.as_f32();
         let light = self.config.light;
+        let wash = theme.muted;
+        let accent = theme.ring;
+        let id = |name: &str| ElementId::Name(name.to_owned().into());
 
-        let appearance = div()
-            .flex()
-            .flex_row()
-            .gap(px(4.0))
-            .child(
-                setting_chip("settings-theme-system", "跟随系统", light.is_none(), theme).on_click(
-                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.config.light = None;
-                        workspace.config.save();
-                        // Back to the desktop's own answer, resolved rather than
-                        // remembered: the setting may have changed since start-up.
-                        let mode = if system_prefers_light() {
-                            gpui_kit::component::ThemeMode::Light
-                        } else {
-                            gpui_kit::component::ThemeMode::Dark
-                        };
-                        workspace.apply_theme(mode, cx);
-                    }),
-                ),
-            )
-            .child(
-                setting_chip("settings-theme-light", "浅色", light == Some(true), theme).on_click(
-                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.apply_theme(gpui_kit::component::ThemeMode::Light, cx);
-                    }),
-                ),
-            )
-            .child(
-                setting_chip("settings-theme-dark", "深色", light == Some(false), theme).on_click(
-                    cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.apply_theme(gpui_kit::component::ThemeMode::Dark, cx);
-                    }),
-                ),
-            );
-
-        let font = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                setting_chip("settings-font-smaller", "−", false, theme).on_click(cx.listener(
-                    move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.set_font_size(size - 1.0, cx);
-                    },
-                )),
-            )
-            .child(
-                div()
-                    .w(px(34.0))
-                    .text_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.foreground)
-                    .child(format!("{size:.0} pt")),
-            )
-            .child(
-                setting_chip("settings-font-larger", "+", false, theme).on_click(cx.listener(
-                    move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.set_font_size(size + 1.0, cx);
-                    },
-                )),
-            )
-            .child(
-                setting_chip("settings-font-reset", "重置", false, theme).on_click(cx.listener(
-                    |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                        workspace.set_font_size(config::DEFAULT_FONT_SIZE, cx);
-                    },
-                )),
-            );
-
-        // The app section: what is running, whether a copy lives on this machine,
-        // and whether a newer one exists. These used to sit in the about card,
-        // where they were the only actions in a table of facts. Installing writes
-        // to this machine, which is the same kind of decision as the theme or
-        // the font, so it belongs in the sheet that changes this machine; the
-        // about card is now pure reference, with nothing to click but a link.
-        let install = self.install_state();
-        let install_error = self.install_error.clone();
-        let install_control = div()
-            .w(px(96.0))
-            .child(install_action(theme, install, cx.entity()));
-
-        let ready = self.update_badge();
-        let update_ready = matches!(ready, Some((_, true)));
-        let update_label: String = match &ready {
-            Some((label, _)) => label.clone(),
-            None => "检查更新".to_owned(),
+        let tab = |id: &'static str, label: &'static str, active: bool, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(if active { accent } else { muted })
+                .when(active, |this| this.bg(theme.ring.opacity(0.13)))
+                .when(!active, |this| {
+                    this.hover(move |this| this.bg(wash).text_color(theme.muted_foreground))
+                })
+                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                    workspace.settings_tab = match id {
+                        "sh-tab-term" => SettingsTab::Terminal,
+                        "sh-tab-keys" => SettingsTab::Keys,
+                        _ => SettingsTab::Look,
+                    };
+                    cx.notify();
+                }))
+                .child(label)
         };
-        let update_hover = theme.ring.opacity(0.18);
-        let update_control = div()
-            .id("settings-update")
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .h(px(24.0))
-            .px(px(9.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(if update_ready {
-                theme.ring
-            } else {
-                theme.border
-            })
-            .bg(if update_ready {
-                theme.ring.opacity(0.10)
-            } else {
-                theme.background
-            })
-            .text_size(px(11.5))
-            .text_color(if update_ready { theme.ring } else { muted })
-            .cursor_pointer()
-            .hover(move |this| this.bg(update_hover))
-            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                if update_ready {
-                    workspace.install_update(cx);
-                } else {
-                    // A finished check that found nothing leaves the slot taken,
-                    // and `check_for_update` refuses a second call while it is
-                    // held. Clearing it is what lets the button be pressed twice.
-                    workspace.update = None;
-                    workspace.check_for_update(cx);
-                }
-            }))
-            .child(update_label);
 
-        let version = div()
-            .text_size(px(11.5))
-            .font_family(TERMINAL_FONT)
-            .text_color(theme.ring)
-            .child(version_label());
+        let seg = |id: ElementId, label: &'static str, active: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(24.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(if active { theme.foreground } else { muted })
+                .when(active, |this| this.bg(theme.popover))
+                .when(!active, |this| {
+                    this.hover(move |this| this.text_color(theme.muted_foreground))
+                })
+                .child(label)
+        };
 
-        div()
-            .absolute()
-            .top(px(0.0))
-            .right(px(0.0))
-            .bottom(px(0.0))
-            .w(px(360.0))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(theme.popover)
-            .border_l_1()
-            .border_color(theme.border)
-            .shadow_lg()
-            // A press inside the sheet is the sheet's. Without this the click
-            // falls through to the pane underneath and puts the caret there,
-            // which is a strange thing to happen while you are changing a setting.
-            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .flex_shrink_0()
-                    .px(px(16.0))
-                    .pt(px(14.0))
-                    .pb(px(10.0))
+        let track = || {
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(2.0))
+                .p(px(2.0))
+                .rounded(px(8.0))
+                .bg(theme.background)
+        };
+
+        // Each tab body is built here and the sheet picks one, so the sheet's
+        // own structure stays a header, a body and a footer whatever the tab.
+        let body = match self.settings_tab {
+            SettingsTab::Look => {
+                let theme_row = track()
                     .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("设置"),
+                        seg(id("sh-theme-system"), "跟随", light.is_none()).on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.light = None;
+                                workspace.config.save();
+                                // Back to the desktop's own answer, resolved
+                                // rather than remembered: the setting may have
+                                // changed since start-up.
+                                let mode = if system_prefers_light() {
+                                    gpui_kit::component::ThemeMode::Light
+                                } else {
+                                    gpui_kit::component::ThemeMode::Dark
+                                };
+                                workspace.apply_theme(mode, cx);
+                            },
+                        )),
                     )
-                    .child(pane_action(
-                        "settings-close",
-                        WINDOW_CLOSE,
-                        theme,
-                        false,
-                        cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                            workspace.settings = false;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            // The rows own one inset, and it is the sheet's: sixteen pixels from
-            // the edge, the same as the header above them, so the title, the
-            // labels and the footer share a leading spine.
-            .child(
+                    .child(
+                        seg(id("sh-theme-light"), "浅色", light == Some(true)).on_click(
+                            cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.apply_theme(gpui_kit::component::ThemeMode::Light, cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        seg(id("sh-theme-dark"), "深色", light == Some(false)).on_click(
+                            cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.apply_theme(gpui_kit::component::ThemeMode::Dark, cx);
+                            }),
+                        ),
+                    );
+
+                let density_row = track()
+                    .child(
+                        seg(
+                            id("sh-density-compact"),
+                            "紧凑",
+                            self.config.density == config::Density::Compact,
+                        )
+                        .on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.density = config::Density::Compact;
+                                workspace.config.save();
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        seg(
+                            id("sh-density-standard"),
+                            "标准",
+                            self.config.density == config::Density::Standard,
+                        )
+                        .on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.density = config::Density::Standard;
+                                workspace.config.save();
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        seg(
+                            id("sh-density-comfy"),
+                            "舒适",
+                            self.config.density == config::Density::Comfy,
+                        )
+                        .on_click(cx.listener(
+                            |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.density = config::Density::Comfy;
+                                workspace.config.save();
+                                cx.notify();
+                            },
+                        )),
+                    );
+
+                let mut swatches = div().flex().flex_row().items_center().gap(px(8.0));
+                for option in config::Accent::ALL {
+                    let active = self.config.accent == option;
+                    let (ink, _) = palette::accent_ink(option, theme.mode);
+                    swatches = swatches.child(
+                        div()
+                            .id(ElementId::Name(
+                                format!("sh-accent-{}", option.as_str()).into(),
+                            ))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(26.0))
+                            .rounded(px(999.0))
+                            .border_1()
+                            .border_color(if active { ink } else { theme.border })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                                workspace.set_accent(option, cx);
+                            }))
+                            .child(div().size(px(16.0)).rounded(px(999.0)).bg(ink)),
+                    );
+                }
+
                 div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .px(px(16.0))
+                    .child(sgroup("外观", theme))
                     .child(setting_row(
-                        "外观",
-                        "跟随系统时按桌面的明暗设置",
+                        "主题",
+                        "跟随系统时使用 Windows 的深浅设置",
                         theme,
-                        appearance.into_any_element(),
+                        theme_row.into_any_element(),
                     ))
                     .child(setting_row(
-                        "终端字号",
-                        "同时改变窗格能容纳的列数",
+                        "密度",
+                        "侧栏的行高，紧凑时隐藏路径行",
+                        theme,
+                        density_row.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "强调色",
+                        "只用于「当前」和「有动静」，不用于装饰",
+                        theme,
+                        swatches.into_any_element(),
+                    ))
+            }
+            SettingsTab::Terminal => {
+                let mut shells = track();
+                for option in [
+                    config::Shell::Auto,
+                    config::Shell::Pwsh,
+                    config::Shell::Windows,
+                    config::Shell::Cmd,
+                    config::Shell::Wsl,
+                ] {
+                    let label = match option {
+                        config::Shell::Auto => "自动",
+                        config::Shell::Pwsh => "pwsh",
+                        config::Shell::Windows => "Windows PowerShell",
+                        config::Shell::Cmd => "cmd",
+                        config::Shell::Wsl => "wsl",
+                    };
+                    shells = shells.child(
+                        seg(
+                            ElementId::Name(format!("sh-shell-{}", option.as_str()).into()),
+                            label,
+                            self.config.shell == option,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.shell = option;
+                                workspace.config.save();
+                                cx.notify();
+                            },
+                        )),
+                    );
+                }
+
+                let font = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id("sh-font-smaller")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded(px(6.0))
+                            .bg(theme.background)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(muted)
+                            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                            .on_click(cx.listener(
+                                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.set_font_size(size - 1.0, cx);
+                                },
+                            ))
+                            .child("−"),
+                    )
+                    .child(
+                        div()
+                            .w(px(56.0))
+                            .text_center()
+                            .text_size(px(11.5))
+                            .text_color(theme.foreground)
+                            .child(format!("{size:.0} pt")),
+                    )
+                    .child(
+                        div()
+                            .id("sh-font-larger")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded(px(6.0))
+                            .bg(theme.background)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(muted)
+                            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                            .on_click(cx.listener(
+                                move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.set_font_size(size + 1.0, cx);
+                                },
+                            ))
+                            .child("+"),
+                    )
+                    .child(
+                        div()
+                            .id("sh-font-reset")
+                            .h(px(24.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .cursor_pointer()
+                            .text_size(px(11.0))
+                            .text_color(muted)
+                            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                            .on_click(cx.listener(
+                                |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.set_font_size(config::DEFAULT_FONT_SIZE, cx);
+                                },
+                            ))
+                            .child("重置"),
+                    );
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(sgroup("终端", theme))
+                    .child(setting_row(
+                        "默认 shell",
+                        "新建窗格时启动的程序",
+                        theme,
+                        shells.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "字号",
+                        "只影响网格，不影响界面",
                         theme,
                         font.into_any_element(),
                     ))
                     .child(setting_row(
-                        "版本",
-                        "当前运行的这一份",
+                        "当前 shell",
+                        "把 shell 的 OSC 标题当作它的目录",
                         theme,
-                        version.into_any_element(),
-                    ))
-                    .child(setting_row(
-                        "安装",
-                        // The state is the hint, because the button's own label
-                        // only says what the next action would be.
-                        install.summary(),
-                        theme,
-                        install_control.into_any_element(),
-                    ))
-                    .when_some(install_error, |this, message| {
-                        this.child(
-                            div()
-                                .pb(px(10.0))
-                                .text_size(px(10.5))
-                                .text_color(theme.danger)
-                                .child(message),
-                        )
-                    })
-                    .child(setting_row(
-                        "更新",
-                        "启动时自动检查，失败不提示",
-                        theme,
-                        update_control.into_any_element(),
-                    ))
-                    .child(
                         div()
-                            .pt(px(12.0))
+                            .text_size(px(11.0))
+                            .text_color(muted)
+                            .child(self.shell_label())
+                            .into_any_element(),
+                    ))
+            }
+            SettingsTab::Keys => {
+                let mut list = div().flex().flex_col();
+                for (keys, label) in KEYMAP {
+                    list = list.child(
+                        div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(4.0))
-                            .child(div().text_size(px(10.5)).text_color(muted).child("保存在"))
-                            // The path is where you go to edit the file by hand,
-                            // so it is a control rather than a caption: clicking
-                            // it opens the folder the config lives in, which is
-                            // the only thing this line was ever pointing at.
+                            .gap(px(10.0))
+                            .h(px(32.0))
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .text_size(px(11.5))
+                            .text_color(muted)
+                            .child(*label)
+                            .child(div().ml_auto().flex().flex_row().gap(px(3.0)).children(
+                                keys.split('+').map(|part| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .h(px(16.0))
+                                        .px(px(4.0))
+                                        .rounded(px(4.0))
+                                        .bg(theme.muted)
+                                        .text_size(px(9.5))
+                                        .text_color(muted)
+                                        .child(part.to_owned())
+                                }),
+                            )),
+                    );
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(sgroup("快捷键", theme))
+                    .child(list)
+            }
+        };
+
+        div()
+            .absolute()
+            // Under the bar, not over it: the sheet is a workspace tool, and
+            // covering the window's own controls with it would make closing the
+            // window depend on closing settings first.
+            .top(px(TITLE_BAR_HEIGHT))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .flex()
+            .flex_row()
+            .justify_end()
+            // The scrim is a sheet's worth of dimming, not a dialog's: the point
+            // of a live preview is to watch the window behind it.
+            .child(
+                div()
+                    .id("settings-scrim")
+                    .absolute()
+                    .inset_0()
+                    .bg(theme.overlay.opacity(0.32))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|workspace: &mut Workspace, _: &MouseDownEvent, _, cx| {
+                            workspace.settings = false;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w(px(436.0))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .bg(theme.title_bar)
+                    .border_l_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    // A press inside the sheet is the sheet's. Without this the
+                    // click falls through to the pane underneath and puts the
+                    // caret there, which is a strange thing to have happen while
+                    // you are changing a setting.
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .flex_shrink_0()
+                            .h(px(52.0))
+                            .pl(px(18.0))
+                            .pr(px(10.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child("设置"),
+                            )
+                            .child(pane_action(
+                                ("settings-close", 0u64),
+                                WINDOW_CLOSE,
+                                theme,
+                                false,
+                                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.settings = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.0))
+                            .px(px(14.0))
+                            .pb(px(10.0))
+                            .child(tab(
+                                "sh-tab-look",
+                                "外观",
+                                self.settings_tab == SettingsTab::Look,
+                                cx,
+                            ))
+                            .child(tab(
+                                "sh-tab-term",
+                                "终端",
+                                self.settings_tab == SettingsTab::Terminal,
+                                cx,
+                            ))
+                            .child(tab(
+                                "sh-tab-keys",
+                                "快捷键",
+                                self.settings_tab == SettingsTab::Keys,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("settings-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px(px(14.0))
+                            .pb(px(14.0))
+                            .child(body),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(10.0))
+                            .flex_shrink_0()
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .id("settings-about")
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .text_color(muted)
+                                    .hover(move |this| this.text_color(accent))
+                                    .on_click(cx.listener(
+                                        |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                            workspace.settings = false;
+                                            workspace.about = true;
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("关于 myterm"),
+                            )
                             .child(
                                 div()
                                     .id("settings-reveal-config")
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(10.5))
-                                    .font_family(TERMINAL_FONT)
-                                    .text_color(muted)
                                     .cursor_pointer()
-                                    .hover(move |this| this.text_color(theme.ring))
+                                    .text_size(px(10.5))
+                                    .text_color(muted)
+                                    .hover(move |this| this.text_color(accent))
                                     .on_click(cx.listener(
                                         |_: &mut Workspace, _: &ClickEvent, _, _cx| {
                                             if let Some(path) = config::Config::location()
@@ -2909,30 +3401,237 @@ impl Workspace {
                                                     std::path::Path::new(&path).parent()
                                             {
                                                 // Explorer, not a URL: a `file://`
-                                                // link opens a second Explorer window
-                                                // for the file rather than the folder
-                                                // it is in.
+                                                // link opens a second Explorer
+                                                // window for the file rather than
+                                                // the folder it is in.
                                                 let _ = std::process::Command::new("explorer")
                                                     .arg(dir)
                                                     .spawn();
                                             }
                                         },
                                     ))
-                                    .child(
-                                        config::Config::location()
-                                            .unwrap_or_else(|| "本机设置目录".to_owned()),
-                                    ),
+                                    .child("配置文件"),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(muted)
+                                    .child("更改立即生效"),
                             ),
                     ),
             )
             .into_any_element()
     }
 
-    /// Asks before ending more than one shell.
-    ///
-    /// The copy names the object and the count, because "are you sure" over an
-    /// unnamed action is exactly the dialog people click through without
-    /// reading.
+    /// The shell a new pane would start, for the settings row.
+    fn shell_label(&self) -> String {
+        let program = &self.command.program;
+        std::path::Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program)
+            .trim_end_matches(".exe")
+            .to_owned()
+    }
+
+    /// The about card, as a centred sheet over a scrim.
+    fn render_about(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = theme.muted_foreground;
+        let accent = theme.ring;
+        let text = theme.foreground;
+        let install = self.install_state();
+        let update = self.update_badge();
+
+        let row = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(32.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_size(px(11.5))
+                .text_color(muted)
+                .child(label)
+                .child(div().ml_auto().text_color(text).child(value))
+        };
+
+        let ghost = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .h(px(28.0))
+                .px(px(12.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(muted)
+                .hover(move |this| this.bg(theme.muted).text_color(theme.foreground))
+                .child(label)
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|workspace, _: &MouseDownEvent, _, cx| {
+                    workspace.about = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .w(px(400.0))
+                    .p(px(18.0))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(14.0))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(38.0))
+                                    .rounded(px(11.0))
+                                    .bg(accent.opacity(0.13))
+                                    .border_1()
+                                    .border_color(accent.opacity(0.42))
+                                    .child(icon_data(APP_MARK, 20.0, accent)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(14.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(text)
+                                            .child("myterm"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(muted)
+                                            .child(format!("{} · Windows", version_label())),
+                                    ),
+                            )
+                            .child(pane_action(
+                                ("about-close", 0u64),
+                                WINDOW_CLOSE,
+                                theme,
+                                false,
+                                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.about = false;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .mt(px(16.0))
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(row("终端解析", ghostty_label().to_owned()))
+                            .child(row("界面框架", "GPUI Kit 0.9".to_owned()))
+                            .child(row("默认 shell", self.shell_label()))
+                            .child(row("安装状态", install.summary().to_owned()))
+                            .child(row(
+                                "更新",
+                                match &update {
+                                    Some((label, _)) => label.clone(),
+                                    None => "尚未检查".to_owned(),
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .mt(px(16.0))
+                            .child(ghost("about-check", "检查更新".to_owned()).on_click(
+                                cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    workspace.update = None;
+                                    workspace.check_for_update(cx);
+                                }),
+                            ))
+                            .child(div().w(px(96.0)).child(install_action(
+                                theme,
+                                install,
+                                cx.entity(),
+                            )))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id("about-ok")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .px(px(16.0))
+                                    .rounded(px(7.0))
+                                    .bg(accent.opacity(0.13))
+                                    .cursor_pointer()
+                                    .text_size(px(11.5))
+                                    .text_color(accent)
+                                    .hover(move |this| this.bg(accent.opacity(0.2)))
+                                    .on_click(cx.listener(
+                                        |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                            workspace.about = false;
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("好"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("about-link")
+                            .mt(px(14.0))
+                            .text_size(px(10.0))
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(move |this| this.text_color(accent))
+                            .on_click(|_: &ClickEvent, _, cx| {
+                                cx.open_url("https://github.com/tiramission/myterm");
+                            })
+                            .child("github.com/tiramission/myterm"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_close_prompt(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -3097,7 +3796,7 @@ impl Workspace {
             return;
         }
 
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("输入命令"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("输入命令、会话或主题…"));
         let sub = cx.subscribe(
             &input,
             |workspace: &mut Workspace, _, event: &InputEvent, cx| {
@@ -3134,29 +3833,33 @@ impl Workspace {
         let Some(palette) = self.palette.as_ref() else {
             return;
         };
-        let rows = palette_matches(&palette.query);
-        let Some(command) = rows.get(index).copied() else {
+        let query = palette.query.clone();
+        let Some(row) = self.palette_rows(&query).get(index).copied() else {
             return;
         };
 
         self.palette = None;
         window.focus(&self.focus, cx);
 
-        match command.id {
-            "new-tab" => self.new_tab(window, cx),
-            "close-tab" => self.close_tab(self.active_tab, cx),
-            "split-right" => self.split_active(Axis::Horizontal, window, cx),
-            "split-down" => self.split_active(Axis::Vertical, window, cx),
-            "zoom" => {
-                if let Some(pane) = self.active_tab().map(|tab| tab.active) {
-                    self.toggle_zoom(pane, cx);
+        match row {
+            PaletteRow::Workspace(tab) => self.select_tab(tab, cx),
+            PaletteRow::Command(index) => match PALETTE_COMMANDS[index].id {
+                "new-tab" => self.new_tab(window, cx),
+                "close-tab" => self.close_tab(self.active_tab, cx),
+                "close-pane" => self.close_pane(cx),
+                "split-right" => self.split_active(Axis::Horizontal, window, cx),
+                "split-down" => self.split_active(Axis::Vertical, window, cx),
+                "zoom" => {
+                    if let Some(pane) = self.active_tab().map(|tab| tab.active) {
+                        self.toggle_zoom(pane, cx);
+                    }
                 }
-            }
-            "theme" => self.toggle_theme(cx),
-            "find" => self.open_find(window, cx),
-            "settings" => self.settings = true,
-            "close-window" => self.close_window(window, cx),
-            _ => {}
+                "theme" => self.toggle_theme(cx),
+                "find" => self.open_find(window, cx),
+                "settings" => self.settings = true,
+                "close-window" => self.close_window(window, cx),
+                _ => {}
+            },
         }
         cx.notify();
     }
@@ -3234,14 +3937,6 @@ fn find_matches(frame: &terminal::Frame, query: &str) -> Vec<(usize, usize, usiz
 }
 
 /// The palette rows a query leaves.
-fn palette_matches(query: &str) -> Vec<&'static PaletteCommand> {
-    let query = query.trim().to_lowercase();
-    PALETTE_COMMANDS
-        .iter()
-        .filter(|command| query.is_empty() || command.label.to_lowercase().contains(&query))
-        .collect()
-}
-
 impl Workspace {
     /// Starts dragging a tab.
     fn begin_tab_drag(&mut self, from: usize, start: f32) {
@@ -3857,6 +4552,7 @@ impl Workspace {
                     pane_label(pane),
                     pane_cwd(pane),
                     pane_status(pane),
+                    self.config.density,
                     // A row under a header belongs to it and steps in; a row
                     // that stands for its own workspace stays on the top spine.
                     grouped,
@@ -4475,41 +5171,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The about card, as a centred sheet over a scrim.
-    fn render_about(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.overlay)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|workspace, _: &MouseDownEvent, _, cx| {
-                    workspace.about = false;
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .child(about_card(theme)),
-            )
-            .into_any_element()
-    }
-
     /// What is left when every workspace is closed.
     ///
-    /// Not a black window and not a consolation sentence: the one thing an
-    /// empty list can still tell you is where the next one comes from, so it says
-    /// that and gives the button.
+    /// Not a black window and not a consolation sentence: the one thing an empty
+    /// list can still tell you is where the next one comes from, so it says that
+    /// and gives the button.
     fn render_empty(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -4972,130 +5638,6 @@ fn pane_header(
         )
 }
 
-fn about_card(theme: &gpui_kit::component::Theme) -> AnyElement {
-    let muted = theme.muted_foreground;
-    let faint = theme.border;
-    let accent = theme.ring;
-    let text = theme.foreground;
-
-    let row = move |label: &'static str, value: &'static str| {
-        div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .justify_between()
-            .gap(px(32.0))
-            .w_full()
-            .child(div().text_size(px(11.5)).text_color(muted).child(label))
-            .child(div().text_size(px(11.5)).text_color(text).child(value))
-    };
-
-    // The keys sit on the right in the terminal's own font: they are an
-    // identifier, and an identifier in a proportional face reads as prose.
-    let key_row = move |keys: &'static str, label: &'static str| {
-        div()
-            .flex()
-            .flex_row()
-            .items_baseline()
-            .justify_between()
-            .gap(px(16.0))
-            .w_full()
-            .child(div().text_size(px(10.5)).text_color(muted).child(label))
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .font_family(TERMINAL_FONT)
-                    .text_color(text)
-                    .child(keys),
-            )
-    };
-
-    let card = div()
-        .w(px(268.0))
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .child(icon_data(APP_MARK, 28.0, accent))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(text)
-                                .child("myterm"),
-                        )
-                        // The version rides with the name rather than in the
-                        // table below: it belongs to the product, and putting it
-                        // in the table would give it the same weight as the
-                        // toolkit it happens to use.
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(accent)
-                                .child(version_label()),
-                        ),
-                ),
-        )
-        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(9.0))
-                .mt(px(14.0))
-                .child(row("终端解析", ghostty_label()))
-                .child(row("界面框架", "GPUI Kit 0.9"))
-                .child(row("平台", "Windows")),
-        )
-        // The shortcut sheet lives here instead of behind its own panel: this
-        // card is already the place people look when they want to know what the
-        // program is and how it works, and a second overlay for eight lines
-        // would be a second thing to open.
-        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(7.0))
-                .mt(px(12.0))
-                .child(div().text_size(px(10.0)).text_color(muted).child("键位"))
-                .child(key_row("Ctrl+Shift+T", "新建标签"))
-                .child(key_row("Ctrl+Shift+W", "关闭窗格"))
-                .child(key_row("Ctrl+Shift+D / E", "拆分到右侧 / 下方"))
-                .child(key_row("Ctrl+Tab", "切换标签"))
-                .child(key_row("Alt+方向", "切换窗格"))
-                .child(key_row("Ctrl+Shift+F / P", "查找 / 命令面板"))
-                .child(key_row("Ctrl+= / -", "字号，Ctrl+0 复位"))
-                .child(key_row("Ctrl+,", "设置")),
-        )
-        .child(div().h(px(1.0)).w_full().mt(px(16.0)).bg(faint));
-
-    card.child(
-        div()
-            .id("about-link")
-            .mt(px(12.0))
-            .text_size(px(11.0))
-            .text_color(muted)
-            .cursor_pointer()
-            .hover(move |this| this.text_color(accent))
-            .on_click(|_: &ClickEvent, _, cx| {
-                cx.open_url("https://github.com/tiramission/myterm");
-            })
-            .child("github.com/tiramission/myterm"),
-    )
-    .into_any_element()
-}
-
-/// What the install row says and offers.
 #[derive(Clone, Copy)]
 pub struct InstallState {
     /// This process is the installed copy.
@@ -5236,40 +5778,6 @@ fn pane_action(
 /// Selected is carried by fill, border and weight together rather than by a
 /// single colour: the sheet has to stay readable to someone who cannot tell the
 /// accent green from the muted grey.
-fn setting_chip(
-    id: &'static str,
-    label: &'static str,
-    active: bool,
-    theme: &gpui_kit::component::Theme,
-) -> Stateful<Div> {
-    let accent = theme.ring;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(if active { accent } else { theme.border })
-        .bg(if active {
-            accent.opacity(0.10)
-        } else {
-            theme.background
-        })
-        .text_size(px(11.5))
-        .text_color(if active {
-            accent
-        } else {
-            theme.muted_foreground
-        })
-        .cursor_pointer()
-        .hover(move |this| this.bg(theme.muted))
-        .child(label)
-}
-
-/// One row of the settings sheet: what it is, why it matters, and the control.
 fn setting_row(
     label: &'static str,
     hint: &'static str,
@@ -5479,6 +5987,7 @@ fn sidebar_pane_row(
     label: String,
     detail: Option<String>,
     status: PaneStatus,
+    density: config::Density,
     _indented: bool,
     selected: bool,
     unseen: bool,
@@ -5514,7 +6023,7 @@ fn sidebar_pane_row(
         // Two lines fit in one row: what this shell *is*, and where it is. The
         // second line is what tells three PowerShell tabs apart, and it costs
         // twelve pixels that the column has and the window does not.
-        .h(px(42.0))
+        .h(px(density.row_height()))
         // The dot keeps its lane through the indent, so the status column runs
         // straight down the group while the names step in behind it.
         .pl(px(10.0))
@@ -5591,17 +6100,20 @@ fn sidebar_pane_row(
                         .text_color(text_color)
                         .child(label),
                 )
-                .when_some(detail, |this, detail| {
-                    this.child(
-                        div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(10.0))
-                            .text_color(theme.muted_foreground)
-                            .child(detail),
-                    )
-                }),
+                .when_some(
+                    detail.filter(|_| density.shows_directory()),
+                    |this, detail| {
+                        this.child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(10.0))
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        )
+                    },
+                ),
         )
         // The word is the third encoding, and the only one that survives a
         // reader who cannot separate lime from grey. `Idle` says nothing: it is
@@ -6268,13 +6780,12 @@ fn main() {
     // takes about 50 ms to come up, and `App::run` keeps the app borrowed for
     // all of `on_finish_launching`, so doing this later re-enters the borrow as
     // soon as the window asks for its first frame.
-    let command = pty_command::default_profile();
-
     // A saved preference wins over the desktop's setting. Both are resolved
     // before the loop starts, because the first shell has to be painted in the
     // colors the window will use.
     let saved = config::Config::load();
     let light = saved.light.unwrap_or_else(system_prefers_light);
+    let command = pty_command::profile(saved.shell);
 
     // The pane needs the palette the window will end up with, and the theme is
     // only installed later in `gpui_kit::init`, so the colors are resolved
@@ -6312,7 +6823,7 @@ fn main() {
             } else {
                 gpui_kit::component::ThemeMode::Dark
             };
-            palette::install(cx, mode);
+            palette::install(cx, mode, workspace_config.accent);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
