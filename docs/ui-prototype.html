@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- myterm 新界面设计原型（提案，尚未实现）。打开即可交互：Ctrl+K 命令面板，Ctrl+, 设置，Ctrl+Shift+F 查找。 -->
+<!-- myterm 的界面原型：界面与交互以这里为准（0.5.0 已按此实现）。打开即可交互：Ctrl+K 命令面板，Ctrl+, 设置，Ctrl+Shift+F 查找。 -->
 <html lang="zh-CN" data-theme="dark" data-accent="lime">
 <head>
 <meta charset="utf-8">
@@ -299,18 +299,18 @@ html[data-theme="light"] .term .m{color:#8b5a86}
 <div id="app">
   <aside class="rail">
     <div class="rail-top">
-      <button class="mark" id="railBtn" title="收起 / 展开侧栏 (Ctrl+B)">
+      <button class="mark" id="railBtn" title="收起 / 展开侧栏 (Ctrl+Shift+B)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9.5l3 2.5-3 2.5"/><path d="M12.5 15h4.5"/></svg>
       </button>
-      <button class="rail-collapse" id="railCollapse" title="收起 (Ctrl+B)">
+      <button class="rail-collapse" id="railCollapse" title="收起 (Ctrl+Shift+B)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
     </div>
     <div class="rail-scroll" id="railList"></div>
     <div class="rail-foot">
-      <button class="new-sess" id="newSess" title="新建会话 (Ctrl+Shift+N)">
+      <button class="new-sess" id="newSess" title="新建工作区 (Ctrl+Shift+T)">
         <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        <span>新建会话</span>
+        <span>新建工作区</span>
       </button>
       <button class="icon-btn" id="settingsBtn" title="设置 (Ctrl+,)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
@@ -667,7 +667,7 @@ function renderSettings() {
       ['新建工作区','Ctrl Shift T'],['关闭工作区','Ctrl Shift Q'],['关闭会话','Ctrl Shift W'],
       ['向右分屏','Ctrl Shift D'],['向下分屏','Ctrl Shift E'],['缩放窗格','Ctrl Shift Z'],
       ['查找','Ctrl Shift F'],['命令面板','Ctrl K'],['设置','Ctrl ,'],['切换主题','Ctrl Shift L'],
-      ['切换标签','Ctrl Tab'],['直达标签','Ctrl 1..9'],['收起侧栏','Ctrl B'],['切换窗格','Alt 方向键']
+      ['切换标签','Ctrl Tab'],['直达标签','Ctrl 1..9'],['收起侧栏','Ctrl Shift B'],['切换窗格','Alt 方向键']
     ];
     body.innerHTML = `<div class="sgroup">快捷键</div><div class="klist">` + keys.map(([n,k]) => `<div class="krow"><span>${n}</span><span class="keys">${k.split(' ').map(x=>`<span class="kbd">${x}</span>`).join('')}</span></div>`).join('') + `</div>`;
   }

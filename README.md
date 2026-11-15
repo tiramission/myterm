@@ -12,7 +12,9 @@
   <img src="docs/screenshot.png" alt="myterm 的窗口：左侧窄条是工作区与它的窗格，右侧终端卡片上方是 44px 顶栏" width="880">
 </picture>
 
-终端渲染、键盘与中文输入、多工作区、分屏与拖动比例、选区与复制、滚轮回滚、Kitty 图形协议、深浅主题、自动更新与安装都已人工验证。设计取舍写在 [docs/design.md](docs/design.md)。
+终端渲染、键盘与中文输入、多工作区、分屏与拖动比例、选区与复制、滚轮回滚、查找、Kitty 图形协议、深浅主题、自动更新与安装都已人工验证。
+
+界面的样子与交互以 [docs/ui-prototype.html](docs/ui-prototype.html) 为准——那是一份可以直接打开、直接点的稿子，0.5.0 就是照它做的。为什么要这样做，写在 [docs/design.md](docs/design.md)。
 
 ## 三个决定
 
