@@ -27,7 +27,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::Sizable;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -634,6 +633,23 @@ fn sgroup(label: &'static str, theme: &gpui_kit::component::Theme) -> AnyElement
         .into_any_element()
 }
 
+/// What a close is about to end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseTarget {
+    Window,
+    /// The workspace's index, valid while the prompt is up.
+    Workspace(usize),
+    /// The workspace it lives in, and the pane.
+    Pane(usize, u64),
+}
+
+/// A workspace that was just closed, kept for the undo toast.
+struct ClosedTab {
+    tab: Tab,
+    index: usize,
+    at: Instant,
+}
+
 /// The workspace: tabs, panes, and the transient state of a pointer gesture.
 pub struct Workspace {
     tabs: Vec<Tab>,
@@ -708,9 +724,12 @@ pub struct Workspace {
     app_menu: bool,
     /// Whether the about card is on screen.
     about: bool,
-    /// Set when a close would end more than one shell and is waiting on
-    /// confirmation. Nothing is torn down until it is answered.
-    closing: bool,
+    /// What a close would end, while the question is on screen. Nothing is torn
+    /// down until it is answered.
+    closing: Option<CloseTarget>,
+    /// The last closed workspace, held for the six seconds the toast offers it
+    /// back. Dropping it is what ends its shells.
+    closed: Option<ClosedTab>,
     /// The preferences this window is running with, kept so the settings sheet
     /// can write them back without re-reading the file.
     config: config::Config,
@@ -775,7 +794,8 @@ impl Workspace {
             palette: None,
             app_menu: false,
             about: false,
-            closing: false,
+            closing: None,
+            closed: None,
             config,
             window_title: String::new(),
             settings: false,
@@ -938,6 +958,17 @@ impl Workspace {
 
     /// Drains every pane. Returns true when a frame changed.
     fn poll(&mut self) -> bool {
+        // The undo offer expires here, which is also what ends the shells of the
+        // workspace it was holding.
+        if self
+            .closed
+            .as_ref()
+            .is_some_and(|closed| closed.at.elapsed() > Duration::from_secs(6))
+        {
+            self.closed = None;
+            return true;
+        }
+
         let mut changed = self.advance_caret_blink();
         let active = self.active_tab;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
@@ -1117,25 +1148,265 @@ impl Workspace {
         .detach();
     }
 
+    /// What a close would end, waiting on an answer.
+    ///
+    /// Three units, one dialog: a pane, the workspace around it, and the
+    /// window. The question is the same in all three cases — "this is still
+    /// running, is that what you meant" — so it is asked once, in one card,
+    /// with the noun changed.
+    fn prompt_close(&mut self, target: CloseTarget, cx: &mut Context<Self>) {
+        self.closing = Some(target);
+        cx.notify();
+    }
+
+    /// Closes the workspace, asking first when something in it is still writing.
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let running = tab
+            .panes
+            .values()
+            .filter(|pane| matches!(pane_status(pane), PaneStatus::Working))
+            .count();
+        if running > 0 {
+            self.prompt_close(CloseTarget::Workspace(index), cx);
+            return;
+        }
+        self.do_close_tab(index, cx);
+    }
+
+    /// Removes the workspace and keeps it for a moment, in case it was a slip.
+    fn do_close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(index);
+        let tab = self.tabs.remove(index);
         // The zoom names a pane id, and ids are only unique within a tab.
         self.zoomed = None;
         if self.tabs.is_empty() {
             self.active_tab = 0;
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
+        } else if index < self.active_tab {
+            // Closing a workspace to the left of the current one shifts it; the
+            // one on screen should stay on screen.
+            self.active_tab -= 1;
+        }
+
+        // The closed workspace is *moved*, not dropped: its shells keep running
+        // for the six seconds the toast offers to undo. After that the sessions
+        // go with it, because a terminal that keeps processes alive forever to
+        // protect against a misclick is worse than the misclick.
+        self.closed = Some(ClosedTab {
+            tab,
+            index,
+            at: Instant::now(),
+        });
+        cx.notify();
+    }
+
+    /// Puts the last closed workspace back, with its shells still running.
+    fn reopen_closed(&mut self, cx: &mut Context<Self>) {
+        let Some(closed) = self.closed.take() else {
+            return;
+        };
+        let index = closed.index.min(self.tabs.len());
+        self.tabs.insert(index, closed.tab);
+        self.active_tab = index;
+        cx.notify();
+    }
+
+    /// Closes the focused pane, or the workspace when it is the last one.
+    fn close_pane(&mut self, cx: &mut Context<Self>) {
+        let last_in_tab = self
+            .active_tab()
+            .map(|tab| tab.panes.len() == 1)
+            .unwrap_or(true);
+
+        if last_in_tab {
+            self.close_tab(self.active_tab, cx);
+            return;
+        }
+
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let id = tab.active;
+        if tab
+            .panes
+            .get(&id)
+            .is_some_and(|pane| matches!(pane_status(pane), PaneStatus::Working))
+        {
+            self.prompt_close(CloseTarget::Pane(self.active_tab, id), cx);
+            return;
+        }
+        self.do_close_pane(self.active_tab, id, cx);
+    }
+
+    /// Removes one pane from a workspace.
+    fn do_close_pane(&mut self, tab_index: usize, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(tab_index) else {
+            return;
+        };
+        tab.active = id;
+        tab.close_active();
+        if self.zoomed == Some(id) {
+            self.zoomed = None;
         }
         cx.notify();
     }
 
-    /// Scrolls the focused terminal's viewport.
+    /// Closes the window, asking first when more than one shell would go with it.
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shells: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+        if shells > 1 {
+            self.prompt_close(CloseTarget::Window, cx);
+            return;
+        }
+        self.finish_window(window);
+    }
+
+    /// Switches to `index`, dropping state that belongs to the tab being left.
     ///
-    /// A wheel notch is three lines; a precise delta is divided by the cell
-    /// height so a trackpad feels the same as a mouse.
+    /// Pane ids restart at 1 in every tab, so a zoom left behind would be read
+    /// as an id in the new tab and cover the wrong pane.
+    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // Looking at a tab is what clears its badge, even when it is already the
+        // current one.
+        if let Some(tab) = self.tabs.get_mut(index)
+            && tab.unseen
+        {
+            tab.unseen = false;
+        }
+        if index == self.active_tab {
+            cx.notify();
+            return;
+        }
+        self.active_tab = index;
+        self.zoomed = None;
+        cx.notify();
+    }
+
+    /// Moves focus to `id`.
+    fn focus_pane(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if !tab.panes.contains_key(&id) {
+            return;
+        }
+        tab.active = id;
+
+        // A zoomed pane covers the others, so focusing a different one has to
+        // release the zoom: otherwise the sidebar highlights a pane the window is
+        // not showing, and typing goes somewhere invisible.
+        if self.zoomed.is_some_and(|zoomed| zoomed != id) {
+            self.zoomed = None;
+        }
+        cx.notify();
+    }
+
+    /// Switches between the light and dark themes.
+    ///
+    /// The shells have to be repainted as well as the chrome: the terminal's
+    /// default foreground, background and ANSI palette are its own copy, so a
+    /// theme change that only reached the window would leave a black grid under a
+    /// white title bar.
+    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
+        let next = match gpui_kit::component::Theme::global(cx).mode {
+            gpui_kit::component::ThemeMode::Light => gpui_kit::component::ThemeMode::Dark,
+            _ => gpui_kit::component::ThemeMode::Light,
+        };
+        self.apply_theme(next, cx);
+    }
+
+    /// Paints the app in `mode` and remembers the choice.
+    ///
+    /// Re-applying the terminal font after the palette matters: the library
+    /// re-reads its theme file on every mode change, which drops the font this
+    /// app set at start-up. Without this the grid silently falls back to the
+    /// library's monospace the first time the theme is switched.
+    fn apply_theme(&mut self, mode: gpui_kit::component::ThemeMode, cx: &mut Context<Self>) {
+        self.config.light = Some(mode == gpui_kit::component::ThemeMode::Light);
+        self.config.save();
+
+        palette::install(cx, mode, self.config.accent);
+        apply_terminal_font(cx, self.config.font_size);
+
+        let theme = gpui_kit::component::Theme::global(cx).clone();
+        for tab in &mut self.tabs {
+            for pane in tab.panes.values_mut() {
+                pane.retheme(&theme);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Repaints the window in another accent and remembers the choice.
+    ///
+    /// Only the accent moves: the mode stays whatever it was, which is what
+    /// makes this a one-row decision rather than a second theme picker.
+    fn set_accent(&mut self, accent: config::Accent, cx: &mut Context<Self>) {
+        self.config.accent = accent;
+        self.config.save();
+
+        let mode = gpui_kit::component::Theme::global(cx).mode;
+        palette::install(cx, mode, accent);
+        let theme = gpui_kit::component::Theme::global(cx).clone();
+        for tab in &mut self.tabs {
+            for pane in tab.panes.values_mut() {
+                pane.retheme(&theme);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sets the terminal's font size, within the range the grid can lay out.
+    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        let size = size.clamp(config::MIN_FONT_SIZE, config::MAX_FONT_SIZE);
+        self.config.font_size = Some(size);
+        self.config.save();
+        apply_terminal_font(cx, Some(size));
+        cx.notify();
+    }
+
+    /// Opens or closes the settings sheet.
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = !self.settings;
+        cx.notify();
+    }
+
+    fn finish_window(&mut self, window: &mut Window) {
+        self.tabs.clear();
+        self.closed = None;
+        window.remove_window();
+    }
+
+    /// Answers the close prompt with "yes".
+    fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.closing.take() else {
+            return;
+        };
+        match target {
+            CloseTarget::Window => self.finish_window(window),
+            CloseTarget::Workspace(index) => self.do_close_tab(index, cx),
+            CloseTarget::Pane(tab, id) => {
+                // Closing the last pane of a workspace is closing the workspace.
+                let last = self.tabs.get(tab).is_some_and(|tab| tab.panes.len() == 1);
+                if last {
+                    self.do_close_tab(tab, cx);
+                } else {
+                    self.do_close_pane(tab, id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn handle_scroll(&mut self, event: &ScrollEvent, style: GridStyle, cx: &mut Context<Self>) {
         let lines = match event.delta {
             ScrollDelta::Lines(delta) => -delta.y,
@@ -1231,10 +1502,10 @@ impl Workspace {
             }
         }
 
-        if self.closing {
+        if self.closing.is_some() {
             match keystroke.key.as_str() {
                 "escape" => {
-                    self.closing = false;
+                    self.closing = None;
                     cx.notify();
                     cx.stop_propagation();
                 }
@@ -1356,6 +1627,11 @@ impl Workspace {
                         pane.session.write(text.as_bytes());
                     }
                     cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                "r" => {
+                    self.reopen_closed(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2089,11 +2365,15 @@ impl Render for Workspace {
             ));
         }
 
+        if self.closed.is_some() {
+            body = body.child(self.render_toast(&theme, cx));
+        }
+
         if self.palette.is_some() {
             body = body.child(self.render_palette(&theme, cx));
         }
 
-        if self.closing {
+        if self.closing.is_some() {
             body = body.child(self.render_close_prompt(&theme, cx));
         }
 
@@ -2357,163 +2637,6 @@ impl Workspace {
                     .into_any_element()
             }
         }
-    }
-
-    /// Closes the focused pane, or the tab when it is the last one.
-    fn close_pane(&mut self, cx: &mut Context<Self>) {
-        let last_in_tab = self
-            .active_tab()
-            .map(|tab| tab.panes.len() == 1)
-            .unwrap_or(true);
-
-        if last_in_tab {
-            self.close_tab(self.active_tab, cx);
-            return;
-        }
-
-        if let Some(tab) = self.active_tab_mut() {
-            tab.close_active();
-        }
-        cx.notify();
-    }
-
-    /// Switches to `index`, dropping state that belongs to the tab being left.
-    ///
-    /// Pane ids restart at 1 in every tab, so a zoom left behind would be read
-    /// as an id in the new tab and cover the wrong pane.
-    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() {
-            return;
-        }
-        // Looking at a tab is what clears its badge, even when it is already the
-        // current one.
-        if let Some(tab) = self.tabs.get_mut(index)
-            && tab.unseen
-        {
-            tab.unseen = false;
-        }
-        if index == self.active_tab {
-            cx.notify();
-            return;
-        }
-        self.active_tab = index;
-        self.zoomed = None;
-        cx.notify();
-    }
-
-    /// Moves focus to `id`.
-    fn focus_pane(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
-        if !tab.panes.contains_key(&id) {
-            return;
-        }
-        tab.active = id;
-
-        // A zoomed pane covers the others, so focusing a different one has to
-        // release the zoom: otherwise the sidebar highlights a pane the window is
-        // not showing, and typing goes somewhere invisible.
-        if self.zoomed.is_some_and(|zoomed| zoomed != id) {
-            self.zoomed = None;
-        }
-        cx.notify();
-    }
-
-    /// Switches between the light and dark themes.
-    ///
-    /// The shells have to be repainted as well as the chrome: the terminal's
-    /// default foreground, background and ANSI palette are its own copy, so a
-    /// theme change that only reached the window would leave a black grid under a
-    /// white title bar.
-    fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let next = match gpui_kit::component::Theme::global(cx).mode {
-            gpui_kit::component::ThemeMode::Light => gpui_kit::component::ThemeMode::Dark,
-            _ => gpui_kit::component::ThemeMode::Light,
-        };
-        self.apply_theme(next, cx);
-    }
-
-    /// Paints the app in `mode` and remembers the choice.
-    ///
-    /// Re-applying the terminal font after the palette matters: the library
-    /// re-reads its theme file on every mode change, which drops the font this
-    /// app set at start-up. Without this the grid silently falls back to the
-    /// library's monospace the first time the theme is switched.
-    fn apply_theme(&mut self, mode: gpui_kit::component::ThemeMode, cx: &mut Context<Self>) {
-        self.config.light = Some(mode == gpui_kit::component::ThemeMode::Light);
-        self.config.save();
-
-        palette::install(cx, mode, self.config.accent);
-        apply_terminal_font(cx, self.config.font_size);
-
-        let theme = gpui_kit::component::Theme::global(cx).clone();
-        for tab in &mut self.tabs {
-            for pane in tab.panes.values_mut() {
-                pane.retheme(&theme);
-            }
-        }
-        cx.notify();
-    }
-
-    /// Repaints the window in another accent and remembers the choice.
-    ///
-    /// Only the accent moves: the mode stays whatever it was, which is what
-    /// makes this a one-row decision rather than a second theme picker.
-    fn set_accent(&mut self, accent: config::Accent, cx: &mut Context<Self>) {
-        self.config.accent = accent;
-        self.config.save();
-
-        let mode = gpui_kit::component::Theme::global(cx).mode;
-        palette::install(cx, mode, accent);
-        let theme = gpui_kit::component::Theme::global(cx).clone();
-        for tab in &mut self.tabs {
-            for pane in tab.panes.values_mut() {
-                pane.retheme(&theme);
-            }
-        }
-        cx.notify();
-    }
-
-    /// Sets the terminal's font size, within the range the grid can lay out.
-    fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
-        let size = size.clamp(config::MIN_FONT_SIZE, config::MAX_FONT_SIZE);
-        self.config.font_size = Some(size);
-        self.config.save();
-        apply_terminal_font(cx, Some(size));
-        cx.notify();
-    }
-
-    /// Opens or closes the settings sheet.
-    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings = !self.settings;
-        cx.notify();
-    }
-
-    /// Closes the window, which ends the app.
-    ///
-    /// Every shell is a child of this process, so dropping the workspace on the
-    /// way out takes the whole tree with it rather than leaving orphaned
-    /// consoles behind. That is also why closing more than one shell asks
-    /// first: the window cannot put back a running program, and the shell that
-    /// is in the middle of a build is the one people close by accident.
-    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shells: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
-        if shells > 1 {
-            self.closing = true;
-            cx.notify();
-            return;
-        }
-
-        self.tabs.clear();
-        window.remove_window();
-    }
-
-    /// Answers the close prompt with "yes".
-    fn confirm_close(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
-        self.closing = false;
-        self.tabs.clear();
-        window.remove_window();
     }
 }
 
@@ -3671,8 +3794,54 @@ impl Workspace {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tabs = self.tabs.len();
+        let Some(target) = self.closing else {
+            return div().into_any_element();
+        };
         let shells: usize = self.tabs.iter().map(|tab| tab.panes.len()).sum();
+
+        // One question, three nouns. The copy says what will end and how much of
+        // it, because "are you sure" is a question that answers nothing.
+        let (title, body, confirm) = match target {
+            CloseTarget::Window => (
+                "关闭窗口？".to_owned(),
+                format!("关闭窗口会结束 {shells} 个终端，正在运行的程序也会停止。"),
+                "关闭窗口",
+            ),
+            CloseTarget::Workspace(index) => {
+                let tab = self.tabs.get(index);
+                let name = tab.map(|tab| tab.title.clone()).unwrap_or_default();
+                let running = tab
+                    .map(|tab| {
+                        tab.panes
+                            .values()
+                            .filter(|pane| matches!(pane_status(pane), PaneStatus::Working))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                (
+                    format!("关闭工作区「{name}」？"),
+                    if running == 0 {
+                        "这个工作区里的终端都已经停止。".to_owned()
+                    } else {
+                        format!("{running} 个终端还在运行，关闭会结束这些进程。")
+                    },
+                    "关闭工作区",
+                )
+            }
+            CloseTarget::Pane(tab, id) => {
+                let label = self
+                    .tabs
+                    .get(tab)
+                    .and_then(|tab| tab.panes.get(&id))
+                    .map(pane_label)
+                    .unwrap_or_default();
+                (
+                    format!("关闭「{label}」？"),
+                    "它还在运行，关闭会结束这个进程。".to_owned(),
+                    "关闭窗格",
+                )
+            }
+        };
 
         div()
             .absolute()
@@ -3683,30 +3852,28 @@ impl Workspace {
             .bg(theme.overlay)
             .child(
                 div()
-                    .w(px(360.0))
+                    .w(px(380.0))
                     .flex()
                     .flex_col()
-                    .gap(px(10.0))
+                    .gap(px(6.0))
                     .p(px(18.0))
-                    .rounded(px(12.0))
+                    .rounded(px(14.0))
                     .bg(theme.popover)
                     .border_1()
                     .border_color(theme.border)
                     .shadow_lg()
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(px(13.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child("关闭窗口？"),
+                            .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "关闭窗口会结束 {tabs} 个标签里的 {shells} 个终端，正在运行的程序也会停止。"
-                            )),
+                            .child(body),
                     )
                     .child(
                         div()
@@ -3714,34 +3881,110 @@ impl Workspace {
                             .flex_row()
                             .justify_end()
                             .gap(px(8.0))
-                            .pt(px(4.0))
+                            .pt(px(10.0))
                             .child(
-                                Button::new("cancel-close")
-                                    .outline()
-                                    .label("取消")
+                                div()
+                                    .id("cancel-close")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .px(px(14.0))
+                                    .rounded(px(7.0))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .cursor_pointer()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.muted_foreground)
+                                    .hover(move |this| this.bg(theme.muted))
                                     .on_click(cx.listener(
                                         |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
-                                            workspace.closing = false;
+                                            workspace.closing = None;
                                             cx.notify();
                                         },
-                                    )),
+                                    ))
+                                    .child("取消"),
                             )
                             .child(
-                                Button::new("confirm-close")
-                                    .danger()
-                                    .label("关闭窗口")
+                                div()
+                                    .id("confirm-close")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(28.0))
+                                    .px(px(14.0))
+                                    .rounded(px(7.0))
+                                    .bg(theme.danger.opacity(0.14))
+                                    .cursor_pointer()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.danger)
+                                    .hover(move |this| this.bg(theme.danger.opacity(0.22)))
                                     .on_click(cx.listener(
                                         |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
                                             workspace.confirm_close(window, cx);
                                         },
-                                    )),
+                                    ))
+                                    .child(confirm),
                             ),
                     ),
             )
             .into_any_element()
     }
 
-    /// Closes every tab but one.
+    /// The undo toast for the workspace that was just closed.
+    ///
+    /// Six seconds, one line, one button. Long enough to catch a slip, short
+    /// enough that the shells behind it are not held open by a terminal that
+    /// cannot be closed.
+    fn render_toast(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(closed) = self.closed.as_ref() else {
+            return div().into_any_element();
+        };
+        let name = closed.tab.title.clone();
+
+        div()
+            .absolute()
+            .right(px(16.0))
+            .bottom(px(40.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(14.0))
+            .h(px(38.0))
+            .pl(px(14.0))
+            .pr(px(8.0))
+            .rounded(px(9.0))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .text_size(px(11.5))
+            .text_color(theme.muted_foreground)
+            .child(format!("已关闭工作区「{name}」"))
+            .child(
+                div()
+                    .id("toast-undo")
+                    .flex()
+                    .items_center()
+                    .h(px(26.0))
+                    .px(px(10.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(theme.ring)
+                    .hover(move |this| this.bg(theme.ring.opacity(0.13)))
+                    .on_click(
+                        cx.listener(|workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                            workspace.reopen_closed(cx);
+                        }),
+                    )
+                    .child("撤销"),
+            )
+            .into_any_element()
+    }
+
     fn close_others(&mut self, keep: usize, cx: &mut Context<Self>) {
         if keep >= self.tabs.len() {
             return;
