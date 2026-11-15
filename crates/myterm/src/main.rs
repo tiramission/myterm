@@ -82,6 +82,10 @@ const APP_MARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 /// this program", and it is deliberately not the app mark: that glyph already
 /// sits at the leading edge as the window's identity, and using it twice in one
 /// bar leaves the second copy with no reason to look clickable.
+/// The workspace glyph: a frame cut in both directions, which is what a
+/// workspace holding more than one shell looks like.
+const WORKSPACE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M3 12h18"/></svg>"#;
+
 /// The search glyph: the command entry in the top bar, and the find field.
 const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>"#;
 
@@ -3926,175 +3930,127 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The list with its names dropped: one capsule per tab, one chip per pane.
+    /// The list with its names dropped: one block per workspace, one chip per
+    /// shell.
     ///
-    /// This is what the sidebar becomes at its narrowest, and it keeps the same
-    /// two levels as the list. The capsule is the tab — its outline is what says
-    /// where one tab ends and the next begins, which space alone could not do
-    /// once the labels lost their headings. The accent outline marks the tab the
-    /// keyboard is in; the white chip inside it marks the focused pane.
+    /// At this width the column is navigation, not content. A workspace gets a
+    /// block — its own tint when it is the one on screen, and a heading that
+    /// numbers its shells once there is more than one — so the grouping that
+    /// the list shows with indent and air is carried here by a surface and a
+    /// letter.
     ///
-    /// A tab that holds several panes gets a small glyph above them; the chips
-    /// under it are its panes. A tab that holds one pane is one chip, because it
-    /// is one place.
-    ///
-    /// A column of identical dots said how many places there were but not which
-    /// was which, so each chip carries a character. Names collide often — every
-    /// shell is called `pwsh` — so when two panes in one tab start with the same
-    /// character they fall back to their position instead of repeating it. The
-    /// full name is one drag of the edge away.
+    /// The chip carries a character because a column of identical dots says how
+    /// many places there are but not which is which. Names collide often — both
+    /// halves of a split usually run the same shell — so a workspace with more
+    /// than one pane numbers its chips instead, the same numbers the pane
+    /// headers wear.
     fn render_rail(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        /// Width of one tab's capsule.
-        const CAPSULE: f32 = 44.0;
-        /// Height of a pane's chip. The capsule's padding and outline leave the
-        /// chip the capsule's whole inner width, so it is a square.
-        const CHIP: f32 = 30.0;
-
         let mut rail = div()
             .w_full()
             .flex()
             .flex_col()
-            .items_center()
-            .gap(px(8.0))
-            .py(px(2.0));
+            .px(px(6.0))
+            .pt(px(2.0))
+            .pb(px(8.0));
         let current = self.effective_active();
 
         for (tab_index, tab) in self.tabs.iter().enumerate() {
             let grouped = tab.panes.len() > 1;
             let current_tab = tab_index == self.active_tab;
+            let wash = theme.muted;
 
-            // The outline is the tab. Inactive tabs wear the same hairline the
-            // window uses elsewhere plus a wash, so a group reads as a group even
-            // before the eye finds its outline; the current one wears the accent,
-            // so the rail answers "where is the keyboard" at a glance.
-            //
-            // The wash is half strength on purpose: a full `muted` is what a row
-            // looks like under the pointer, and a resting surface must not borrow
-            // the hover state's colour.
-            let mut capsule = div()
-                .w(px(CAPSULE))
+            // The block is the workspace. A tint says which one the window is
+            // showing — it is the one fact this column exists to answer, and a
+            // tint answers it for a whole group at once rather than for one chip.
+            let mut block = div()
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(2.0))
-                .px(px(6.0))
+                .gap(px(4.0))
                 .py(px(4.0))
-                .rounded(px(16.0))
-                .border_1()
-                .border_color(if current_tab {
-                    theme.ring
-                } else {
-                    theme.border
-                })
-                .when(!current_tab, |this| this.bg(theme.muted.opacity(0.5)));
+                .rounded(px(10.0))
+                .when(tab_index > 0, |this| this.mt(px(8.0)))
+                // One step off the shell, not a card: the block is a bracket
+                // around a workspace, and a white card would out-shout the chip
+                // it is only there to group.
+                .when(current_tab, |this| this.bg(theme.muted));
 
-            // Only a group needs a name of its own; a one-pane tab is already
-            // named by its chip.
+            // A heading is only worth its 26 pixels when it has something to
+            // head: with one shell, the chip already says everything the
+            // heading would, in the same letter.
             if grouped {
-                let hover_bg = theme.muted;
-                let text_color = if current_tab {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                };
-                capsule = capsule.child(
+                block = block.child(
                     div()
                         .id(ElementId::Name(format!("rail-tab-{tab_index}").into()))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w_full()
-                        .h(px(14.0))
-                        .rounded(px(4.0))
+                        .size(px(26.0))
+                        .rounded(px(7.0))
                         .cursor_pointer()
-                        .hover(move |this| this.bg(hover_bg))
+                        .hover(move |this| this.bg(wash))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                             workspace.select_tab(tab_index, cx);
                         }))
                         .child(
                             div()
-                                .text_size(px(10.0))
-                                .font_weight(if current_tab {
-                                    FontWeight::SEMIBOLD
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if current_tab {
+                                    theme.ring
                                 } else {
-                                    FontWeight::NORMAL
+                                    theme.muted_foreground
                                 })
-                                .text_color(text_color)
                                 .child(rail_initial(&tab.title)),
                         ),
                 );
             }
 
-            let labels: Vec<String> = tab.panes.values().map(pane_label).collect();
-
-            // `panes` is a `BTreeMap` keyed by the pane id, so this iteration is
-            // the order the panes were opened — the same order the layout grows
-            // in, and the order `render_node` numbers the headers with. The chip
-            // and the badge have to agree, or the rail is pointing at a pane the
-            // user cannot find.
+            // `panes` is keyed by the pane id, so this iteration is the order
+            // the panes were opened — the same order the layout grows in, and
+            // the order `render_node` numbers the headers with. The chip and the
+            // badge have to agree, or the rail points at a pane the user cannot
+            // find.
             for (index, (id, pane)) in tab.panes.iter().enumerate() {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
-                // A grouped tab numbers its panes, because that number is what
-                // the pane headers wear. A one-pane tab shows the shell's
-                // initial instead: the mark is the only thing to identify.
                 let glyph = if grouped {
                     (index + 1).to_string()
                 } else {
-                    rail_initial(&labels[index])
+                    rail_initial(&pane_label(pane))
                 };
-                let hover_bg = theme.muted;
-                // On the accent fill the letter has to be the window's ink, not
-                // its text colour: the accent is light in dark mode and dark in
-                // light mode, so `background` is the one token that always
-                // contrasts with it.
-                let text_color = if selected {
-                    theme.background
-                } else if matches!(status, PaneStatus::Exited) {
-                    // A dead shell is the one state worth interrupting for, so
-                    // it keeps a colour even when it is not the focused chip.
-                    theme.danger
+                let ink = if selected {
+                    theme.foreground
                 } else {
-                    theme.muted_foreground
+                    status_color(status, theme)
                 };
 
-                capsule = capsule.child(
+                block = block.child(
                     div()
-                        // Pane ids restart at 1 in every tab, so the row has to
-                        // carry the tab too: without it two rows share an id and
-                        // only one of them can be hit or highlighted.
+                        // Pane ids restart at 1 in every workspace, so the chip
+                        // has to carry the workspace too: without it two chips
+                        // share an id and only one of them can be hit.
                         .id(ElementId::Name(
                             format!("rail-pane-{tab_index}-{id}").into(),
                         ))
+                        .relative()
                         .flex()
                         .items_center()
                         .justify_center()
-                        // The inner width, so the fill meets the capsule's own
-                        // inset instead of floating inside it.
-                        .w_full()
-                        .h(px(CHIP))
+                        .size(px(30.0))
                         .rounded(px(8.0))
                         .cursor_pointer()
-                        // Selection is the loud one. In the rail the user is
-                        // scanning for one thing — which pane has the keyboard —
-                        // and the panes are thirty pixels wide, so anything
-                        // quieter loses to the column: a dark chip among dark
-                        // chips reads as no chip at all. The accent fill is the
-                        // same accent the focused pane's card wears, moved from
-                        // its outline to its whole face so it can be found at a
-                        // glance and from across the room.
-                        //
-                        // Activity is left to the unselected chips, as a wash:
-                        // it is the second question, and it must not compete
-                        // with the first answer.
-                        .when(selected, |this| this.bg(theme.ring))
-                        .when(!selected, |this| this.bg(rail_tint(status, theme)))
-                        .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
+                        .when(selected, |this| {
+                            this.bg(theme.popover)
+                                .border_1()
+                                .border_color(theme.ring.opacity(0.42))
+                        })
+                        .when(!selected, |this| this.hover(move |this| this.bg(wash)))
                         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                             workspace.select_tab(tab_index, cx);
                             workspace.focus_pane(id, cx);
@@ -4107,13 +4063,25 @@ impl Workspace {
                                 } else {
                                     FontWeight::MEDIUM
                                 })
-                                .text_color(text_color)
+                                .text_color(ink)
                                 .child(glyph),
+                        )
+                        // The corner dot is the second encoding: the letter is
+                        // already coloured by state, but colour alone is not a
+                        // signal a person can rely on.
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(4.0))
+                                .right(px(4.0))
+                                .size(px(5.0))
+                                .rounded(px(999.0))
+                                .bg(status_color(status, theme)),
                         ),
                 );
             }
 
-            rail = rail.child(capsule);
+            rail = rail.child(block);
         }
 
         rail.into_any_element()
@@ -5302,10 +5270,11 @@ fn sidebar_group_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
-        .h(px(28.0))
-        .px(px(8.0))
-        .rounded(px(CHIP_RADIUS))
+        .gap(px(7.0))
+        .h(px(26.0))
+        .pl(px(8.0))
+        .pr(px(6.0))
+        .rounded(px(7.0))
         .cursor_pointer()
         // The tab being moved stays in its place, faded, so the list does not
         // jump under the pointer while a landing spot is being chosen.
@@ -5350,6 +5319,7 @@ fn sidebar_group_row(
                 workspace.close_tab(tab_index, cx);
             }),
         )
+        .child(icon_data(WORKSPACE_ICON, 12.0, theme.muted_foreground))
         .child(
             div()
                 .flex_1()
@@ -5357,7 +5327,7 @@ fn sidebar_group_row(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(px(11.5))
+                .text_size(px(11.0))
                 .font_weight(if current {
                     FontWeight::SEMIBOLD
                 } else {
@@ -5385,7 +5355,7 @@ fn sidebar_group_row(
         .child(
             div()
                 .flex_shrink_0()
-                .text_size(px(10.5))
+                .text_size(px(10.0))
                 .text_color(theme.muted_foreground)
                 .child(pane_count.to_string()),
         )
@@ -5945,29 +5915,13 @@ fn status_glyph(status: PaneStatus, theme: &gpui_kit::component::Theme) -> impl 
         })
 }
 
-/// The surface a rail chip wears when it is not the selected one.
-///
-/// Selection is the accent fill; this is only the second question — is anything
-/// happening in the panes I am not in. Idle keeps none of it: most panes are idle
-/// at any moment, and a wash on all of them would be the loudest thing in a
-/// column whose job is to point at one. Working borrows the accent at low
-/// strength, a dead shell borrows danger.
-fn rail_tint(status: PaneStatus, theme: &gpui_kit::component::Theme) -> Hsla {
-    match status {
-        PaneStatus::Working => theme.ring.opacity(0.22),
-        PaneStatus::Exited => theme.danger.opacity(0.18),
-        PaneStatus::Idle => theme.background.opacity(0.0),
-    }
-}
-
 /// The directory a shell is working in, when it reports one.
 ///
-/// There is no process inspection here: the shell's OSC title is the only
-/// thing a terminal is told for free, and on Windows it is often the full
-/// path of the executable rather than the working directory. That case is
-/// dropped — a bar that says
-/// `C:\Program Files\WindowsApps\Microsoft.PowerShell_...\pwsh.exe` next to
-/// `pwsh` has said the program's name twice and where it is zero times.
+/// There is no process inspection here: the shell's OSC title is the only thing
+/// a terminal is told for free, and on Windows it is often the full path of the
+/// executable rather than the working directory. That case is dropped — a bar
+/// that prints the program's path next to the program's name has said where it
+/// is zero times.
 fn pane_cwd(pane: &Pane) -> Option<String> {
     let title = pane.session.frame().title.trim();
     if title.is_empty() || title.to_ascii_lowercase().ends_with(".exe") {
@@ -5980,8 +5934,8 @@ fn pane_cwd(pane: &Pane) -> Option<String> {
     Some(shorten_path(title))
 }
 
-/// Replaces the user's home directory with `~`, which is how every shell
-/// prompt already writes it.
+/// Replaces the user's home directory with `~`, which is how every shell prompt
+/// already writes it.
 fn shorten_path(path: &str) -> String {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let home = HOME.get_or_init(|| std::env::var("USERPROFILE").ok());
