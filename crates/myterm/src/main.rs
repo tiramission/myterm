@@ -215,6 +215,7 @@ impl Pane {
         theme: &gpui_kit::component::Theme,
     ) -> Self {
         apply_colors(&mut session, theme);
+        session.set_scrollback_limit(config::Config::load().scrollback);
         Self {
             session,
             command: command.clone(),
@@ -1168,6 +1169,11 @@ impl Workspace {
             muted: theme.muted_foreground,
             selection_alpha: palette::Palette::current(cx).selection_alpha(),
             cursor_visible: true,
+            cursor_shape: self.config.cursor.map(|shape| match shape {
+                config::Cursor::Bar => vt::CursorStyle::Bar,
+                config::Cursor::Block => vt::CursorStyle::Block,
+                config::Cursor::Underline => vt::CursorStyle::Underline,
+            }),
         }
     }
 
@@ -1400,6 +1406,19 @@ impl Workspace {
         for tab in &mut self.tabs {
             for pane in tab.panes.values_mut() {
                 pane.retheme(&theme);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Changes how much history every pane keeps, now and for new ones.
+    fn set_scrollback(&mut self, lines: usize, cx: &mut Context<Self>) {
+        let lines = lines.clamp(config::MIN_SCROLLBACK, config::MAX_SCROLLBACK);
+        self.config.scrollback = lines;
+        self.config.save();
+        for tab in &mut self.tabs {
+            for pane in tab.panes.values_mut() {
+                pane.session.set_scrollback_limit(lines);
             }
         }
         cx.notify();
@@ -3325,6 +3344,97 @@ impl Workspace {
                     );
                 }
 
+                let scrollback_row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id("sh-scrollback-less")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded(px(6.0))
+                            .bg(theme.background)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(muted)
+                            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                            .on_click(cx.listener(
+                                |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    let step = workspace.config.scrollback / 4;
+                                    workspace
+                                        .set_scrollback(workspace.config.scrollback - step, cx);
+                                },
+                            ))
+                            .child("−"),
+                    )
+                    .child(
+                        div()
+                            .w(px(64.0))
+                            .text_center()
+                            .text_size(px(11.5))
+                            .text_color(theme.foreground)
+                            .child(format!("{} 行", self.config.scrollback)),
+                    )
+                    .child(
+                        div()
+                            .id("sh-scrollback-more")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded(px(6.0))
+                            .bg(theme.background)
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(muted)
+                            .hover(move |this| this.bg(wash).text_color(theme.foreground))
+                            .on_click(cx.listener(
+                                |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                    let step = workspace.config.scrollback / 4;
+                                    workspace
+                                        .set_scrollback(workspace.config.scrollback + step, cx);
+                                },
+                            ))
+                            .child("+"),
+                    );
+
+                let mut cursor_row = track();
+                for option in [
+                    None,
+                    Some(config::Cursor::Bar),
+                    Some(config::Cursor::Block),
+                    Some(config::Cursor::Underline),
+                ] {
+                    let label = match option {
+                        None => "跟随程序",
+                        Some(config::Cursor::Bar) => "竖线",
+                        Some(config::Cursor::Block) => "块",
+                        Some(config::Cursor::Underline) => "下划线",
+                    };
+                    let id = match option {
+                        None => "sh-cursor-auto".to_owned(),
+                        Some(cursor) => format!("sh-cursor-{}", cursor.as_str()),
+                    };
+                    cursor_row = cursor_row.child(
+                        seg(
+                            ElementId::Name(id.into()),
+                            label,
+                            self.config.cursor == option,
+                        )
+                        .on_click(cx.listener(
+                            move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
+                                workspace.config.cursor = option;
+                                workspace.config.save();
+                                cx.notify();
+                            },
+                        )),
+                    );
+                }
+
                 let font = div()
                     .flex()
                     .flex_row()
@@ -3413,6 +3523,18 @@ impl Workspace {
                         "只影响网格，不影响界面",
                         theme,
                         font.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "回滚行数",
+                        "超出后丢弃最旧的输出，搜索也只看这么多",
+                        theme,
+                        scrollback_row.into_any_element(),
+                    ))
+                    .child(setting_row(
+                        "光标",
+                        "跟随程序时，shell 会自己在提示符处换成竖线",
+                        theme,
+                        cursor_row.into_any_element(),
                     ))
                     .child(setting_row(
                         "当前 shell",
@@ -6832,6 +6954,12 @@ fn status_glyph(status: PaneStatus, theme: &gpui_kit::component::Theme) -> impl 
 /// that prints the program's path next to the program's name has said where it
 /// is zero times.
 fn pane_cwd(pane: &Pane) -> Option<String> {
+    // The announced directory is the real one; the title is only a guess that
+    // happens to work for shells which title themselves with a path.
+    if let Some(pwd) = pane.session.pwd() {
+        return Some(shorten_path(&pwd));
+    }
+
     let title = pane.session.frame().title.trim();
     if title.is_empty() || title.to_ascii_lowercase().ends_with(".exe") {
         return None;

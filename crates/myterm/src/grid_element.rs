@@ -34,6 +34,10 @@ pub struct GridStyle {
     /// Whether the caret is in its visible blink phase. Ignored when the
     /// terminal asked for a steady cursor.
     pub cursor_visible: bool,
+    /// The shape the user picked, overriding whatever the program asked for.
+    /// `None` leaves the program in charge, which is what a shell drawing a
+    /// bar over a block at its prompt expects.
+    pub cursor_shape: Option<vt::CursorStyle>,
 }
 
 impl Default for GridStyle {
@@ -50,6 +54,7 @@ impl Default for GridStyle {
             muted: Hsla::default(),
             selection_alpha: 0.25,
             cursor_visible: true,
+            cursor_shape: None,
         }
     }
 }
@@ -483,7 +488,7 @@ fn paint_cursor(
         .get(frame.cursor.y as usize)
         .and_then(|row| row.cells.get(frame.cursor.x as usize));
 
-    match frame.cursor.style {
+    match style.cursor_shape.unwrap_or(frame.cursor.style) {
         CursorStyle::Bar => {
             // Centred on the cell edge rather than flush against it, so the bar
             // reads as a caret instead of a divider between two characters.

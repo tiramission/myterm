@@ -647,6 +647,12 @@ unsafe extern "C" {
 /// Search options.
 pub const GHOSTTY_SEARCH_OPT_SELECT_SCROLL: i32 = 4;
 
+/// Terminal data fields.
+pub const GHOSTTY_TERMINAL_DATA_PWD: i32 = 13;
+
+/// Terminal options.
+pub const GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES: i32 = 29;
+
 /// Search data.
 pub const GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES: i32 = 7;
 

@@ -49,6 +49,29 @@ impl Rgb {
     }
 }
 
+/// Turns whatever a shell put in its pwd sequence into a path.
+///
+/// OSC 7 sends `file://host/path`, ConEmu and iTerm2 send a bare path. On
+/// Windows the URI form is `file:///C:/...`, so the scheme and the empty host
+/// come off and the leading slash goes with them.
+fn decode_pwd(text: &str) -> String {
+    let Some(rest) = text.strip_prefix("file://") else {
+        return text.to_owned();
+    };
+    // `file:///C:/x` leaves `/C:/x`; `file://host/x` leaves `host/x`.
+    let after_host = match rest.find('/') {
+        Some(index) => &rest[index..],
+        None => rest,
+    };
+    let trimmed = after_host.trim_start_matches('/');
+    // A drive letter means Windows, and the separator there is a backslash.
+    if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        trimmed.replace('/', "\\")
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
 /// A failure reported by the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -663,6 +686,46 @@ impl Terminal {
 
     pub fn raw(&self) -> sys::GhosttyTerminal {
         self.raw
+    }
+
+    /// Caps how many lines are kept above the screen.
+    ///
+    /// The library prunes in pages, so the real figure is a little above this
+    /// one; it is a ceiling, not a promise.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        let lines = lines as std::os::raw::c_ulong;
+        let _ = unsafe {
+            sys::ghostty_terminal_set(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                &lines as *const std::os::raw::c_ulong as *const std::ffi::c_void,
+            )
+        };
+    }
+
+    /// The working directory the shell last announced, if it announces one.
+    ///
+    /// OSC 7 (a `file://` URI), OSC 9 (ConEmu) and OSC 1337 (iTerm2) all land
+    /// here. The library stores the bytes verbatim, so a URI still needs its
+    /// scheme taken off before it can be used as a path.
+    pub fn pwd(&self) -> Option<String> {
+        let mut string = sys::GhosttyString {
+            ptr: std::ptr::null(),
+            len: 0,
+        };
+        let code = unsafe {
+            sys::ghostty_terminal_get(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_DATA_PWD,
+                &mut string as *mut sys::GhosttyString as *mut std::ffi::c_void,
+            )
+        };
+        if code != sys::GHOSTTY_SUCCESS || string.len == 0 || string.ptr.is_null() {
+            return None;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(string.ptr, string.len) };
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        Some(decode_pwd(&text))
     }
 
     pub fn title(&self) -> &str {

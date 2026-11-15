@@ -336,3 +336,24 @@ fn an_empty_needle_finds_nothing() {
     assert_eq!(search.counts().0, 0);
     assert!(search.viewport_matches().is_empty());
 }
+
+#[test]
+fn the_shells_directory_is_read_from_osc7() {
+    let mut term = Terminal::new(20, 4, None).expect("terminal");
+    // OSC 7 is the standard way a shell says where it is; the library stores
+    // the raw URI, so the wrapper is what turns it back into a path.
+    term.feed(b"\x1b]7;file:///C:/Users/example/project\x07");
+
+    assert_eq!(
+        term.pwd().as_deref(),
+        Some(r"C:\Users\example\project"),
+        "the file URI should decode to a Windows path"
+    );
+}
+
+#[test]
+fn a_terminal_without_osc7_has_no_directory() {
+    let mut term = Terminal::new(20, 4, None).expect("terminal");
+    term.feed(b"no pwd here\r\n");
+    assert_eq!(term.pwd(), None);
+}

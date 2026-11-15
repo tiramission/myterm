@@ -379,6 +379,16 @@ impl Session {
         images
     }
 
+    /// Caps how much history the terminal keeps.
+    pub fn set_scrollback_limit(&mut self, lines: usize) {
+        self.term.set_scrollback_limit(lines);
+    }
+
+    /// The directory the shell announced, if it announces one.
+    pub fn pwd(&self) -> Option<String> {
+        self.term.pwd()
+    }
+
     /// The current frame.
     pub fn frame(&self) -> &Frame {
         &self.frame

@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 /// The preferences the app actually reads.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Config {
     /// The theme to use, when it is not the one the desktop is using. `None`
     /// means "follow the system", which is the default.
@@ -22,6 +22,25 @@ pub struct Config {
     pub accent: Accent,
     /// Which shell a new pane starts.
     pub shell: Shell,
+    /// The caret's shape. `None` leaves it to the program, which is what a
+    /// shell that switches to a bar at its prompt expects.
+    pub cursor: Option<Cursor>,
+    /// How many lines to keep above the screen.
+    pub scrollback: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            light: None,
+            font_size: None,
+            density: Density::Standard,
+            accent: Accent::Lime,
+            shell: Shell::Auto,
+            cursor: None,
+            scrollback: DEFAULT_SCROLLBACK,
+        }
+    }
 }
 
 /// Row heights for the workspace list.
@@ -98,6 +117,33 @@ impl Accent {
             Self::Amber => "amber",
             Self::Sky => "sky",
             Self::Violet => "violet",
+        }
+    }
+}
+
+/// The caret shapes the settings offer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cursor {
+    Bar,
+    Block,
+    Underline,
+}
+
+impl Cursor {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "bar" => Some(Self::Bar),
+            "block" => Some(Self::Block),
+            "underline" => Some(Self::Underline),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bar => "bar",
+            Self::Block => "block",
+            Self::Underline => "underline",
         }
     }
 }
@@ -222,6 +268,24 @@ impl Config {
                         config.shell = shell;
                     }
                 }
+                "scrollback" => {
+                    if let Ok(lines) = value.parse::<usize>()
+                        && (MIN_SCROLLBACK..=MAX_SCROLLBACK).contains(&lines)
+                    {
+                        config.scrollback = lines;
+                    }
+                }
+                "cursor" => match value {
+                    // An explicit "auto" is the same as no preference, and it
+                    // has to be writable: the settings row that turns the
+                    // override off needs something to save.
+                    "auto" => config.cursor = None,
+                    other => {
+                        if let Some(cursor) = Cursor::parse(other) {
+                            config.cursor = Some(cursor);
+                        }
+                    }
+                },
                 _ => {}
             }
         }
@@ -242,25 +306,30 @@ impl Config {
             "font_size = {}\n",
             self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
         ));
+        text.push_str(&format!("density = {}\n", self.density.as_str()));
+        text.push_str(&format!("accent = {}\n", self.accent.as_str()));
+        text.push_str(&format!("shell = {}\n", self.shell.as_str()));
         text.push_str(&format!(
-            "density = {}
+            "scrollback = {}
 ",
-            self.density.as_str()
+            self.scrollback
         ));
         text.push_str(&format!(
-            "accent = {}
-",
-            self.accent.as_str()
-        ));
-        text.push_str(&format!(
-            "shell = {}
-",
-            self.shell.as_str()
+            "cursor = {}\n",
+            self.cursor.map_or("auto", |cursor| cursor.as_str())
         ));
 
         text
     }
 }
+
+/// The fewest scrollback lines the settings offer. Below this the terminal is
+/// a screen with a memory of about one command.
+pub const MIN_SCROLLBACK: usize = 500;
+/// The most.
+pub const MAX_SCROLLBACK: usize = 200_000;
+/// What the app starts at.
+pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
 /// The smallest size the terminal will draw at.
 pub const MIN_FONT_SIZE: f32 = 9.0;
@@ -281,6 +350,8 @@ mod tests {
             density: Density::Comfy,
             accent: Accent::Sky,
             shell: Shell::Cmd,
+            cursor: Some(Cursor::Underline),
+            scrollback: 20_000,
         };
         let read = Config::parse(&config.encode());
 
@@ -289,6 +360,8 @@ mod tests {
         assert_eq!(read.density, Density::Comfy);
         assert_eq!(read.accent, Accent::Sky);
         assert_eq!(read.shell, Shell::Cmd);
+        assert_eq!(read.cursor, Some(Cursor::Underline));
+        assert_eq!(read.scrollback, 20_000);
     }
 
     #[test]
@@ -315,6 +388,15 @@ shell = bash
         assert_eq!(read.density, Density::Standard);
         assert_eq!(read.accent, Accent::Lime);
         assert_eq!(read.shell, Shell::Auto);
+        assert_eq!(read.cursor, None);
+    }
+
+    #[test]
+    fn cursor_auto_clears_the_override() {
+        let read = Config::parse("cursor = auto\n");
+        assert_eq!(read.cursor, None);
+        let read = Config::parse("cursor = bar\n");
+        assert_eq!(read.cursor, Some(Cursor::Bar));
     }
 
     #[test]
