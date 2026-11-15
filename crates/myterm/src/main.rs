@@ -1,5 +1,5 @@
-//! The application shell: a single window with a tab strip, one or more panes,
-//! and the key handling that drives them.
+//! The application shell: a workspace column, one or more panes, and the key
+//! handling that drives them.
 
 // Without this the executable links as a console program, and Windows hands it a
 // console window before the first frame is drawn — a black box behind the app
@@ -60,12 +60,12 @@ const ZOOM_OUT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
 const WINDOW_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
 const WINDOW_RESTORE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><rect x="4" y="8" width="12" height="12" rx="1.5"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h9A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H16"/></svg>"#;
 
-/// The plus that opens a tab. It lives in the sidebar — beside the column
-/// heading, in the rail, and in the empty list — because that is where the tab
+/// The plus that opens a workspace. It lives in the column's foot — and in the
+/// rail, and in the empty list — because that is where the workspace
 /// it creates will appear.
 const PLUS_SMALL: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"#;
 
-/// The close cross on a tab row in the sidebar. Smaller and lighter than the
+/// The close cross on a row in the workspace column. Smaller and lighter than the
 /// window caption's, because it sits inside an 18-pixel circle rather than a
 /// full caption button.
 const TAB_CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.5" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"#;
@@ -2768,7 +2768,7 @@ impl Workspace {
             y
         };
 
-        let close = menu_row("menu-close", "关闭标签", closable, &theme).on_click(cx.listener(
+        let close = menu_row("menu-close", "关闭工作区", closable, &theme).on_click(cx.listener(
             move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                 workspace.menu = None;
                 workspace.close_tab(tab, cx);
@@ -2776,7 +2776,7 @@ impl Workspace {
         ));
         let close_others = menu_row(
             "menu-close-others",
-            "关闭其他标签",
+            "关闭其他工作区",
             self.tabs.len() > 1,
             &theme,
         )
@@ -2786,7 +2786,7 @@ impl Workspace {
                 workspace.close_others(tab, cx);
             }),
         );
-        let copy = menu_row("menu-copy", "复制标签标题", true, &theme).on_click(cx.listener(
+        let copy = menu_row("menu-copy", "复制工作区标题", true, &theme).on_click(cx.listener(
             move |workspace: &mut Workspace, _: &ClickEvent, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(title.clone()));
                 workspace.menu = None;

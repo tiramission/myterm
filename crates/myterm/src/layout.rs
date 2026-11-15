@@ -1,6 +1,6 @@
 //! The pane layout tree.
 //!
-//! A tab holds a tree of panes rather than a list, because splits nest: a pane
+//! A workspace holds a tree of panes rather than a list, because splits nest: a pane
 //! can be split again along either axis, and each split remembers its ratio.
 //! Keeping the tree separate from the views makes the geometry testable and lets
 //! the renderer stay a pure function of the layout plus the available rect.
@@ -14,7 +14,7 @@ pub enum Axis {
     Vertical,
 }
 
-/// A node in a tab's layout.
+/// A node in a workspace's layout.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Layout {
     /// A single terminal, identified by its stable id.
@@ -64,7 +64,7 @@ impl Layout {
 
     /// Removes `id`, promoting its sibling into its place.
     ///
-    /// Returns false when the leaf is not present or is the only pane left; a tab
+    /// Returns false when the leaf is not present or is the only pane left; a workspace
     /// must always keep one.
     pub fn remove(&mut self, id: u64) -> bool {
         let Layout::Split { first, second, .. } = self else {
