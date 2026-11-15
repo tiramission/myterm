@@ -2636,15 +2636,20 @@ impl Workspace {
                     // One hairline, always. The card and the chrome are close
                     // in tone on purpose, and tone alone cannot carry the edge
                     // at 1.2:1 — the line is what makes the gap read as a gap.
-                    // The focused card swaps its hairline for the accent instead
-                    // of growing a second ring, so focus never moves a pixel.
+                    //
+                    // Focus is a second step of the same neutral, not the
+                    // accent: the accent means "this is current" in the column
+                    // and in the bar, and a card outline in the same colour made
+                    // three places claim it at once. The pane that is not
+                    // holding the keyboard steps back by a sixteenth instead.
                     .bg(style.background)
                     .border_1()
                     .border_color(if multi && focused {
-                        theme.ring
+                        palette::Palette::current(cx).stroke_strong
                     } else {
                         theme.border
                     })
+                    .when(multi && !focused, |this| this.opacity(0.84))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {

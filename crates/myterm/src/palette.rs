@@ -25,6 +25,9 @@ struct Tokens {
     surface: u32,
     /// Every hairline.
     stroke: u32,
+    /// The same line, one step brighter. A card that holds the keyboard wears
+    /// this instead of the accent: focus is a hierarchy, not a highlight.
+    stroke_strong: u32,
     text: u32,
     text_2: u32,
     text_3: u32,
@@ -42,6 +45,7 @@ const DARK: Tokens = Tokens {
     bg_soft: 0x1a1d18,
     surface: 0x22261e,
     stroke: 0x33382d,
+    stroke_strong: 0x39423b,
     text: 0xf2f5ec,
     text_2: 0xa6ada0,
     text_3: 0x8a9281,
@@ -61,6 +65,7 @@ const LIGHT: Tokens = Tokens {
     bg_soft: 0xe7eadf,
     surface: 0xffffff,
     stroke: 0xd2d6c6,
+    stroke_strong: 0xc9c7bd,
     text: 0x14170f,
     text_2: 0x555b4d,
     text_3: 0x656b5c,
@@ -107,6 +112,7 @@ pub struct Palette {
     pub bg_soft: Hsla,
     pub surface: Hsla,
     pub stroke: Hsla,
+    pub stroke_strong: Hsla,
     pub text: Hsla,
     pub text_2: Hsla,
     pub text_3: Hsla,
@@ -136,6 +142,7 @@ impl Palette {
             bg_soft: hex(t.bg_soft),
             surface: hex(t.surface),
             stroke: hex(t.stroke),
+            stroke_strong: hex(t.stroke_strong),
             text: hex(t.text),
             text_2: hex(t.text_2),
             text_3: hex(t.text_3),
