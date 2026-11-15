@@ -714,6 +714,9 @@ pub struct Workspace {
     /// The preferences this window is running with, kept so the settings sheet
     /// can write them back without re-reading the file.
     config: config::Config,
+    /// The last title handed to the platform, so the window is only renamed
+    /// when the answer changes rather than every frame.
+    window_title: String,
     /// Whether the settings sheet is open.
     settings: bool,
     /// Which page of it is showing.
@@ -774,6 +777,7 @@ impl Workspace {
             about: false,
             closing: false,
             config,
+            window_title: String::new(),
             settings: false,
             settings_tab: SettingsTab::default(),
             resize_drag: None,
@@ -1182,6 +1186,10 @@ impl Workspace {
                     self.step_find(if mods.shift { -1 } else { 1 }, cx);
                     cx.stop_propagation();
                 }
+                "f3" => {
+                    self.step_find(if mods.shift { -1 } else { 1 }, cx);
+                    cx.stop_propagation();
+                }
                 _ => {}
             }
             return;
@@ -1239,13 +1247,18 @@ impl Workspace {
             return;
         }
 
-        // Settings is a non-modal drawer: it owns Escape but nothing else, so a
-        // shell behind it keeps accepting keys while a size or theme is being
-        // tried on. The dialog-like alternative would mean closing the sheet to
-        // keep working, which is exactly backwards.
-        if self.settings && keystroke.key == "escape" {
+        // Escape is the universal "undo the last mode", and a zoom is a mode:
+        // it covers the split, so the key that reveals what it covers is the one
+        // the status bar already prints.
+        if keystroke.key == "escape"
+            && let Some(id) = self.zoomed
+        {
+            self.toggle_zoom(id, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if keystroke.key == "escape" && self.settings {
             self.settings = false;
-            window.focus(&self.focus, cx);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -1275,6 +1288,11 @@ impl Workspace {
                 }
                 "," if !mods.shift => {
                     self.toggle_settings(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                "k" if !mods.shift => {
+                    self.open_palette(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1352,10 +1370,10 @@ impl Workspace {
                     return;
                 }
                 "q" => {
-                    // Q belongs to Quit on every desktop. Closing a tab is what
-                    // `Ctrl+Shift+W` already does when it is the last pane, so
-                    // the two no longer need separate keys.
-                    self.close_window(window, cx);
+                    // Quit is `Alt+F4` and the app menu. This pair is the
+                    // window's two units of work — a pane and the workspace
+                    // around it — and both stay under the same modifier.
+                    self.close_tab(self.active_tab, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1376,11 +1394,6 @@ impl Workspace {
                 }
                 "f" => {
                     self.open_find(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "p" => {
-                    self.open_palette(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -1871,6 +1884,27 @@ impl Render for Workspace {
         self.cached_style = style;
 
         let theme = gpui_kit::component::Theme::global(cx).clone();
+
+        // Taskbar, Alt+Tab and the window's own thumbnail all read this one
+        // string, and none of them can see the bar. The bar's name is the
+        // readable copy; this is the one the operating system has.
+        let title = match self.active_tab() {
+            Some(tab) => {
+                let pane = tab
+                    .panes
+                    .get(&tab.active)
+                    .or_else(|| tab.panes.values().next());
+                match pane.and_then(pane_cwd) {
+                    Some(cwd) => format!("{} · {cwd}", tab.title),
+                    None => tab.title.clone(),
+                }
+            }
+            None => "myterm".to_owned(),
+        };
+        if title != self.window_title {
+            window.set_window_title(&title);
+            self.window_title = title;
+        }
 
         // The window is two columns, not two rows: the workspace column runs the
         // full height, so its own controls sit beside the top bar rather than
