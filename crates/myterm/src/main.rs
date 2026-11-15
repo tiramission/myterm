@@ -783,12 +783,15 @@ pub struct Workspace {
     /// The preferences this window is running with, kept so the settings sheet
     /// can write them back without re-reading the file.
     config: config::Config,
-    /// The branch the focused shell's directory is on, when it is in a
-    /// repository. Refreshed on the ticker rather than per frame: finding it
-    /// means walking up the tree and reading a file.
-    branch: Option<String>,
-    /// The directory the branch above was read from, and when.
-    branch_source: Option<(String, Instant)>,
+    /// The branch each pane's directory is on, keyed by the directory.
+    ///
+    /// A map rather than one value because every pane header shows its own
+    /// branch, and two panes in the same checkout must not cost two walks.
+    /// Refreshed on the ticker rather than per frame: finding a branch means
+    /// walking up the tree and reading a file.
+    branches: BTreeMap<String, Option<String>>,
+    /// When the map above was last rebuilt.
+    branches_at: Option<Instant>,
     /// The last title handed to the platform, so the window is only renamed
     /// when the answer changes rather than every frame.
     window_title: String,
@@ -854,8 +857,8 @@ impl Workspace {
             closing: None,
             closed: None,
             config,
-            branch: None,
-            branch_source: None,
+            branches: BTreeMap::new(),
+            branches_at: None,
             window_title: String::new(),
             settings: false,
             settings_tab: SettingsTab::default(),
@@ -1054,17 +1057,37 @@ impl Workspace {
             return true;
         }
 
-        // The branch is a file read and a walk up the tree, so it is refreshed
-        // on a slow beat rather than on every tick.
-        let cwd = self.active_pane().and_then(pane_cwd);
-        let stale = self.branch_source.as_ref().is_none_or(|(source, at)| {
-            Some(source.as_str()) != cwd.as_deref() || at.elapsed() > Duration::from_secs(2)
-        });
+        // Each branch is a file read and a walk up the tree, so the map is
+        // rebuilt on a slow beat rather than on every tick, and only for the
+        // directories actually on screen.
+        let directories: BTreeMap<String, ()> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(pane_cwd)
+            .map(|cwd| (cwd, ()))
+            .collect();
+        let stale = self
+            .branches_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(2))
+            || directories
+                .keys()
+                .any(|cwd| !self.branches.contains_key(cwd))
+            || self
+                .branches
+                .keys()
+                .any(|cwd| !directories.contains_key(cwd));
         if stale {
-            let branch = cwd.as_deref().and_then(git_branch);
-            let changed = branch != self.branch;
-            self.branch = branch;
-            self.branch_source = cwd.map(|cwd| (cwd, Instant::now()));
+            let fresh: BTreeMap<String, Option<String>> = directories
+                .into_keys()
+                .map(|cwd| {
+                    let branch = git_branch(&cwd);
+                    (cwd, branch)
+                })
+                .collect();
+            let changed = fresh != self.branches;
+            self.branches = fresh;
+            self.branches_at = Some(Instant::now());
             if changed {
                 return true;
             }
@@ -2599,7 +2622,7 @@ impl Workspace {
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
                 let name = pane_label(pane);
-                let meta = pane_meta(pane);
+                let meta = pane_meta(pane, &self.branches);
                 // Only the pane the bar is over shows its matches. Tinting every
                 // pane would answer a question the bar did not ask.
                 let find = if focused {
@@ -5572,7 +5595,11 @@ impl Workspace {
         // rather than more text because it answers a different question from the
         // path beside it, and the accent is what says "this one is a place in a
         // repository" without a second label.
-        if let Some(branch) = &self.branch {
+        if let Some(branch) = self
+            .active_pane()
+            .and_then(pane_cwd)
+            .and_then(|cwd| self.branches.get(&cwd).cloned().flatten())
+        {
             crumbs = crumbs.child(
                 div()
                     .flex()
@@ -7330,9 +7357,16 @@ fn shorten_path(path: &str) -> String {
 
 /// The one line of context a pane header carries: where the shell is, or the
 /// title it set for itself when that title is not just its own path.
-fn pane_meta(pane: &Pane) -> Option<String> {
-    pane_cwd(pane).or_else(|| {
-        pane_detail(pane).filter(|detail| !detail.to_ascii_lowercase().ends_with(".exe"))
+fn pane_meta(pane: &Pane, branches: &BTreeMap<String, Option<String>>) -> Option<String> {
+    let Some(cwd) = pane_cwd(pane) else {
+        return pane_detail(pane).filter(|detail| !detail.to_ascii_lowercase().ends_with(".exe"));
+    };
+    Some(match branches.get(&cwd).cloned().flatten() {
+        // The branch rides with the directory, the way the prototype writes it:
+        // `~/myterm · main`. It is the one line that tells two shells in the
+        // same checkout apart from two shells in different ones.
+        Some(branch) => format!("{cwd} · {branch}"),
+        None => cwd,
     })
 }
 
