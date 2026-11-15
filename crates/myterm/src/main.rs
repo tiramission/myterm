@@ -5361,10 +5361,14 @@ impl Workspace {
     /// shell.
     ///
     /// At this width the column is navigation, not content. A workspace gets a
-    /// block — its own tint when it is the one on screen, and a heading that
-    /// numbers its shells once there is more than one — so the grouping that
-    /// the list shows with indent and air is carried here by a surface and a
-    /// letter.
+    /// block — its own tint when it is the one on screen, and a heading carrying
+    /// its first letter — so the grouping that the list shows with indent and
+    /// air is carried here by a surface and a letter.
+    ///
+    /// The heading is drawn even for a one-shell workspace. Without it the block
+    /// shows the shell's letter instead of the workspace's, and `日志` and
+    /// `部署` both read `P` because both run `pwsh` — the column would be
+    /// naming the program and never the place.
     ///
     /// The chip carries a character because a column of identical dots says how
     /// many places there are but not which is which. Names collide often — both
@@ -5406,10 +5410,7 @@ impl Workspace {
                 // it is only there to group.
                 .when(current_tab, |this| this.bg(theme.muted));
 
-            // A heading is only worth its 26 pixels when it has something to
-            // head: with one shell, the chip already says everything the
-            // heading would, in the same letter.
-            if grouped {
+            {
                 block = block.child(
                     div()
                         .id(ElementId::Name(format!("rail-tab-{tab_index}").into()))
@@ -5446,6 +5447,9 @@ impl Workspace {
                 let id = *id;
                 let selected = current == Some((tab_index, id));
                 let status = pane_status(pane);
+                // A split numbers its chips, because the number is what the
+                // pane headers wear. A lone shell keeps its own letter: the
+                // heading above already carries the workspace's.
                 let glyph = if grouped {
                     (index + 1).to_string()
                 } else {
@@ -5964,23 +5968,13 @@ impl Workspace {
     /// above or the list beside it. What is left is the state that exists only
     /// while it is true.
     fn status_hint(&self) -> Option<String> {
-        if self.zoomed.is_some() {
-            return Some("已缩放 · Esc 退出".to_owned());
-        }
-        // A workspace that finished something while you were elsewhere. The
-        // row is the window's answer to "did anything happen"; the dot in the
-        // column says which one.
-        let waiting = self.tabs.iter().filter(|tab| tab.unseen).count();
-        if waiting > 0 {
-            return Some(format!("{waiting} 个工作区有新输出"));
-        }
-        // An update that is ready is the other thing worth a row: it is a
-        // decision waiting to be made, and the badge in the bar is easy to miss
-        // while the terminal has the eye.
-        if let Some((label, true)) = self.update_badge() {
-            return Some(label);
-        }
-        None
+        // One case, as the prototype has it. Background output and a pending
+        // update are both already reported where they belong — a dot on the
+        // workspace's row, a badge in the bar — and repeating them here made a
+        // row that was on most of the time, which is the opposite of the point.
+        self.zoomed
+            .is_some()
+            .then(|| "已缩放 · Esc 退出".to_owned())
     }
 
     /// The status bar: 26 px that exist only while `status_hint` has a line.
@@ -6004,44 +5998,6 @@ impl Workspace {
             .text_color(theme.muted_foreground)
             .child(hint.to_owned())
             .child(div().flex_1())
-            .when(self.tabs.iter().any(|tab| tab.unseen), |this| {
-                this.child(
-                    div()
-                        .id("status-unseen")
-                        .px(px(6.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .text_color(theme.ring)
-                        .hover(move |this| this.bg(theme.ring.opacity(0.13)))
-                        .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                            // The first workspace that finished something is
-                            // the one you most likely want; the rest follow as
-                            // you work through them.
-                            if let Some(index) = workspace.tabs.iter().position(|tab| tab.unseen) {
-                                workspace.select_tab(index, cx);
-                            }
-                        }))
-                        .child("查看"),
-                )
-            })
-            .when(
-                self.update_badge().is_some_and(|(_, ready)| ready),
-                |this| {
-                    this.child(
-                        div()
-                            .id("status-update")
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .text_color(theme.ring)
-                            .hover(move |this| this.bg(theme.ring.opacity(0.13)))
-                            .on_click(cx.listener(|workspace, _: &ClickEvent, _, cx| {
-                                workspace.install_update(cx);
-                            }))
-                            .child("查看"),
-                    )
-                },
-            )
             .when(self.zoomed.is_some(), |this| {
                 this.child(
                     div()
