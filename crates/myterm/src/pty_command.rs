@@ -4,6 +4,22 @@ use pty::Command;
 
 use crate::config::Shell;
 
+#[derive(Clone, Debug)]
+pub struct WslInstance {
+    name: String,
+    is_default: bool,
+}
+
+impl WslInstance {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.is_default
+    }
+}
+
 /// The shell the user asked for, or the best one on this machine.
 ///
 /// A chosen shell that is not installed falls back to the default rather than
@@ -28,6 +44,102 @@ pub fn profile(shell: Shell) -> Command {
     }
 }
 
+/// Starts one installed WSL distribution. A stale saved name falls back to the
+/// default WSL instance, just as an unavailable shell falls back to Auto.
+pub fn profile_for_distribution(shell: Shell, distribution: Option<&str>) -> Command {
+    if shell != Shell::Wsl {
+        return profile(shell);
+    }
+    let Some(distribution) = distribution else {
+        return profile(shell);
+    };
+    if !wsl_instances()
+        .iter()
+        .any(|instance| instance.name() == distribution)
+    {
+        return profile(shell);
+    }
+    let Some(program) = find_on_path("wsl.exe") else {
+        return default_profile();
+    };
+    Command {
+        program,
+        args: vec!["--distribution".to_owned(), distribution.to_owned()],
+    }
+}
+
+/// Installed WSL distributions, including the one WSL starts by default.
+/// The process result is cached for this app run because rendering can ask for
+/// the shell label every frame.
+pub fn wsl_instances() -> &'static [WslInstance] {
+    static INSTANCES: std::sync::OnceLock<Vec<WslInstance>> = std::sync::OnceLock::new();
+    INSTANCES.get_or_init(read_wsl_instances)
+}
+
+/// The distribution a WSL command will enter, if it can be identified.
+pub fn wsl_distribution_name(command: &Command) -> Option<String> {
+    let program = std::path::Path::new(&command.program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&command.program);
+    if !program.eq_ignore_ascii_case("wsl.exe") && !program.eq_ignore_ascii_case("wsl") {
+        return None;
+    }
+    command
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--distribution" || pair[0] == "-d")
+        .map(|pair| pair[1].clone())
+        .or_else(|| {
+            wsl_instances()
+                .iter()
+                .find(|instance| instance.is_default())
+                .map(|instance| instance.name().to_owned())
+        })
+}
+
+fn read_wsl_instances() -> Vec<WslInstance> {
+    let Ok(output) = std::process::Command::new("wsl.exe")
+        .args(["--list", "--verbose"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let text = if output.stdout.get(1) == Some(&0) {
+        let units = output
+            .stdout
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_start_matches('\u{feff}');
+            let (is_default, line) = if let Some(line) = line.strip_prefix('*') {
+                (true, line.trim_start())
+            } else {
+                (false, line)
+            };
+            let name = line.split_whitespace().next()?;
+            if name.eq_ignore_ascii_case("NAME") || name.is_empty() {
+                return None;
+            }
+            Some(WslInstance {
+                name: name.to_owned(),
+                is_default,
+            })
+        })
+        .collect()
+}
+
 /// Picks the best shell installed on this machine.
 ///
 /// PowerShell 7 first, then Windows PowerShell, then `cmd`. Windows always has
@@ -49,6 +161,36 @@ pub fn default_profile() -> Command {
     Command {
         program: "cmd.exe".to_owned(),
         args: Vec::new(),
+    }
+}
+
+/// Whether an explicitly selected shell can be resolved from `PATH`.
+pub fn is_available(shell: Shell) -> bool {
+    let program = match shell {
+        Shell::Auto => return true,
+        Shell::Pwsh => "pwsh.exe",
+        Shell::Windows => "powershell.exe",
+        Shell::Cmd => "cmd.exe",
+        Shell::Wsl => "wsl.exe",
+    };
+    find_on_path(program).is_some()
+}
+
+/// A short, stable label for the executable a pane actually starts.
+pub fn display_name(command: &Command) -> String {
+    let file_name = std::path::Path::new(&command.program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&command.program);
+    let normalized = file_name.to_ascii_lowercase();
+    let program = normalized.strip_suffix(".exe").unwrap_or(&normalized);
+    match program {
+        "pwsh" => "PowerShell 7".to_owned(),
+        "powershell" => "Windows PowerShell".to_owned(),
+        "cmd" => "命令提示符".to_owned(),
+        "wsl" => wsl_distribution_name(command)
+            .map_or_else(|| "WSL".to_owned(), |name| format!("WSL · {name}")),
+        _ => program.to_owned(),
     }
 }
 

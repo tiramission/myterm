@@ -1,8 +1,8 @@
 //! Preferences that outlive the window.
 //!
 //! A flat `key = value` file rather than a serialization crate: the settings are
-//! four scalars, and a dependency that writes a tree to store four scalars buys
-//! nothing but a second thing that can fail to parse. Every unknown key is
+//! a small set of values, and a dependency that writes a tree buys nothing but a
+//! second thing that can fail to parse. Every unknown key is
 //! ignored and every malformed line is dropped, so a hand-edited file can never
 //! stop the app from starting.
 
@@ -16,12 +16,12 @@ pub struct Config {
     pub light: Option<bool>,
     /// The terminal's font size. `None` means the theme's own default.
     pub font_size: Option<f32>,
-    /// How tall a row in the workspace list is.
-    pub density: Density,
     /// The one colour the app uses to say "here" and "something happened".
     pub accent: Accent,
     /// Which shell a new pane starts.
     pub shell: Shell,
+    /// The WSL distribution a new WSL pane starts, or the system default.
+    pub wsl_distribution: Option<String>,
     /// The caret's shape. `None` leaves it to the program, which is what a
     /// shell that switches to a bar at its prompt expects.
     pub cursor: Option<Cursor>,
@@ -41,56 +41,12 @@ impl Default for Config {
         Self {
             light: None,
             font_size: None,
-            density: Density::Standard,
             accent: Accent::Lime,
             shell: Shell::Auto,
+            wsl_distribution: None,
             cursor: Some(Cursor::Block),
             scrollback: DEFAULT_SCROLLBACK,
             shell_integration: false,
-        }
-    }
-}
-
-/// Row heights for the workspace list.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum Density {
-    /// 34 px, and no second line: the name only.
-    Compact,
-    /// 42 px, name over directory.
-    #[default]
-    Standard,
-    /// 50 px, the same two lines with more air.
-    Comfy,
-}
-
-impl Density {
-    pub fn row_height(self) -> f32 {
-        match self {
-            Self::Compact => 34.0,
-            Self::Standard => 42.0,
-            Self::Comfy => 50.0,
-        }
-    }
-
-    /// Whether a row has the height to say where its shell is.
-    pub fn shows_directory(self) -> bool {
-        !matches!(self, Self::Compact)
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "compact" => Some(Self::Compact),
-            "standard" => Some(Self::Standard),
-            "comfy" => Some(Self::Comfy),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Compact => "compact",
-            Self::Standard => "standard",
-            Self::Comfy => "comfy",
         }
     }
 }
@@ -261,11 +217,6 @@ impl Config {
                     }
                 }
 
-                "density" => {
-                    if let Some(density) = Density::parse(value) {
-                        config.density = density;
-                    }
-                }
                 "accent" => {
                     if let Some(accent) = Accent::parse(value) {
                         config.accent = accent;
@@ -274,6 +225,11 @@ impl Config {
                 "shell" => {
                     if let Some(shell) = Shell::parse(value) {
                         config.shell = shell;
+                    }
+                }
+                "wsl_distribution" => {
+                    if !value.is_empty() {
+                        config.wsl_distribution = Some(value.to_owned());
                     }
                 }
                 "shell_integration" => match value {
@@ -319,9 +275,11 @@ impl Config {
             "font_size = {}\n",
             self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
         ));
-        text.push_str(&format!("density = {}\n", self.density.as_str()));
         text.push_str(&format!("accent = {}\n", self.accent.as_str()));
         text.push_str(&format!("shell = {}\n", self.shell.as_str()));
+        if let Some(distribution) = &self.wsl_distribution {
+            text.push_str(&format!("wsl_distribution = {distribution}\n"));
+        }
         text.push_str(&format!("scrollback = {}\n", self.scrollback));
         text.push_str(&format!(
             "cursor = {}\n",
@@ -361,9 +319,9 @@ mod tests {
         let config = Config {
             light: Some(false),
             font_size: Some(16.0),
-            density: Density::Comfy,
             accent: Accent::Sky,
             shell: Shell::Cmd,
+            wsl_distribution: Some("Ubuntu".to_owned()),
             cursor: Some(Cursor::Underline),
             scrollback: 20_000,
             shell_integration: true,
@@ -372,9 +330,9 @@ mod tests {
 
         assert_eq!(read.light, Some(false));
         assert_eq!(read.font_size, Some(16.0));
-        assert_eq!(read.density, Density::Comfy);
         assert_eq!(read.accent, Accent::Sky);
         assert_eq!(read.shell, Shell::Cmd);
+        assert_eq!(read.wsl_distribution.as_deref(), Some("Ubuntu"));
         assert_eq!(read.cursor, Some(Cursor::Underline));
         assert_eq!(read.scrollback, 20_000);
         assert!(read.shell_integration);
@@ -396,12 +354,10 @@ mod tests {
     #[test]
     fn an_unknown_value_leaves_the_default() {
         let read = Config::parse(
-            "density = huge
-accent = pink
+            "accent = pink
 shell = bash
 ",
         );
-        assert_eq!(read.density, Density::Standard);
         assert_eq!(read.accent, Accent::Lime);
         assert_eq!(read.shell, Shell::Auto);
         // The default is the prototype's block; an unknown value leaves it.
