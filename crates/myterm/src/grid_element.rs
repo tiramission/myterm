@@ -213,11 +213,13 @@ impl Element for TerminalGrid {
         // Registering the grid as the text input target is what lets an IME
         // reach the shell at all. The platform asks the focused handler for
         // caret geometry and delivers the committed text back through it.
-        window.handle_input(
-            &self.focus,
-            ElementInputHandler::new(bounds, self.entity.clone()),
-            cx,
-        );
+        if self.focused {
+            window.handle_input(
+                &self.focus,
+                ElementInputHandler::new(bounds, self.entity.clone()),
+                cx,
+            );
+        }
 
         window.paint_quad(fill(bounds, style.background));
 
@@ -397,12 +399,12 @@ impl Element for TerminalGrid {
 
         // Pass five: the caret.
         let cursor = self.frame.cursor;
-        if self.focused {
+        if self.focused && self.focus.is_focused(window) {
             // A blinking cursor is hidden on alternate phases; a steady one is
             // always drawn.
             let show =
                 cursor.visible && cursor.in_viewport && (!cursor.blinking || style.cursor_visible);
-            if show {
+            if show && (cursor.x as usize) < fit_cols && (cursor.y as usize) < fit_rows {
                 let cell_box = cell_bounds(origin, style, cursor.x as usize, cursor.y as usize);
                 paint_cursor(window, cx, cell_box, style, &self.frame, &font);
             }
@@ -686,7 +688,7 @@ fn resolve(color: vt::Rgb, palette: &[vt::Rgb; 256], default: vt::Rgb) -> Hsla {
     }
 }
 
-fn rgb(color: vt::Rgb) -> Hsla {
+pub(super) fn rgb(color: vt::Rgb) -> Hsla {
     gpui_kit::rgb(u32::from_be_bytes([0, color.r, color.g, color.b])).into()
 }
 

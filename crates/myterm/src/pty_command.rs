@@ -99,10 +99,14 @@ pub fn wsl_distribution_name(command: &Command) -> Option<String> {
 }
 
 fn read_wsl_instances() -> Vec<WslInstance> {
-    let Ok(output) = std::process::Command::new("wsl.exe")
-        .args(["--list", "--verbose"])
-        .output()
-    else {
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["--list", "--verbose"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::install::CREATE_NO_WINDOW);
+    }
+    let Ok(output) = command.output() else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -112,8 +116,11 @@ fn read_wsl_instances() -> Vec<WslInstance> {
     let text = if output.stdout.get(1) == Some(&0) {
         let units = output
             .stdout
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_le_bytes)
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&units)
     } else {

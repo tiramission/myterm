@@ -44,13 +44,28 @@ impl Workspace {
                     .child(icon_data(APP_MARK, 15.0, theme.ring)),
             );
         if !rail {
-            top = top.child(div().flex_1()).child(
-                icon_button("rail-collapse", COLLAPSE_ICON, 24.0, theme, cx).on_click(cx.listener(
-                    |workspace, _: &ClickEvent, _, cx| {
-                        workspace.toggle_rail(cx);
-                    },
-                )),
-            );
+            top = top
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("myterm"),
+                )
+                .child(div().flex_1())
+                .child(
+                    icon_button("sidebar-search", SEARCH_ICON, 26.0, theme, cx).on_click(
+                        cx.listener(|workspace, _: &ClickEvent, window, cx| {
+                            workspace.open_palette(window, cx);
+                        }),
+                    ),
+                )
+                .child(
+                    icon_button("sidebar-new", PLUS_SMALL, 26.0, theme, cx).on_click(cx.listener(
+                        |workspace, _: &ClickEvent, window, cx| {
+                            workspace.new_tab(window, cx);
+                        },
+                    )),
+                );
         }
 
         // Every workspace and pane, with enough state to jump to one.
@@ -63,7 +78,7 @@ impl Workspace {
             .flex_col()
             .gap(px(1.0))
             .px(px(8.0))
-            .pt(px(2.0))
+            .pt(px(12.0))
             .pb(px(8.0))
             // A drag released over the empty part of the column still has to
             // end, or the insertion rule stays on screen until the next click.
@@ -89,7 +104,7 @@ impl Workspace {
             // fill already marks the current place, and a line drawn across the
             // column would be a second edge saying the same thing louder.
             if tab_index > 0 {
-                list = list.child(div().h(px(6.0)));
+                list = list.child(div().h(px(12.0)));
             }
 
             // Where the workspace would land. A two-pixel rule in the accent
@@ -99,11 +114,11 @@ impl Workspace {
                 list = list.child(div().h(px(2.0)).mx(px(8.0)).rounded(px(1.0)).bg(theme.ring));
             }
 
-            let closable = self.tabs.len() > 1;
             let rename = self
                 .rename
                 .as_ref()
                 .filter(|rename| rename.tab_id == tab.id);
+            let folded = self.folded_tabs.contains(&tab.id) && rename.is_none();
 
             list = list.child(sidebar_group_row(
                 tab_index,
@@ -111,14 +126,18 @@ impl Workspace {
                 tab.title.clone(),
                 tab.panes.len(),
                 current_tab,
+                folded,
                 tab.unseen,
                 rename.map(|rename| rename.input.clone()),
                 rename.is_some_and(|rename| rename.invalid),
-                closable,
                 dragging_tab == Some(tab_index),
                 theme,
                 cx,
             ));
+
+            if folded {
+                continue;
+            }
 
             let mut pane_rows = div().flex().flex_col().flex_1().min_w_0().gap(px(2.0));
             for (id, pane) in &tab.panes {
@@ -147,10 +166,7 @@ impl Workspace {
                         .flex_col()
                         .min_w_0()
                         .gap(px(2.0))
-                        .mx(px(1.0))
-                        .p(px(4.0))
-                        .rounded(px(9.0))
-                        .bg(theme.muted.opacity(0.45))
+                        .pl(px(7.0))
                         .child(pane_rows),
                 );
             }
@@ -188,7 +204,7 @@ impl Workspace {
             .pt(px(12.0))
             .when(rail, |this| this.flex_col());
 
-        let mut new_button = div()
+        let new_button = div()
             .id("new-session")
             .flex()
             .items_center()
@@ -203,22 +219,64 @@ impl Workspace {
                 workspace.new_tab(window, cx);
             }))
             .child(icon_data(PLUS_SMALL, 13.0, theme.muted_foreground));
-        new_button = if rail {
-            new_button.flex_shrink_0().justify_center().w(px(30.0))
-        } else {
-            new_button
-                .flex_1()
-                .min_w_0()
-                .px(px(9.0))
-                .child("新建工作区")
-        };
-        foot = foot.child(new_button).child(
+        if rail {
+            foot = foot.child(new_button.flex_shrink_0().justify_center().w(px(30.0)));
+        }
+        foot = foot.child(
             icon_button("side-settings", SETTINGS_ICON, 30.0, theme, cx).on_click(cx.listener(
                 |workspace, _: &ClickEvent, _, cx| {
                     workspace.toggle_settings(cx);
                 },
             )),
         );
+        if !rail {
+            foot = foot
+                .child(
+                    icon_button("side-theme", THEME_ICON, 30.0, theme, cx).on_click(
+                        cx.listener(|workspace, _: &ClickEvent, _, cx| workspace.toggle_theme(cx)),
+                    ),
+                )
+                .child(div().flex_1());
+            let attention: Vec<_> = self
+                .tabs
+                .iter()
+                .enumerate()
+                .flat_map(|(index, tab)| {
+                    tab.panes.iter().filter_map(move |(&id, pane)| {
+                        ((tab.unseen && tab.active == id)
+                            || matches!(pane_status(pane), PaneStatus::Exited))
+                        .then_some((index, id))
+                    })
+                })
+                .collect();
+            if !attention.is_empty() {
+                let next = attention
+                    .iter()
+                    .position(|&pane| Some(pane) == current)
+                    .map_or(0, |i| (i + 1) % attention.len());
+                let (index, id) = attention[next];
+                let tab_id = self.tabs[index].id;
+                foot = foot.child(
+                    div()
+                        .id("side-attention")
+                        .px(px(7.0))
+                        .h(px(28.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .text_size(px(11.0))
+                        .text_color(theme.warning)
+                        .hover(move |this| this.bg(wash))
+                        .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                            workspace.folded_tabs.remove(&tab_id);
+                            workspace.select_tab(index, cx);
+                            workspace.focus_pane(id, cx);
+                        }))
+                        .child(format!("{} 待关注", attention.len())),
+                );
+            }
+        }
 
         div()
             .w(px(width))
@@ -227,7 +285,6 @@ impl Workspace {
             .relative()
             .flex()
             .flex_col()
-            .bg(theme.title_bar)
             .child(top)
             .child(scroll)
             .child(foot)
@@ -428,9 +485,6 @@ impl Workspace {
         let theme = gpui_kit::component::Theme::global(cx).clone();
         let maximized = window.is_maximized();
         let muted = theme.muted_foreground;
-        // Copied before the closures below capture `theme` by move.
-        let field = theme.background;
-        let hover_fill = theme.muted;
 
         let mut bar = div()
             .flex()
@@ -441,8 +495,15 @@ impl Workspace {
             .pl(px(16.0))
             .pr(px(6.0))
             .gap(px(12.0))
-            .bg(theme.title_bar)
             .text_color(theme.foreground);
+
+        if self.sidebar_width == 0.0 {
+            bar = bar.child(
+                icon_button("sidebar-reveal", CHEVRON_RIGHT, 26.0, &theme, cx).on_click(
+                    cx.listener(|workspace, _: &ClickEvent, _, cx| workspace.toggle_rail(cx)),
+                ),
+            );
+        }
 
         // The workspace, not the window: a name the user gave this place, and
         // the one line of context that matters while reading output — where the
@@ -551,90 +612,25 @@ impl Workspace {
                 .window_control_area(WindowControlArea::Drag),
         );
 
-        // A keycap in the bar. Small, quiet, and never the only way to find the
-        // command it names.
-        let kbd_fg = theme.muted_foreground;
-        let kbd = |label: &'static str| {
-            div()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(16.0))
-                .px(px(4.0))
-                .rounded(px(4.0))
-                .bg(theme.muted)
-                .text_size(px(9.5))
-                .text_color(kbd_fg)
-                .child(label)
-        };
-
         bar = bar
-            .child(
-                div()
-                    .id("cmd-trigger")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .flex_shrink_0()
-                    .gap(px(8.0))
-                    .w(px(300.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(field)
-                    .cursor_pointer()
-                    .hover(move |this| this.bg(hover_fill))
-                    .on_click(cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                        workspace.open_palette(window, cx);
-                    }))
-                    .child(icon_data(SEARCH_ICON, 12.0, muted))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(11.0))
-                            .text_color(muted)
-                            .child("输入命令或搜索会话"),
-                    )
-                    .child(kbd("Ctrl"))
-                    .child(kbd("K")),
-            )
-            // Splitting and opening live here as well as in the pane header:
-            // with one pane there is no header to hold them, and a window whose
-            // only way to start a second shell is a chord is a window with one
-            // shell.
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(
-                        icon_button("top-split-h", SPLIT_HORIZONTAL, 30.0, &theme, cx).on_click(
-                            cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                                workspace.split_active(Axis::Horizontal, window, cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        icon_button("top-split-v", SPLIT_VERTICAL, 30.0, &theme, cx).on_click(
-                            cx.listener(|workspace, _: &ClickEvent, window, cx| {
-                                workspace.split_active(Axis::Vertical, window, cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        icon_button("top-new", PLUS_SMALL, 30.0, &theme, cx).on_click(cx.listener(
-                            |workspace, _: &ClickEvent, window, cx| {
-                                workspace.new_tab(window, cx);
-                            },
-                        )),
-                    ),
-            )
+            .when(self.sidebar_width < RAIL_THRESHOLD, |this| {
+                this.child(
+                    icon_button("top-search", SEARCH_ICON, 30.0, &theme, cx).on_click(cx.listener(
+                        |workspace, _: &ClickEvent, window, cx| {
+                            workspace.open_palette(window, cx);
+                        },
+                    )),
+                )
+            })
+            .when(self.sidebar_width == 0.0, |this| {
+                this.child(
+                    icon_button("top-new", PLUS_SMALL, 30.0, &theme, cx).on_click(cx.listener(
+                        |workspace, _: &ClickEvent, window, cx| {
+                            workspace.new_tab(window, cx);
+                        },
+                    )),
+                )
+            })
             .child(
                 icon_button("app-menu", MENU_ICON, 30.0, &theme, cx).on_click(cx.listener(
                     |workspace, _: &ClickEvent, _, cx| {

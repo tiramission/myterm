@@ -217,36 +217,60 @@ pub fn download(
 
 /// Replaces the running binary with `staged` and restarts.
 ///
-/// A running executable cannot be overwritten on Windows, so this hands the work
-/// to a short-lived script: it waits for this process to exit, moves the new file
-/// into place, and starts it. The app then quits.
+/// Use a hidden helper to wait for Windows to release the running executable.
 pub fn install_and_restart(staged: &Path) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
-    let script = std::env::temp_dir().join("myterm-update.cmd");
-
-    // `timeout` rather than `ping` for the wait: it is present everywhere and does
-    // not depend on ICMP being allowed.
-    let body = format!(
-        "@echo off\r\n\
-         timeout /t 2 /nobreak >nul\r\n\
-         move /y \"{staged}\" \"{exe}\" >nul\r\n\
-         start \"\" \"{exe}\"\r\n\
-         del \"%~f0\"\r\n",
-        staged = staged.display(),
-        exe = exe.display(),
-    );
-    std::fs::write(&script, body)?;
-
-    std::process::Command::new("cmd")
-        .arg("/c")
-        .arg("start")
-        .arg("")
-        .arg("/min")
-        .arg(&script)
-        .spawn()?;
+    let system_root = std::env::var_os("SystemRoot").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "SystemRoot is not set")
+    })?;
+    let powershell =
+        PathBuf::from(system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let mut helper = std::process::Command::new(powershell);
+    // Use environment values so filenames never become PowerShell source.
+    helper
+        .env("MYTERM_UPDATE_PARENT", std::process::id().to_string())
+        .env("MYTERM_UPDATE_STAGED", staged)
+        .env("MYTERM_UPDATE_EXE", &exe)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            UPDATE_SCRIPT,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        helper.creation_flags(crate::install::CREATE_NO_WINDOW);
+    }
+    helper.spawn()?;
 
     Ok(())
 }
+
+const UPDATE_SCRIPT: &str = r"
+$ErrorActionPreference = 'Stop'
+$parent = Get-Process -Id ([int]$env:MYTERM_UPDATE_PARENT) -ErrorAction SilentlyContinue
+if ($parent -and -not $parent.WaitForExit(30000)) { exit 1 }
+$staged = $env:MYTERM_UPDATE_STAGED
+$exe = $env:MYTERM_UPDATE_EXE
+for ($attempt = 0; ; $attempt++) {
+    try {
+        [IO.File]::Replace($staged, $exe, [NullString]::Value)
+        break
+    } catch [IO.IOException] {
+        if ($attempt -ge 19) { throw }
+        Start-Sleep -Milliseconds 250
+    }
+}
+$start = New-Object Diagnostics.ProcessStartInfo
+$start.FileName = $exe
+$start.UseShellExecute = $false
+[void][Diagnostics.Process]::Start($start)
+";
 
 #[cfg(test)]
 mod tests {

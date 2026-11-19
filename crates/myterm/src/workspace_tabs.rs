@@ -10,9 +10,10 @@ impl Workspace {
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         let entity = cx.entity();
         cx.spawn(async move |_, cx| {
+            let launch = command.clone();
             let pty = cx
                 .background_executor()
-                .spawn(async move { Pty::spawn(&command, cols, rows) })
+                .spawn(async move { Pty::spawn(&launch, cols, rows) })
                 .await;
 
             entity.update(cx, |workspace, cx| {
@@ -25,7 +26,7 @@ impl Workspace {
                     }
                 };
                 let theme = gpui_kit::component::Theme::global(cx).clone();
-                match Tab::from_pty(tab_id, pty, &workspace.command, cols, rows, &theme) {
+                match Tab::from_pty(tab_id, pty, &command, cols, rows, &theme) {
                     Ok(tab) => {
                         workspace.tabs.push(tab);
                         workspace.active_tab = workspace.tabs.len() - 1;
@@ -394,6 +395,24 @@ impl Workspace {
 
         let keystroke = &event.keystroke;
         let mods = keystroke.modifiers;
+        let find_input = self
+            .find
+            .as_ref()
+            .map(|find| &find.input)
+            .filter(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        let palette_input = self
+            .palette
+            .as_ref()
+            .map(|palette| &palette.input)
+            .filter(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        if matches!(keystroke.key.as_str(), "enter" | "escape" | "up" | "down")
+            && let Some(input) = palette_input.or(find_input)
+            && input.update(cx, |state, cx| {
+                state.marked_text_range(window, cx).is_some()
+            })
+        {
+            return;
+        }
 
         // App shortcuts come first: they must not reach the shell.
         if keystroke.key == "escape" && self.menu.is_some() {
@@ -407,7 +426,11 @@ impl Workspace {
         // to it are taken here; everything else falls through untouched so the
         // field receives it as text. Taking them all would make the find bar
         // unable to accept a single character.
-        if self.find.is_some() {
+        if find_input.is_some()
+            || (self.find.is_some()
+                && self.focus.is_focused(window)
+                && matches!(keystroke.key.as_str(), "escape" | "f3"))
+        {
             match keystroke.key.as_str() {
                 "escape" => {
                     self.close_find(window, cx);
@@ -476,6 +499,10 @@ impl Workspace {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        if !self.focus.is_focused(window) {
             return;
         }
 

@@ -4,13 +4,7 @@ use super::*;
 /// The strip at the top of a pane: what it is running, and what can be done to
 /// it.
 ///
-/// It only appears once the window is divided. A lone terminal is already named
-/// by the tab beside it, and repeating that name in a second bar would spend
-/// thirty pixels saying nothing.
-///
-/// The name starts on the grid's own leading spine. State sits beside the name,
-/// because it describes the shell; the actions live at the trailing edge and
-/// appear only while the pointer is over the pane.
+/// Pane actions live at the trailing edge of the header.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pane_header(
     id: u64,
@@ -40,6 +34,7 @@ pub(super) fn pane_header(
         .gap(px(8.0))
         .pl(px(PANE_TEXT_INSET))
         .pr(px(6.0))
+        .child(icon_data(APP_MARK, 13.0, theme.muted_foreground))
         .child(
             div()
                 .flex_shrink_0()
@@ -49,7 +44,7 @@ pub(super) fn pane_header(
                 .text_ellipsis()
                 .text_size(px(11.0))
                 .font_weight(if focused {
-                    FontWeight::MEDIUM
+                    FontWeight::BOLD
                 } else {
                     FontWeight::NORMAL
                 })
@@ -89,18 +84,10 @@ pub(super) fn pane_header(
                     .h(px(15.0))
                     .px(px(4.0))
                     .rounded(px(4.0))
-                    .bg(if focused {
-                        theme.ring.opacity(0.16)
-                    } else {
-                        theme.muted
-                    })
+                    .bg(theme.muted)
                     .text_size(px(9.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if focused {
-                        theme.ring
-                    } else {
-                        theme.muted_foreground
-                    })
+                    .text_color(theme.muted_foreground)
                     .child(number.to_string()),
             )
         })
@@ -177,6 +164,16 @@ pub(super) fn pane_header(
                     zoomed,
                     cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                         workspace.toggle_zoom(id, cx);
+                    }),
+                ))
+                .child(pane_action(
+                    ("pane-find", id),
+                    SEARCH_ICON,
+                    theme,
+                    false,
+                    cx.listener(move |workspace, _: &ClickEvent, window, cx| {
+                        workspace.focus_pane(id, cx);
+                        workspace.open_find(window, cx);
                     }),
                 ))
                 .child(pane_action(

@@ -353,12 +353,7 @@ impl Workspace {
         .detach();
     }
 
-    /// Collapses the list to its rail, or opens it back to the width it had.
-    ///
-    /// The width is the user's: it starts at the rail and only changes when the
-    /// edge is dragged, this is pressed, or `Ctrl+Shift+B` is. Splitting a pane
-    /// never widens it on its own — the column is navigation, and it has no
-    /// reason to take the terminal's width without being asked.
+    /// Hide the sidebar, or restore the last expanded width.
     pub(super) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_width < RAIL_THRESHOLD {
             self.sidebar_width = self
@@ -366,7 +361,7 @@ impl Workspace {
                 .clamp(RAIL_THRESHOLD, MAX_SIDEBAR_WIDTH);
         } else {
             self.sidebar_expanded = self.sidebar_width;
-            self.sidebar_width = RAIL_WIDTH;
+            self.sidebar_width = 0.0;
         }
         cx.notify();
     }

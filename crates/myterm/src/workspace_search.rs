@@ -46,6 +46,9 @@ impl Workspace {
             .h(px(34.0))
             .px(px(8.0))
             .bg(theme.title_bar)
+            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+            })
             .child(div().flex_1().min_w_0().child(Input::new(&input).small()))
             .child(
                 div()

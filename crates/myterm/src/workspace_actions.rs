@@ -128,6 +128,10 @@ impl Workspace {
             let Some(pane) = tab.panes.get(&id) else {
                 return;
             };
+            if !pane.bounds.get().contains(&position) {
+                self.drag_anchor = None;
+                return;
+            }
             self.cell_at(pane, position, style)
         };
 
@@ -170,10 +174,17 @@ impl Workspace {
             self.cell_at(pane, position, style)
         };
 
+        if anchor == cell && !self.selection {
+            return;
+        }
         if let Some(tab) = self.active_tab_mut()
             && let Some(pane) = tab.panes.get_mut(&id)
         {
-            pane.session.set_selection(anchor, cell);
+            if anchor == cell {
+                pane.session.clear_selection();
+            } else {
+                pane.session.set_selection(anchor, cell);
+            }
         }
         self.selection = anchor != cell;
         cx.notify();
@@ -246,6 +257,8 @@ impl Workspace {
     /// app borrow. The work is therefore queued with `defer`, so it runs after
     /// the current event is fully dispatched.
     pub(super) fn split_active(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else { return };
+        let (tab_id, source) = (tab.id, tab.active);
         let (cols, rows) = self.grid_dims(window, cx);
 
         // A split halves the pane, so the new shell starts at half the grid and
@@ -266,12 +279,20 @@ impl Workspace {
         let command = self.command.clone();
         let entity = cx.entity();
         cx.spawn(async move |_, cx| {
+            let launch = command.clone();
             let pty = cx
                 .background_executor()
-                .spawn(async move { Pty::spawn(&command, cols, rows) })
+                .spawn(async move { Pty::spawn(&launch, cols, rows) })
                 .await;
 
             entity.update(cx, |workspace, cx| {
+                let Some(tab) = workspace
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id && tab.panes.contains_key(&source))
+                else {
+                    return;
+                };
                 let pty = match pty {
                     Ok(pty) => pty,
                     Err(message) => {
@@ -281,10 +302,7 @@ impl Workspace {
                     }
                 };
                 let theme = gpui_kit::component::Theme::global(cx).clone();
-                let Some(tab) = workspace.active_tab_mut() else {
-                    return;
-                };
-                match tab.split_with_pty(axis, pty, cols, rows, &theme) {
+                match tab.split_with_pty(source, axis, pty, &command, cols, rows, &theme) {
                     Ok(()) => workspace.error = None,
                     Err(message) => workspace.error = Some(message),
                 }

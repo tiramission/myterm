@@ -1,8 +1,8 @@
 //! The app's colour scheme.
 //!
 //! One set of tokens drives everything the app draws: the title bar, the panes,
-//! the terminal grid and the ANSI palette. The scheme is a warm, slightly olive
-//! neutral with a single lime accent, and it keeps the same structure in both
+//! the terminal grid and the ANSI palette. The scheme uses a lavender shell
+//! and a configurable accent, and it keeps the same structure in both
 //! modes — four surface steps, three text steps, one hairline — so a screen built
 //! from these reads the same whichever mode it is in.
 //!
@@ -25,9 +25,6 @@ struct Tokens {
     surface: u32,
     /// Every hairline.
     stroke: u32,
-    /// The same line, one step brighter. A card that holds the keyboard wears
-    /// this instead of the accent: focus is a hierarchy, not a highlight.
-    stroke_strong: u32,
     text: u32,
     text_2: u32,
     text_3: u32,
@@ -41,14 +38,13 @@ struct Tokens {
 }
 
 const DARK: Tokens = Tokens {
-    bg: 0x101210,
-    bg_soft: 0x1a1d18,
-    surface: 0x22261e,
-    stroke: 0x33382d,
-    stroke_strong: 0x4d5648,
-    text: 0xf2f5ec,
-    text_2: 0xa6ada0,
-    text_3: 0x8a9281,
+    bg: 0x1c1922,
+    bg_soft: 0x2d2532,
+    surface: 0x403549,
+    stroke: 0x403648,
+    text: 0xefebf5,
+    text_2: 0xb9aec3,
+    text_3: 0xa197ab,
     scrim: 0x000000,
     pill: 0x262b23,
     red: 0xff6b6b,
@@ -61,20 +57,35 @@ const DARK: Tokens = Tokens {
 /// direction as dark. A white card on a near-white ground was 1.10:1 and
 /// left the card with no edge at all.
 const LIGHT: Tokens = Tokens {
-    bg: 0xffffff,
-    bg_soft: 0xe7eadf,
+    bg: 0xfffcff,
+    bg_soft: 0xeee0ef,
     surface: 0xffffff,
-    stroke: 0xd2d6c6,
-    stroke_strong: 0x9aa08e,
-    text: 0x14170f,
-    text_2: 0x555b4d,
-    text_3: 0x656b5c,
+    stroke: 0xe2d9e6,
+    text: 0x2c2732,
+    text_2: 0x62586a,
+    text_3: 0x706779,
     scrim: 0x1b1f18,
     pill: 0xdfe3d7,
     red: 0xb12b26,
     amber: 0x8a5e00,
     sky: 0x1f5fb4,
 };
+
+/// Paint the shared window surface behind the sidebar and terminal cards.
+pub fn workspace_background(mode: gpui_kit::component::ThemeMode, accent: Accent) -> Background {
+    let hue = accent_hue(accent) / 360.0;
+    let (top, bottom) = match mode {
+        gpui_kit::component::ThemeMode::Light => {
+            (hsla(hue, 0.52, 0.91, 1.0), hsla(hue, 0.34, 0.95, 1.0))
+        }
+        _ => (hsla(hue, 0.23, 0.20, 1.0), hsla(hue, 0.14, 0.16, 1.0)),
+    };
+    linear_gradient(
+        168.0,
+        linear_color_stop(top, 0.0),
+        linear_color_stop(bottom, 1.0),
+    )
+}
 
 /// The hue each accent sits on, in degrees.
 ///
@@ -189,7 +200,6 @@ pub struct Palette {
     pub bg_soft: Hsla,
     pub surface: Hsla,
     pub stroke: Hsla,
-    pub stroke_strong: Hsla,
     pub text: Hsla,
     pub text_2: Hsla,
     #[allow(dead_code)]
@@ -223,7 +233,6 @@ impl Palette {
             bg_soft: tint(t.bg_soft, hue, dark),
             surface: tint(t.surface, hue, dark),
             stroke: tint(t.stroke, hue, dark),
-            stroke_strong: tint(t.stroke_strong, hue, dark),
             pill: tint(t.pill, hue, dark),
             ..*t
         };
@@ -233,7 +242,6 @@ impl Palette {
             bg_soft: hex(t.bg_soft),
             surface: hex(t.surface),
             stroke: hex(t.stroke),
-            stroke_strong: hex(t.stroke_strong),
             text: hex(t.text),
             text_2: hex(t.text_2),
             text_3: hex(t.text_3),
@@ -432,6 +440,10 @@ pub fn install(cx: &mut App, mode: gpui_kit::component::ThemeMode, accent: Accen
 
     Theme::change(mode, None, cx);
 
-    let palette = Palette::for_mode(mode, accent);
-    Theme::update(cx, |theme| recolour(&mut theme.colors, palette));
+    Theme::update(cx, |theme| apply(theme, accent));
+}
+
+/// Applies myterm's colors to a theme, including before GPUI starts.
+pub(super) fn apply(theme: &mut gpui_kit::component::Theme, accent: Accent) {
+    recolour(&mut theme.colors, Palette::for_mode(theme.mode, accent));
 }

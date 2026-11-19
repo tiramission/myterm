@@ -166,6 +166,7 @@ pub(super) fn pane_action_marked(
         .items_center()
         .justify_center()
         .size(px(24.0))
+        .flex_shrink_0()
         // The same rounded square as the title bar's buttons, one step tighter:
         // 24px with a 6px corner. A circle inside a rounded card was the one
         // shape in the window that belonged to no family.
@@ -183,7 +184,7 @@ pub(super) fn pane_action_marked(
         .on_click(on_click)
         .child(icon_data(
             icon,
-            16.0,
+            14.0,
             if active {
                 theme.ring
             } else {
@@ -501,45 +502,34 @@ pub(super) fn shorten_path(path: &str) -> String {
     }
 }
 
-/// The two lines a row in the column shows.
-///
-/// One concise sidebar name: a real shell title, otherwise the current folder.
+/// A shell-reported command or title, a full working directory, or the launch command.
 pub(super) fn pane_row_title(pane: &Pane) -> String {
-    let cwd = pane_cwd(pane);
-    let program = pane_label(pane);
-    let distribution = pty_command::wsl_distribution_name(&pane.command);
-
-    // A title worth showing is one the shell chose: not the program's own name,
-    // and not a path (Windows shells title themselves with the exe's path).
     let reported = pane.session.frame().title.trim();
-    let is_path = reported.contains('\\') || reported.contains('/');
-    let interesting = !reported.is_empty()
-        && !is_path
-        && !reported.eq_ignore_ascii_case(&program)
-        && !distribution
-            .as_deref()
-            .is_some_and(|name| reported.eq_ignore_ascii_case(name))
-        && !reported.to_ascii_lowercase().ends_with(".exe");
-
-    match (interesting, cwd) {
-        (true, _) => reported
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(reported)
-            .trim_end_matches(".exe")
-            .to_owned(),
-        (false, Some(cwd)) => directory_name(&cwd),
-        (false, None) => distribution.map_or(program, |instance| format!("WSL · {instance}")),
+    let is_absolute = |text: &str| {
+        text.starts_with('/')
+            || text.starts_with(r"\\")
+            || text
+                .as_bytes()
+                .get(1..3)
+                .is_some_and(|suffix| suffix == b":\\" || suffix == b":/")
+    };
+    let executable_title = reported.to_ascii_lowercase().ends_with(".exe");
+    if !reported.is_empty() && !is_absolute(reported) && !executable_title {
+        return reported.to_owned();
     }
-}
 
-/// The last segment of a shortened path — what a person would call the place.
-pub(super) fn directory_name(path: &str) -> String {
-    // `~` on its own is home, and its last segment is the whole string.
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rsplit('/').next() {
-        Some(name) if !name.is_empty() => name.to_owned(),
-        _ => trimmed.to_owned(),
+    if let Some(cwd) = pane.session.pwd().filter(|cwd| !cwd.is_empty()) {
+        return cwd;
+    }
+    if is_absolute(reported) {
+        return reported.to_owned();
+    }
+
+    // Do not display the injected PowerShell integration script as a command.
+    if let Some(instance) = pty_command::wsl_distribution_name(&pane.command) {
+        format!("wsl.exe --distribution {instance}")
+    } else {
+        pane.command.program.clone()
     }
 }
 

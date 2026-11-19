@@ -14,7 +14,7 @@
 
 终端渲染、键盘与中文输入、多工作区、分屏与拖动比例、选区与复制、滚轮回滚、查找、Kitty 图形协议、深浅主题、自动更新与安装都已人工验证。
 
-界面的样子与交互以 [docs/ui-prototype.html](docs/ui-prototype.html) 为准——那是一份可以直接打开、直接点的稿子。为什么要这样做，写在 [docs/design.md](docs/design.md)。
+界面设计取舍记录在 [docs/design.md](docs/design.md)。
 
 ## 四个决定
 

@@ -82,22 +82,8 @@ pub(super) fn card_bounds(tab: &Tab, id: u64) -> Option<Bounds<Pixels>> {
         return None;
     }
 
-    // The grid is inset by the padding on three sides and by the header as well
-    // when the window is divided.
-    let header = if tab.panes.len() > 1 || tab.active == id {
-        PANE_HEADER_HEIGHT
-    } else {
-        0.0
-    };
-    // The grid's padding is not symmetric, so the two axes are measured
-    // separately; a single number put the divider four to seven pixels off.
-    let top_pad = if tab.panes.len() > 1 || tab.active == id {
-        0.0
-    } else {
-        GRID_PAD_TOP
-    };
     let left = grid.left() - px(GRID_PAD_X);
-    let top = grid.top() - px(top_pad + header);
+    let top = grid.top() - px(GRID_PAD_TOP + PANE_HEADER_HEIGHT);
     let right = grid.right() + px(GRID_PAD_X);
     let bottom = grid.bottom() + px(GRID_PAD_BOTTOM);
 

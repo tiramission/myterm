@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// otherwise allocate a console of its own — which is exactly the black box a
 /// user sees flash past when they ask for the app to be removed.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(super) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Where an installed copy lives.
 ///

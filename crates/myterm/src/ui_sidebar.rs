@@ -12,31 +12,27 @@ pub(super) fn sidebar_group_row(
     title: String,
     pane_count: usize,
     current: bool,
+    folded: bool,
     unseen: bool,
     title_input: Option<Entity<InputState>>,
     invalid_name: bool,
-    closable: bool,
     dragging: bool,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
     let hover_bg = theme.muted;
-    let selected_bg = theme.muted;
-    let row_group = format!("side-tab-row-{tab_index}");
-    let dot = theme.primary;
     let editing = title_input.is_some();
     let save_button = div()
         .id(format!("side-rename-save-{tab_index}"))
         .flex()
         .items_center()
         .justify_center()
-        .h(px(22.0))
-        .px(px(6.0))
+        .size(px(22.0))
+        .flex_shrink_0()
         .rounded(px(5.0))
         .bg(theme.ring.opacity(0.12))
         .cursor_pointer()
-        .text_size(px(10.0))
-        .text_color(theme.ring)
+        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("保存").build(window, cx))
         .on_click(cx.listener(
             move |workspace: &mut Workspace, _: &ClickEvent, window, cx| {
                 let name = workspace
@@ -54,18 +50,17 @@ pub(super) fn sidebar_group_row(
                 cx.notify();
             },
         ))
-        .child("保存");
+        .child(icon_data(CHECK_ICON, 13.0, theme.ring));
     let cancel_button = div()
         .id(format!("side-rename-cancel-{tab_index}"))
         .flex()
         .items_center()
         .justify_center()
-        .h(px(22.0))
-        .px(px(6.0))
+        .size(px(22.0))
+        .flex_shrink_0()
         .rounded(px(5.0))
         .cursor_pointer()
-        .text_size(px(10.0))
-        .text_color(theme.muted_foreground)
+        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("取消").build(window, cx))
         .hover(move |this| this.bg(theme.muted))
         .on_click(
             cx.listener(|workspace: &mut Workspace, _: &ClickEvent, window, cx| {
@@ -74,7 +69,7 @@ pub(super) fn sidebar_group_row(
                 cx.notify();
             }),
         )
-        .child("取消");
+        .child(icon_data(WINDOW_CLOSE, 13.0, theme.muted_foreground));
 
     div()
         .id(ElementId::Name(format!("side-tab-{tab_index}").into()))
@@ -90,9 +85,7 @@ pub(super) fn sidebar_group_row(
         // The tab being moved stays in its place, faded, so the list does not
         // jump under the pointer while a landing spot is being chosen.
         .when(dragging, |this| this.opacity(0.5))
-        .group(row_group.clone())
-        .when(current, |this| this.bg(selected_bg))
-        .when(!current, |this| this.hover(move |this| this.bg(hover_bg)))
+        .hover(move |this| this.bg(hover_bg.opacity(0.5)))
         .when(!editing, |this| {
             this.on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
                 if workspace.swallow_tab_click {
@@ -143,15 +136,32 @@ pub(super) fn sidebar_group_row(
                 }),
             )
         })
-        .child(icon_data(
-            WORKSPACE_ICON,
-            12.0,
-            if current {
-                theme.ring
-            } else {
-                theme.muted_foreground
-            },
-        ))
+        .when(!editing, |this| {
+            this.child(
+                div()
+                    .id(("fold-workspace", tab_id))
+                    .w(px(18.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .hover(move |this| this.bg(hover_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        if !workspace.folded_tabs.remove(&tab_id) {
+                            workspace.folded_tabs.insert(tab_id);
+                        }
+                        cx.notify();
+                    }))
+                    .child(icon_data(
+                        if folded { CHEVRON_RIGHT } else { CHEVRON_DOWN },
+                        12.0,
+                        theme.muted_foreground,
+                    )),
+            )
+        })
         .when_some(title_input, |this, input| {
             this.child(
                 div()
@@ -187,16 +197,13 @@ pub(super) fn sidebar_group_row(
                     .child(title),
             )
         })
-        .when(unseen, |this| {
-            // A filled dot at the trailing edge: something in this tab stopped
-            // while you were somewhere else. It is a shape, not only a colour,
-            // and it lives beside the count rather than in front of the name.
+        .when(unseen && !editing, |this| {
             this.child(
                 div()
                     .flex_shrink_0()
-                    .size(px(5.0))
-                    .rounded(px(999.0))
-                    .bg(dot),
+                    .text_size(px(10.0))
+                    .text_color(theme.warning)
+                    .child("待关注"),
             )
         })
         .when(editing && invalid_name, |this| {
@@ -214,25 +221,25 @@ pub(super) fn sidebar_group_row(
                     .flex_shrink_0()
                     .text_size(px(10.0))
                     .text_color(theme.muted_foreground)
-                    .child(format!("{pane_count} 个窗格")),
+                    .child(pane_count.to_string()),
             )
         })
-        .when(closable, |this| {
+        .when(!editing, |this| {
             this.child(
                 div()
-                    .flex_shrink_0()
-                    // Every row reveals its cross under the pointer, the way
-                    // the prototype draws it: a permanent cross on the current
-                    // row makes one row of the column permanently louder than
-                    // the rest, for a control that is used once in a while.
-                    .opacity(0.0)
-                    .group_hover(row_group, move |this| this.opacity(1.0))
-                    .child(sidebar_close_button(
-                        format!("side-close-tab-{tab_index}"),
-                        tab_index,
-                        theme,
-                        cx,
-                    )),
+                    .id(("workspace-actions", tab_id))
+                    .size(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .hover(move |this| this.bg(hover_bg))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |workspace, event: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        workspace.open_tab_menu(tab_index, event.position(), cx);
+                    }))
+                    .child(icon_data(MENU_ICON, 13.0, theme.muted_foreground)),
             )
         })
 }
@@ -295,6 +302,7 @@ pub(super) fn sidebar_pane_row(
     // workspace without turning the list into a stack of identical buttons.
     // The selected row is no exception — the fill already says which one it is.
     let row_group = format!("side-row-{tab_index}-{id}");
+    let full_title = label.clone();
     let cross = 0.0;
 
     div()
@@ -316,6 +324,9 @@ pub(super) fn sidebar_pane_row(
         .cursor_pointer()
         .when(dragging, |this| this.opacity(0.5))
         .group(row_group.clone())
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(full_title.clone()).build(window, cx)
+        })
         .when(selected, |this| this.bg(selected_bg))
         .when(!selected, |this| this.hover(move |this| this.bg(hover_bg)))
         .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
@@ -360,6 +371,13 @@ pub(super) fn sidebar_pane_row(
                 workspace.close_tab(tab_index, cx);
             }),
         )
+        .child(div().flex_shrink_0().size(px(6.0)).rounded_full().bg(
+            status_color(status, theme).opacity(if matches!(status, PaneStatus::Idle) {
+                0.45
+            } else {
+                1.0
+            }),
+        ))
         .child(
             div()
                 .flex_1()

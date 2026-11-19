@@ -144,7 +144,9 @@ const SEARCH_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 const MENU_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round"><path d="M6 12h.01M12 12h.01M18 12h.01"/></svg>"#;
 
 /// A chevron pointing at the edge the list folds toward.
-const COLLAPSE_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
+const CHEVRON_RIGHT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>"#;
+const CHEVRON_DOWN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
+const CHECK_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>"#;
 
 const INFO_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></svg>"#;
 
@@ -165,7 +167,7 @@ const SETTINGS_ICON: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox
 const TITLE_BAR_HEIGHT: f32 = 44.0;
 
 /// Height of the strip naming a pane.
-const PANE_HEADER_HEIGHT: f32 = 30.0;
+const PANE_HEADER_HEIGHT: f32 = 35.0;
 
 /// Height of the conditional status bar. It only exists while it has
 /// something to say, so this is the cost of speaking, not a permanent edge.
@@ -191,7 +193,7 @@ const PANE_TEXT_INSET: f32 = 11.0;
 /// the trailing side so a full line of text is not flush against the border,
 /// and deeper at the bottom so the last row has somewhere to sit.
 const GRID_PAD_X: f32 = 13.0;
-const GRID_PAD_TOP: f32 = 10.0;
+const GRID_PAD_TOP: f32 = 3.0;
 const GRID_PAD_BOTTOM: f32 = 14.0;
 
 /// One press of the font size control. Half a point, so the sizes people
@@ -202,7 +204,7 @@ const FONT_STEP: f32 = 0.5;
 const SCROLLBACK_STEP: usize = 1_000;
 
 /// Width of the workspace list.
-const SIDEBAR_WIDTH: f32 = 238.0;
+const SIDEBAR_WIDTH: f32 = 216.0;
 
 /// Narrowest the list gets: a chip of glyphs with room to aim at.
 const RAIL_WIDTH: f32 = 56.0;
@@ -386,30 +388,33 @@ impl Tab {
         self.panes.get_mut(&self.active)
     }
 
-    /// Splits the active pane, moving focus into the new one.
-    /// Splits the active pane around a pseudo console that is already running.
+    /// Adds a pane beside the original split target once the console is ready.
+    #[allow(clippy::too_many_arguments)]
     fn split_with_pty(
         &mut self,
+        source: u64,
         axis: Axis,
         pty: Pty,
+        command: &Command,
         cols: u16,
         rows: u16,
         theme: &gpui_kit::component::Theme,
     ) -> Result<(), String> {
-        let command = self.command_snapshot();
         let session = Session::from_pty(pty, cols, rows)?;
-        let pane = Pane::from_session(session, &command, cols, rows, theme);
+        let pane = Pane::from_session(session, command, cols, rows, theme);
 
         let id = self.next_id;
         self.next_id += 1;
         self.panes.insert(id, pane);
 
-        if !self.layout.split(self.active, id, axis) {
+        if !self.layout.split(source, id, axis) {
             self.panes.remove(&id);
             return Err("无法拆分窗格".to_owned());
         }
 
-        self.active = id;
+        if self.active == source {
+            self.active = id;
+        }
         Ok(())
     }
 
@@ -424,17 +429,6 @@ impl Tab {
         self.panes.remove(&self.active);
         self.active = self.layout.leaves().first().copied().unwrap_or(1);
         true
-    }
-
-    /// The shell command new panes in this tab should start.
-    fn command_snapshot(&self) -> Command {
-        // Every pane in a tab runs the same shell, so any live pane can supply
-        // it. Falling back keeps split working while a pane is being replaced.
-        self.panes
-            .values()
-            .next()
-            .map(|pane| pane.command.clone())
-            .unwrap_or_else(pty_command::default_profile)
     }
 }
 
@@ -795,6 +789,7 @@ pub struct Workspace {
     /// list draws as a strip of capsules, which is how it collapses without a
     /// second control to learn.
     sidebar_width: f32,
+    folded_tabs: std::collections::BTreeSet<u64>,
     /// The width to come back to when the rail opens. Kept apart from
     /// `sidebar_width` so collapsing does not forget the width the user chose.
     sidebar_expanded: f32,
@@ -962,11 +957,6 @@ impl Render for Workspace {
         self.ensure_started(window, cx);
         self.sync_grid_sizes(window, cx);
 
-        // The terminal is the only focusable thing in the window, so it takes the
-        // keyboard back whenever something else (a tab click, a menu) stole it.
-        if !self.focus.is_focused(window) {
-            self.focus.focus(window, cx);
-        }
         let style = self.grid_style(window, cx);
 
         // The platform only asks for the caret position when a composition
@@ -985,7 +975,9 @@ impl Render for Workspace {
             self.ime_cursor = cursor;
             self.caret_moved = Instant::now();
             self.caret_visible = true;
-            window.invalidate_character_coordinates();
+            if self.focus.is_focused(window) {
+                window.invalidate_character_coordinates();
+            }
         }
         let style = GridStyle {
             cursor_visible: self.caret_visible,
@@ -1025,20 +1017,11 @@ impl Render for Workspace {
             .relative()
             .flex()
             .flex_row()
-            // One chrome surface, painted here so it continues under the title
-            // bar and the sidebar without a seam.
-            //
-            // This used to be left unpainted on the theory that Mica would show
-            // through it. Mica is not available on this backend — the window is
-            // an opaque DirectComposition surface — so the fill only ever hid
-            // the window background, which is the same white the pane cards
-            // paint. That left the cards floating on nothing, held apart by a
-            // hairline that was doing all the work.
-            //
-            // Painting it the tone the bar and the sidebar already wear makes
-            // the three regions one surface, and the cards separate from it by
-            // tone alone. Three hairlines go away and none is missed.
-            .bg(theme.title_bar)
+            // One gradient continues behind the sidebar and title bar.
+            .bg(palette::workspace_background(
+                theme.mode,
+                self.config.accent,
+            ))
             .text_color(theme.foreground)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::handle_key))
@@ -1065,7 +1048,9 @@ impl Render for Workspace {
                 }),
             );
 
-        body = body.child(self.render_sidebar(&theme, cx));
+        if self.sidebar_width > 0.0 {
+            body = body.child(self.render_sidebar(&theme, cx));
+        }
 
         let mut content = div()
             .relative()
@@ -1135,44 +1120,36 @@ impl Render for Workspace {
         // opening it shortens the grid instead of covering the output the
         // search is about.
         content = content.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(theme.title_bar)
-                // The leading and top edges have no gutter: the cards meet the
-                // top bar and the workspace column directly, so the chrome reads
-                // as an L wrapped around the work instead of a frame floating
-                // ten pixels away from it. Only the trailing and bottom edges
-                // keep the gap, where the window edge would otherwise cut the
-                // card.
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .flex_row()
-                        .pr(px(PANE_GAP))
-                        .pb(px(PANE_GAP))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .flex()
-                                .child(self.render_panes(tab, style, cx)),
-                        )
-                        // The sheet is the work area's last column, not an
-                        // overlay: the panes keep their full height and their
-                        // rounded corners, and a font size can be tried on while
-                        // watching the grid change beside the control.
-                        .when(self.settings, |this| {
-                            this.child(self.render_settings(&theme, cx))
-                        }),
-                ),
+            div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .pl(px(if self.sidebar_width == 0.0 {
+                        PANE_GAP
+                    } else {
+                        0.0
+                    }))
+                    .pr(px(PANE_GAP))
+                    .pb(px(PANE_GAP))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .child(self.render_panes(tab, style, cx)),
+                    )
+                    // The sheet is the work area's last column, not an
+                    // overlay: the panes keep their full height and their
+                    // rounded corners, and a font size can be tried on while
+                    // watching the grid change beside the control.
+                    .when(self.settings, |this| {
+                        this.child(self.render_settings(&theme, cx))
+                    }),
+            ),
         );
 
         // The status bar is not furniture. It appears only while it has a line
@@ -1267,6 +1244,12 @@ impl Workspace {
                 let focused = *id == active;
                 let id = *id;
                 let frame = pane.session.frame().clone();
+                // OSC 11 can change a session's backdrop. Use the same color
+                // for the grid, rounded card and the padding between them.
+                let style = GridStyle {
+                    background: grid_element::rgb(frame.background),
+                    ..style
+                };
                 let dims = pane.dims.clone();
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
@@ -1283,7 +1266,6 @@ impl Workspace {
                     None
                 };
                 let zoomed = self.zoomed == Some(id);
-                let show_header = multi || zoomed;
                 // The same number the rail chip wears, on the pane itself: with
                 // three panes open, "3" has to be findable in the work area and
                 // not only in the column. Numbering follows the tab's key order,
@@ -1305,35 +1287,12 @@ impl Workspace {
                     .overflow_hidden()
                     .group("pane")
                     .rounded(px(PANE_RADIUS))
-                    // One hairline, always. The card and the chrome are close
-                    // in tone on purpose, and tone alone cannot carry the edge
-                    // at 1.2:1 — the line is what makes the gap read as a gap.
-                    //
-                    // Focus is a second step of the same neutral, not the
-                    // accent: the accent means "this is current" in the column
-                    // and in the bar, and a card outline in the same colour made
-                    // three places claim it at once. The pane that is not
-                    // holding the keyboard steps back by a sixteenth instead.
                     .bg(style.background)
-                    // One pane fills the whole work area, so an edge around it
-                    // would be drawing a box around the view itself. A split
-                    // needs one: those cards sit next to each other and the gap
-                    // between them is not enough on its own.
-                    .when(multi, |this| {
-                        this.border_1().border_color(if focused {
-                            palette::Palette::current(cx).stroke_strong
-                        } else {
-                            theme.border
-                        })
-                    })
-                    // No dimming on the pane that is not holding the keyboard.
-                    // An opacity step washes the output out — badly in light
-                    // mode, where pale foreground colours go almost white — and
-                    // a terminal whose text fades when you look away is the
-                    // opposite of immersive. Focus is the border alone.
+                    .shadow_sm()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |workspace, event: &MouseDownEvent, _, cx| {
+                        cx.listener(move |workspace, event: &MouseDownEvent, window, cx| {
+                            workspace.focus.focus(window, cx);
                             workspace.focus_pane(id, cx);
                             workspace.begin_selection(id, event.position, style, cx);
                         }),
@@ -1355,7 +1314,7 @@ impl Workspace {
                         workspace.handle_scroll(event, style, cx);
                     }));
 
-                if show_header {
+                {
                     // While a divider is being dragged the header lends its
                     // trailing space to the numbers that are changing, because
                     // that is the question the drag is asking.
@@ -1389,10 +1348,7 @@ impl Workspace {
                         .relative()
                         .px(px(GRID_PAD_X))
                         .pb(px(GRID_PAD_BOTTOM))
-                        // With a header above it the grid keeps the header's own
-                        // inset; without one the top padding is all it has.
-                        .when(show_header, |this| this.pt(px(0.0)))
-                        .when(!show_header, |this| this.pt(px(GRID_PAD_TOP)))
+                        .pt(px(GRID_PAD_TOP))
                         .child(TerminalGrid::new(
                             ElementId::Name(format!("grid-{id}").into()),
                             frame,
@@ -1540,6 +1496,7 @@ fn main() {
     } else {
         gpui_kit::component::ThemeMode::Dark
     };
+    palette::apply(&mut theme, saved.accent);
     let (mut first_pane, startup_error) = match Pane::new(&command, 120, 40, &theme) {
         Ok(pane) => (Some(pane), None),
         Err(message) => (None, Some(message)),

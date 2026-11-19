@@ -49,9 +49,8 @@ impl Workspace {
             // the app has already been through this; a portable download has
             // not, and is the one case worth mentioning.
             show_install_prompt: !install::is_present(),
-            // The rail is the default: a terminal should open with as little
-            // chrome as it can get away with, and the list is one click away.
-            sidebar_width: RAIL_WIDTH,
+            sidebar_width: SIDEBAR_WIDTH,
+            folded_tabs: Default::default(),
             sidebar_expanded: SIDEBAR_WIDTH,
             sidebar_drag: None,
             tab_drag: None,
@@ -101,7 +100,7 @@ impl Workspace {
         // usable before anything asks the network a question.
         self.check_for_update(cx);
 
-        if !self.focus.is_focused(window) {
+        if window.focused(cx).is_none() {
             self.focus.focus(window, cx);
         }
     }

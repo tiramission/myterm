@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::FocusableExt;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum ShellChoice {
@@ -117,6 +118,67 @@ impl SelectItem for ShellChoice {
 }
 
 impl Workspace {
+    fn render_shell_picker(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+        let actual = pty_command::display_name(&self.command);
+        let available = pty_command::is_available(self.config.shell)
+            && (self.config.shell != config::Shell::Wsl
+                || self.config.wsl_distribution.as_ref().is_none_or(|name| {
+                    pty_command::wsl_instances()
+                        .iter()
+                        .any(|instance| instance.name() == name)
+                }));
+        let status = if available {
+            format!("新窗格启动 {actual}")
+        } else {
+            format!("所选 Shell 不可用，回退到 {actual}")
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .py(px(11.0))
+            .border_b_1()
+            .border_color(theme.border.opacity(0.45))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(3.0))
+                    .child(div().text_size(px(12.5)).child("默认 Shell"))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(if available {
+                                theme.muted_foreground
+                            } else {
+                                theme.warning
+                            })
+                            .child(status),
+                    ),
+            )
+            .child(
+                div().flex_shrink_0().w(px(128.0)).h(px(24.0)).child(
+                    Select::new(&self.shell_selector)
+                        .id("sh-default-shell")
+                        .small()
+                        .w_full()
+                        .h_full()
+                        .px(px(8.0))
+                        .rounded(px(6.0))
+                        .bg(theme.muted.opacity(0.6))
+                        .border_color(theme.border.opacity(0.45))
+                        .focus_ring(false)
+                        .menu_width(px(208.0))
+                        .menu_max_h(px(256.0))
+                        .icon(gpui_kit::component::Icon::default().data(CHEVRON_DOWN))
+                        .accessibility_label("新窗格的默认 Shell"),
+                ),
+            )
+    }
+
     pub(super) fn apply_shell_choice(&mut self, choice: ShellChoice, cx: &mut Context<Self>) {
         choice.apply(&mut self.config);
         self.command = build_command(
@@ -283,21 +345,6 @@ impl Workspace {
                     ))
             }
             SettingsTab::Terminal => {
-                let actual_shell = pty_command::display_name(&self.command);
-                let shell_status = if pty_command::is_available(self.config.shell) {
-                    format!("实际启动：{actual_shell}")
-                } else {
-                    format!(
-                        "所选 shell（{}）不可用，回退到：{actual_shell}",
-                        self.config.shell.as_str()
-                    )
-                };
-                let shell_picker = Select::new(&self.shell_selector)
-                    .id("sh-default-shell")
-                    .w(px(220.0))
-                    .menu_width(px(280.0))
-                    .accessibility_label("新窗格的默认 shell");
-
                 let scrollback_row = div()
                     .flex()
                     .flex_row()
@@ -494,28 +541,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(sgroup("终端", theme))
-                    .child(setting_row(
-                        "默认 shell",
-                        "新建窗格使用所选 shell 或 WSL 实例",
-                        theme,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(5.0))
-                            .child(shell_picker)
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(if pty_command::is_available(self.config.shell) {
-                                        theme.primary
-                                    } else {
-                                        theme.warning
-                                    })
-                                    .child(shell_status),
-                            )
-                            .into_any_element(),
-                    ))
+                    .child(self.render_shell_picker(theme))
                     .child(setting_row(
                         "字号",
                         "只影响网格，不影响界面",
