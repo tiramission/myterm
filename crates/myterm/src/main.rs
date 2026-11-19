@@ -1244,8 +1244,7 @@ impl Workspace {
                 let focused = *id == active;
                 let id = *id;
                 let frame = pane.session.frame().clone();
-                // OSC 11 can change a session's backdrop. Use the same color
-                // for the grid, rounded card and the padding between them.
+                let uses_theme_background = frame.background == to_rgb(style.background);
                 let style = GridStyle {
                     background: grid_element::rgb(frame.background),
                     ..style
@@ -1287,8 +1286,12 @@ impl Workspace {
                     .overflow_hidden()
                     .group("pane")
                     .rounded(px(PANE_RADIUS))
-                    .bg(style.background)
-                    .shadow_sm()
+                    // The default surface is the single window gradient.
+                    // Honor a per-session background set by the terminal.
+                    .when(!uses_theme_background, |this| this.bg(style.background))
+                    .when(focused && multi && !zoomed, |this| {
+                        this.child(pane_focus_edge(theme))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |workspace, event: &MouseDownEvent, window, cx| {

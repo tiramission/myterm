@@ -60,10 +60,23 @@ pub enum Accent {
     Amber,
     Sky,
     Violet,
+    Coral,
+    Mint,
+    Indigo,
+    Rose,
 }
 
 impl Accent {
-    pub const ALL: [Self; 4] = [Self::Lime, Self::Amber, Self::Sky, Self::Violet];
+    pub const ALL: [Self; 8] = [
+        Self::Lime,
+        Self::Amber,
+        Self::Coral,
+        Self::Rose,
+        Self::Mint,
+        Self::Sky,
+        Self::Indigo,
+        Self::Violet,
+    ];
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -71,6 +84,10 @@ impl Accent {
             "amber" => Some(Self::Amber),
             "sky" => Some(Self::Sky),
             "violet" => Some(Self::Violet),
+            "coral" => Some(Self::Coral),
+            "mint" => Some(Self::Mint),
+            "indigo" => Some(Self::Indigo),
+            "rose" => Some(Self::Rose),
             _ => None,
         }
     }
@@ -81,6 +98,23 @@ impl Accent {
             Self::Amber => "amber",
             Self::Sky => "sky",
             Self::Violet => "violet",
+            Self::Coral => "coral",
+            Self::Mint => "mint",
+            Self::Indigo => "indigo",
+            Self::Rose => "rose",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lime => "青柠",
+            Self::Amber => "琥珀",
+            Self::Sky => "天蓝",
+            Self::Violet => "紫罗兰",
+            Self::Coral => "珊瑚",
+            Self::Mint => "薄荷",
+            Self::Indigo => "靛蓝",
+            Self::Rose => "玫瑰",
         }
     }
 }

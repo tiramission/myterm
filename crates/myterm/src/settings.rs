@@ -115,6 +115,30 @@ impl SelectItem for ShellChoice {
     fn value(&self) -> &Self::Value {
         self
     }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = match self {
+            // The default marker belongs to the list, where instances are compared.
+            Self::WslInstance { name, .. } => SharedString::from(format!("WSL · {name}")),
+            _ => self.title(),
+        };
+        Some(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.5))
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(px(11.5))
+            .child(self.title())
+    }
 }
 
 impl Workspace {
@@ -160,7 +184,7 @@ impl Workspace {
                     ),
             )
             .child(
-                div().flex_shrink_0().w(px(128.0)).h(px(24.0)).child(
+                div().flex_shrink_0().w(px(148.0)).h(px(24.0)).child(
                     Select::new(&self.shell_selector)
                         .id("sh-default-shell")
                         .small()
@@ -168,10 +192,10 @@ impl Workspace {
                         .h_full()
                         .px(px(8.0))
                         .rounded(px(6.0))
-                        .bg(theme.muted.opacity(0.6))
+                        .bg(theme.transparent)
                         .border_color(theme.border.opacity(0.45))
                         .focus_ring(false)
-                        .menu_width(px(208.0))
+                        .menu_width(px(176.0))
                         .menu_max_h(px(256.0))
                         .icon(gpui_kit::component::Icon::default().data(CHEVRON_DOWN))
                         .accessibility_label("新窗格的默认 Shell"),
@@ -300,31 +324,45 @@ impl Workspace {
                         ),
                     );
 
-                let mut swatches = div().flex().flex_row().items_center().gap(px(8.0));
-                for option in config::Accent::ALL {
-                    let active = self.config.accent == option;
-                    let (ink, _) = palette::accent_ink(option, theme.mode);
-                    swatches = swatches.child(
-                        div()
-                            .id(ElementId::Name(
-                                format!("sh-accent-{}", option.as_str()).into(),
-                            ))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(26.0))
-                            .rounded(px(999.0))
-                            // A swatch is a colour chip, so it keeps a ring:
-                            // it is the only control whose job is to show a
-                            // colour, and the ring is what says which one is
-                            // chosen.
-                            .when(active, |this| this.border_1().border_color(ink))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
-                                workspace.set_accent(option, cx);
-                            }))
-                            .child(div().size(px(16.0)).rounded(px(999.0)).bg(ink)),
-                    );
+                let mut swatches = div().flex().flex_col().gap(px(4.0));
+                for options in config::Accent::ALL.chunks(4) {
+                    let mut row = div().flex().gap(px(4.0));
+                    for &option in options {
+                        let active = self.config.accent == option;
+                        let (ink, _) = palette::accent_ink(option, theme.mode);
+                        row = row.child(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("sh-accent-{}", option.as_str()).into(),
+                                ))
+                                .flex()
+                                .flex_1()
+                                .min_w_0()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(5.0))
+                                .h(px(28.0))
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(theme.transparent)
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .when(active, |this| {
+                                    this.bg(ink.opacity(0.10))
+                                        .border_color(ink.opacity(0.48))
+                                        .text_color(theme.foreground)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                })
+                                .when(!active, |this| this.hover(move |this| this.bg(wash)))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |workspace, _: &ClickEvent, _, cx| {
+                                    workspace.set_accent(option, cx);
+                                }))
+                                .child(div().size(px(10.0)).flex_shrink_0().rounded_full().bg(ink))
+                                .child(div().whitespace_nowrap().child(option.label())),
+                        );
+                    }
+                    swatches = swatches.child(row);
                 }
 
                 div()
@@ -337,12 +375,21 @@ impl Workspace {
                         theme,
                         theme_row.into_any_element(),
                     ))
-                    .child(setting_row(
-                        "强调色",
-                        "只用于「当前」和「有动静」，不用于装饰",
-                        theme,
-                        swatches.into_any_element(),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .py(px(12.0))
+                            .child(div().text_size(px(12.5)).child("强调色"))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(muted)
+                                    .child("影响窗口渐变、选中状态和终端光标"),
+                            )
+                            .child(swatches),
+                    )
             }
             SettingsTab::Terminal => {
                 let scrollback_row = div()
@@ -605,10 +652,7 @@ impl Workspace {
         };
 
         div()
-            .absolute()
-            // Under the bar, not over it: the sheet is a workspace tool, and
-            // covering the window's own controls with it would make closing the
-            // window depend on closing settings first.
+            // The shared window gradient continues behind this column.
             .relative()
             .flex_shrink_0()
             .w(px(436.0))
@@ -616,10 +660,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(theme.title_bar)
-            // The column starts at the bar's own line, so its title sits on the
-            // same row as the workspace's rather than a row above it.
-            .pt(px(0.0))
             // The sheet is a column of the window, not a card over one: laid
             // over the work area it covered the panes' rounded corners and sat
             // on a scrim that swallowed clicks. As a sibling it takes its own

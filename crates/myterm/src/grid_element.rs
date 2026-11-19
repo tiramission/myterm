@@ -221,8 +221,6 @@ impl Element for TerminalGrid {
             );
         }
 
-        window.paint_quad(fill(bounds, style.background));
-
         let origin = bounds.origin;
         let palette = self.frame.palette;
         let default_fg = self.frame.foreground;

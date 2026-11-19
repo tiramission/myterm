@@ -99,6 +99,10 @@ fn accent_hue(accent: Accent) -> f32 {
         Accent::Amber => 42.0,
         Accent::Sky => 200.0,
         Accent::Violet => 268.0,
+        Accent::Coral => 12.0,
+        Accent::Mint => 156.0,
+        Accent::Indigo => 234.0,
+        Accent::Rose => 334.0,
     }
 }
 
@@ -171,7 +175,7 @@ pub fn accent_ink(accent: Accent, mode: gpui_kit::component::ThemeMode) -> (Hsla
     (hex(ink), hex(wash))
 }
 
-/// The four accents, as `(ink, wash)` per mode.
+/// The accents, as `(ink, wash)` per mode.
 ///
 /// The wash is the accent laid on its mode's chrome at low strength, resolved
 /// here rather than multiplied at every use site: a tint that has to be computed
@@ -186,6 +190,14 @@ fn accents(accent: Accent, dark: bool) -> (u32, u32) {
         (Accent::Sky, false) => (0x1f6a8a, 0xdcecf5),
         (Accent::Violet, true) => (0xc9a7f5, 0x262230),
         (Accent::Violet, false) => (0x6b3fa0, 0xefe6f9),
+        (Accent::Coral, true) => (0xf5a08b, 0x32241f),
+        (Accent::Coral, false) => (0xa04330, 0xf9e7e1),
+        (Accent::Mint, true) => (0x8edbb9, 0x1f2c27),
+        (Accent::Mint, false) => (0x236d51, 0xe1f2ea),
+        (Accent::Indigo, true) => (0xa6afff, 0x252739),
+        (Accent::Indigo, false) => (0x474fa4, 0xe7e9fa),
+        (Accent::Rose, true) => (0xf0a6c6, 0x332331),
+        (Accent::Rose, false) => (0x993b66, 0xf8e6ef),
     }
 }
 
@@ -353,7 +365,9 @@ fn recolour(colors: &mut gpui_kit::component::ThemeColor, p: Palette) {
     colors.tab_foreground = p.text_2;
     colors.tab_active_foreground = p.text;
 
-    colors.popover = p.surface;
+    colors.popover = p
+        .surface
+        .blend(p.brand.opacity(if p.dark { 0.06 } else { 0.08 }));
     colors.popover_foreground = p.text;
     // The scrim has to darken what is under it in both modes, so it is a near
     // black rather than the background tone. Using `bg` here made it invisible

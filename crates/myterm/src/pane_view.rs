@@ -1,5 +1,24 @@
 use super::*;
 
+/// A soft edge built from transparent rings, including over transparent panes.
+pub(super) fn pane_focus_edge(theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    let mut edge = div().absolute().inset_0();
+    for (inset, opacity) in [(0.0, 0.08), (1.0, 0.28), (2.0, 0.10)] {
+        edge = edge.child(
+            div()
+                .absolute()
+                .top(px(inset))
+                .right(px(inset))
+                .bottom(px(inset))
+                .left(px(inset))
+                .rounded(px(PANE_RADIUS - inset))
+                .border_1()
+                .border_color(theme.ring.opacity(opacity)),
+        );
+    }
+    edge
+}
+
 /// A small control in a pane header.
 /// The strip at the top of a pane: what it is running, and what can be done to
 /// it.
@@ -18,6 +37,8 @@ pub(super) fn pane_header(
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    let full_name = name.clone();
+    let full_shell = shell.clone();
     div()
         .flex_shrink_0()
         // The row has to take the card's width rather than its own content's.
@@ -31,14 +52,19 @@ pub(super) fn pane_header(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(6.0))
         .pl(px(PANE_TEXT_INSET))
         .pr(px(6.0))
-        .child(icon_data(APP_MARK, 13.0, theme.muted_foreground))
         .child(
             div()
                 .flex_shrink_0()
-                .max_w(px(200.0))
+                .child(icon_data(APP_MARK, 13.0, theme.muted_foreground)),
+        )
+        .child(
+            div()
+                .id(("pane-title", id))
+                .min_w_0()
+                .max_w(px(160.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -53,20 +79,24 @@ pub(super) fn pane_header(
                 } else {
                     theme.muted_foreground
                 })
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(full_name.clone()).build(window, cx)
+                })
                 .child(name),
         )
         .child(
             div()
-                .flex_shrink_0()
-                .px(px(5.0))
-                .h(px(16.0))
-                .flex()
-                .items_center()
-                .rounded(px(4.0))
-                .bg(theme.muted)
-                .text_size(px(9.5))
-                .font_weight(FontWeight::MEDIUM)
+                .id(("pane-shell", id))
+                .min_w_0()
+                .max_w(px(128.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(10.0))
                 .text_color(theme.muted_foreground)
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(full_shell.clone()).build(window, cx)
+                })
                 .child(shell),
         )
         // The ordinal rides with the name rather than on the header's leading
@@ -118,21 +148,12 @@ pub(super) fn pane_header(
             )
         })
         .child(
-            // The pane's own actions, on the pane under the pointer or holding
-            // the keyboard. Four glyphs repeated in every header is the same
-            // command set printed once per pane, and in a split those addresses
-            // were the loudest thing in an otherwise quiet row. Nothing is lost:
-            // each command has a key, and the pane is focused by the same click
-            // that reveals the buttons.
-            //
-            // Hidden, not dimmed. At 0.55 the buttons read as a disabled row the
-            // user could not press; the row is either there or it is not.
+            // Keep the actions at the trailing edge even when labels truncate.
             div()
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
-                // No shared fill, so the buttons need real air between them: at
-                // one pixel four glyphs read as one smear.
                 .gap(px(1.0))
                 .opacity(if focused { 1.0 } else { 0.0 })
                 .when(!focused, |this| {
