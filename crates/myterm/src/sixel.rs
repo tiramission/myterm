@@ -185,8 +185,7 @@ fn is_sixel(input: &[u8]) -> bool {
         if input[index] == b'q' {
             return true;
         }
-        if input[index].is_ascii_digit()
-            || matches!(input[index], b';' | b':' | b'=' | b'?' | b' ')
+        if input[index].is_ascii_digit() || matches!(input[index], b';' | b':' | b'=' | b'?' | b' ')
         {
             index += 1;
             continue;
