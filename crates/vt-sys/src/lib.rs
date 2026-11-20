@@ -404,6 +404,50 @@ pub const GHOSTTY_TERMINAL_OPT_WRITE_PTY: i32 = 2;
 /// Answers XTWINOPS size queries. Without it the terminal silently ignores
 /// them, and a graphics program is left guessing the cell size.
 pub const GHOSTTY_TERMINAL_OPT_SIZE: i32 = 7;
+/// Answers DA1/DA2/DA3 queries with application-provided attributes.
+pub const GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES: i32 = 9;
+
+pub const GHOSTTY_DA_CONFORMANCE_VT220: u16 = 62;
+pub const GHOSTTY_DA_FEATURE_ANSI_COLOR: u16 = 22;
+pub const GHOSTTY_DA_FEATURE_CLIPBOARD: u16 = 52;
+pub const GHOSTTY_DA_FEATURE_SIXEL: u16 = 4;
+pub const GHOSTTY_DA_DEVICE_TYPE_VT220: u16 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyDeviceAttributesPrimary {
+    pub conformance_level: u16,
+    pub features: [u16; 64],
+    pub num_features: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyDeviceAttributesSecondary {
+    pub device_type: u16,
+    pub firmware_version: u16,
+    pub rom_cartridge: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyDeviceAttributesTertiary {
+    pub unit_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GhosttyDeviceAttributes {
+    pub primary: GhosttyDeviceAttributesPrimary,
+    pub secondary: GhosttyDeviceAttributesSecondary,
+    pub tertiary: GhosttyDeviceAttributesTertiary,
+}
+
+pub type GhosttyTerminalDeviceAttributesFn = extern "C" fn(
+    terminal: GhosttyTerminal,
+    userdata: *mut c_void,
+    out_attrs: *mut GhosttyDeviceAttributes,
+) -> bool;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND: i32 = 12;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND: i32 = 13;
 pub const GHOSTTY_TERMINAL_OPT_COLOR_CURSOR: i32 = 14;

@@ -178,6 +178,15 @@ fn write_pty_callback_receives_device_answers() {
         Some(&0x1b),
         "the reply should be an escape sequence"
     );
+
+    assert!(
+        windows(answer.as_slice(), b"4").is_some(),
+        "the primary attributes should advertise sixel support"
+    );
+}
+
+fn windows(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[test]

@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::sixel::SixelImages;
 use pty::{Command, Pty};
 use vt::{Cursor, Image, ImagePlacement, RenderState, Rgb, Row, Scrollbar, Terminal};
 
@@ -178,6 +179,7 @@ pub struct Session {
     /// Bytes the parser wants to send back to the program. Shared with the
     /// write-pty closure, which the parser calls while `feed` is running.
     pending_write: Arc<Mutex<Vec<u8>>>,
+    sixel: SixelImages,
     /// When the program last wrote anything. What the sidebar shows as
     /// "working" is simply output that arrived a moment ago.
     last_output: Instant,
@@ -241,6 +243,7 @@ impl Session {
             size: (cols, rows),
             exit: None,
             pending_write,
+            sixel: SixelImages::default(),
             last_output: Instant::now(),
             image_pixels: HashMap::new(),
             rows_apart: 0,
@@ -262,6 +265,7 @@ impl Session {
             // pushed down by rows that no longer exist.
             if clears_screen(&bytes) {
                 self.rows_apart = 0;
+                self.sixel.clear();
                 // The pictures may outlive an erase; they must not be counted a
                 // second time when they show up again.
                 for image in &self.frame.images {
@@ -274,7 +278,8 @@ impl Session {
             // the terminal past the console; the bytes arriving now may write
             // absolute rows that were measured against that console.
             let rows = self.rows_apart;
-            self.term.feed(&align_rows(&bytes, rows));
+            let bytes = self.sixel.feed(&align_rows(&bytes, rows));
+            self.term.feed(&bytes);
             self.last_output = Instant::now();
             changed = true;
         }
@@ -341,6 +346,19 @@ impl Session {
     fn collect_images(&mut self) -> Vec<FrameImage> {
         let placements = self.state.images();
         let mut images = Vec::with_capacity(placements.len());
+
+        if let Some(frame) = self.sixel.newest_frame() {
+            let cursor = self.term.raw_cursor();
+            if let Some(placement) = self.sixel.placement(frame, cursor.0, cursor.1) {
+                let image_id = placement.image_id;
+                if let Some(image) = self.sixel.image(image_id) {
+                    let image = Arc::new(image);
+                    self.image_pixels
+                        .insert(image_id, (placement.generation, Arc::clone(&image)));
+                    images.push(FrameImage { placement, image });
+                }
+            }
+        }
 
         for placement in placements {
             let cached = self

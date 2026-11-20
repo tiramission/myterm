@@ -270,6 +270,26 @@ struct Hooks {
     size: sys::GhosttySizeReportSize,
 }
 
+extern "C" fn device_attributes_trampoline(
+    _terminal: sys::GhosttyTerminal,
+    _userdata: *mut c_void,
+    out_attrs: *mut sys::GhosttyDeviceAttributes,
+) -> bool {
+    if out_attrs.is_null() {
+        return false;
+    }
+    unsafe {
+        let attributes = &mut *out_attrs;
+        attributes.primary.conformance_level = sys::GHOSTTY_DA_CONFORMANCE_VT220;
+        attributes.primary.features[0] = sys::GHOSTTY_DA_FEATURE_ANSI_COLOR;
+        attributes.primary.features[1] = sys::GHOSTTY_DA_FEATURE_SIXEL;
+        attributes.primary.features[2] = sys::GHOSTTY_DA_FEATURE_CLIPBOARD;
+        attributes.primary.num_features = 3;
+        attributes.secondary.device_type = sys::GHOSTTY_DA_DEVICE_TYPE_VT220;
+    }
+    true
+}
+
 impl Terminal {
     /// Creates a terminal that reports its answers through `write_pty`.
     pub fn new(cols: u16, rows: u16, write_pty: Option<WritePty>) -> Result<Self> {
@@ -342,6 +362,11 @@ impl Terminal {
                 self.raw,
                 sys::GHOSTTY_TERMINAL_OPT_SIZE,
                 size_trampoline as *const c_void,
+            ))?;
+            check(sys::ghostty_terminal_set(
+                self.raw,
+                sys::GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
+                device_attributes_trampoline as *const c_void,
             ))?;
         }
 
@@ -686,6 +711,18 @@ impl Terminal {
 
     pub fn raw(&self) -> sys::GhosttyTerminal {
         self.raw
+    }
+
+    pub fn raw_cursor(&self) -> (u16, u16) {
+        let mut state = match RenderState::new() {
+            Ok(state) => state,
+            Err(_) => return (0, 0),
+        };
+        if state.update(self.raw).is_err() {
+            return (0, 0);
+        }
+        let cursor = state.cursor();
+        (cursor.x, cursor.y)
     }
 
     /// Caps how many lines are kept above the screen.

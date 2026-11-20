@@ -215,6 +215,10 @@ PTY 没有事件通知，所以用一个 16ms 的定时器轮询。轮询只在�
 ANSI 16 色和默认前景/背景通过 `ghostty_terminal_set` 注入解析器，而不是只在绘制时替换。这样跑
 `curl` 或 `ls --color` 时，程序查询颜色得到的值和屏幕上的值一致。
 
+Sixel DCS 数据在进入 libghostty-vt 之前由 `crates/myterm/src/sixel.rs` 提取并解码。结果以 RGBA
+图片加入现有渲染路径，按照光标所在单元格放置，并随窗格边界裁剪。Kitty 图形仍由 libghostty-vt 管理。
+vt 层在 DA1 查询中声明 Sixel 能力，让图形程序可以据此选择协议。
+
 界面颜色由 `crates/myterm/src/palette.rs` 统一定义。浅色与深色主题各自提供文字、表面和状态颜色。
 整窗渐变使用当前强调色的色相，连续延伸到标题栏、侧栏、设置栏和默认终端窗格。
 终端程序显式指定窗格或字符格的底色时，会显示程序指定的颜色。

@@ -5,6 +5,11 @@
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-11-20
+
+- 开始支持 Sixel 图形：在 VT 流中识别 Sixel DCS 序列，解码为 RGBA，并接入现有终端图片层与窗格裁剪。
+- 终端在 DA1 中声明 Sixel 能力，图形程序可以据此选择 Sixel 输出。
+
 ## [0.7.1] - 2026-11-19
 
 - 新增珊瑚、玫瑰、薄荷和靛蓝强调色。外观设置采用两行带名称的色板，README 和设计说明记录了配色及配置键。

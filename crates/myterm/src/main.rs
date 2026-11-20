@@ -20,6 +20,7 @@ mod palette;
 mod pane_view;
 mod pty_command;
 mod settings;
+mod sixel;
 mod terminal;
 mod ui_sidebar;
 mod update;
@@ -1245,10 +1246,8 @@ impl Workspace {
                 let id = *id;
                 let frame = pane.session.frame().clone();
                 let uses_theme_background = frame.background == to_rgb(style.background);
-                let style = GridStyle {
-                    background: grid_element::rgb(frame.background),
-                    ..style
-                };
+                let mut grid_style = style;
+                grid_style.background = grid_element::rgb(frame.background);
                 let dims = pane.dims.clone();
                 let bounds_cell = pane.bounds.clone();
                 let exit = pane.session.exit_code();
@@ -1355,7 +1354,7 @@ impl Workspace {
                         .child(TerminalGrid::new(
                             ElementId::Name(format!("grid-{id}").into()),
                             frame,
-                            style,
+                            grid_style,
                             focused,
                             dims,
                             bounds_cell,
